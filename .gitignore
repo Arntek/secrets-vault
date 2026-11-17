@@ -5,3 +5,16 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Local-only
+.claude/settings.local.json
+.DS_Store
+
+# Build outputs and spike test data (never commit vault data)
+/dist/
+/bin/
+spikes/**/build/
+spikes/**/testvault/
+
+# Private planning docs (personal paths, vault names) - local only
+docs/private/
