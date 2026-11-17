@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "the_secrets_vault",
+  "project_id": "75ff5fc9-7f35-4fc5-b62e-8d4ef7a04d97"
+}
