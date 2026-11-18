@@ -322,7 +322,7 @@ func (a *app) explainGuard(v *vaultRef, g *members.FolderReport) {
 	case g.NewerCopy:
 		a.printf("A newer verified vault.json is real evidence and cannot be set aside. Let the folder finish syncing, then run: %s trust %s\n", a.prog, v.name)
 	default:
-		a.printf("Was anyone removed from this vault recently, or did anyone change its key? Ask another member for the vault's current state code ('%s status' on their machine). A folder that someone restored from an old copy is behind that code, and then these items may be real.\n", a.prog)
+		a.printf("Was anyone removed from this vault recently, or did anyone change its key? Ask another member you know is current (for example whoever last removed or added someone, not someone who might have been removed) for the vault's current state code ('%s status' on their machine). A folder that someone restored from an old copy is behind that code, and then these items may be real.\n", a.prog)
 		a.printf("If the folder matches the code and the items are junk, set them aside (moved to quarantine/, never deleted): %s doctor %s --set-aside-unknown --expect CODE\n", a.prog, v.name)
 	}
 }
