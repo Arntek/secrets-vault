@@ -1,0 +1,35 @@
+{
+  "name": "secrets-vault",
+  "version": "0.0.0",
+  "description": "Command-line secrets manager: encrypted vaults in folders you choose, unlocked by passphrase (and Touch ID on a Mac).",
+  "license": "MIT",
+  "author": "Arntek",
+  "homepage": "https://github.com/Arntek/secrets-vault#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Arntek/secrets-vault.git",
+    "directory": "packaging/npm"
+  },
+  "bugs": "https://github.com/Arntek/secrets-vault/issues",
+  "bin": {
+    "secrets-vault": "bin/secrets-vault.js",
+    "sv": "bin/sv.js",
+    "vault": "bin/vault.js"
+  },
+  "scripts": {
+    "postinstall": "node lib/install.js",
+    "test": "node --test test/install.test.js test/launch.test.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": ["darwin", "linux", "win32"],
+  "cpu": ["x64", "arm64"],
+  "keywords": ["secrets", "vault", "cli", "api-keys", "touch-id"]
+}

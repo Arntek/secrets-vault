@@ -51,7 +51,7 @@ TAGFLAG := $(if $(strip $(TAGS)),-tags '$(strip $(TAGS))')
 TOOLBIN := $(shell $(GO) env GOPATH)/bin
 tool = $(or $(shell command -v $(1) 2>/dev/null),$(TOOLBIN)/$(1))
 
-.PHONY: all build snapshot cross touchid-lib touchid-manual test test-short lint fmt fmt-check vet staticcheck gosec vulncheck gitleaks actionlint fuzz tools clean
+.PHONY: all build snapshot cross test-packaging touchid-lib touchid-manual test test-short lint fmt fmt-check vet staticcheck gosec vulncheck gitleaks actionlint fuzz tools clean
 
 all: lint test build
 
@@ -64,6 +64,12 @@ test: $(TOUCHID_DEPS)
 test-short: $(TOUCHID_DEPS)
 	$(GO) test $(TAGFLAG) -short ./...
 
+# npm installer and the Python / Node script helpers (no network).
+test-packaging:
+	cd packaging/npm && npm test
+	cd helpers/node && npm test
+	python3 -I -m unittest discover -s helpers/python -p "test_*.py"
+
 # Local dry run of the release build (no upload). macOS only; needs goreleaser.
 snapshot:
 	@set -e; for kv in $$(./scripts/swift-env.sh); do export "$$kv"; done; \
@@ -73,6 +79,8 @@ snapshot:
 cross:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -o /dev/null ./...
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -o /dev/null ./...
+	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 $(GO) build -o /dev/null ./...
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) vet ./...
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -o /dev/null ./...
 
 touchid-lib: $(TOUCHID_LIB)

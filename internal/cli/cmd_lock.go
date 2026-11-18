@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/Arntek/secrets-vault/internal/agent"
@@ -91,6 +92,10 @@ func cmdLock(a *app, p *parsed) error {
 		a.record("", "", audit.ActionLock)
 		if a.asJSON {
 			return a.printJSON(map[string]any{"locked": "all"})
+		}
+		if cl == nil && runtime.GOOS == "windows" {
+			a.printf("Nothing to lock: on Windows no vault stays unlocked between commands.\n")
+			return nil
 		}
 		a.printf("Locked every vault.\n")
 		return nil
