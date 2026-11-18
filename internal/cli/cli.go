@@ -55,6 +55,8 @@ var (
 	fJSON    = flagSpec{name: "json"}
 	fVault   = flagSpec{name: "vault", value: true}
 	fPassStd = flagSpec{name: "passphrase-stdin"}
+	fExpect  = flagSpec{name: "expect", value: true}
+	fSignFP  = flagSpec{name: "signer-fingerprint", value: true}
 	fYes     = flagSpec{name: "yes", short: "y"}
 )
 
@@ -101,15 +103,15 @@ var commands = []command{
 
 	{name: "unlock", group: "Locking", usage: "unlock [VAULT] [--for DURATION]",
 		summary: "Unlock ahead of time (default vault if none is named).",
-		flags:   []flagSpec{{name: "for", value: true}, {name: "accept-key-change"}}, run: cmdUnlock},
+		flags:   []flagSpec{{name: "for", value: true}}, run: cmdUnlock},
 	{name: "lock", group: "Locking", usage: "lock [VAULT | --all]",
 		summary: "Forget the key now.", flags: []flagSpec{{name: "all"}}, run: cmdLock},
 	{name: "status", group: "Locking", usage: "status",
-		summary: "Each vault, locked or unlocked, time left, pending join requests.", run: cmdStatus},
+		summary: "Each vault, locked or unlocked, time left, state code, pending join requests.", run: cmdStatus},
 
-	{name: "init", group: "Managing vaults", usage: "init NAME --path DIR [--desc TEXT]",
-		summary: "Create a new vault in a folder you choose.",
-		flags:   []flagSpec{{name: "path", value: true}, {name: "desc", value: true}, {name: "force"}, {name: "touchid"}, {name: "no-touchid"}}, run: cmdInit},
+	{name: "init", group: "Managing vaults", usage: "init NAME --path DIR [--desc TEXT] [--as NAME]",
+		summary: "Create a new vault in a folder you choose (and your identity, the first time).",
+		flags:   []flagSpec{{name: "path", value: true}, {name: "desc", value: true}, {name: "force"}, {name: "touchid"}, {name: "no-touchid"}, {name: "as", value: true}, {name: "no-passphrase"}}, run: cmdInit},
 	{name: "attach", group: "Managing vaults", usage: "attach NAME DIR",
 		summary: "Register a vault that already exists; files a join request if you are not a member.",
 		flags:   []flagSpec{{name: "as", value: true}, {name: "desc", value: true}, {name: "no-request"}}, run: cmdAttach},
@@ -117,15 +119,23 @@ var commands = []command{
 		summary: "Remove from this Mac's registry. Files are untouched.", run: cmdDetach},
 	{name: "vaults", group: "Managing vaults", usage: "vaults",
 		summary: "List registered vaults, paths and key counts.", run: cmdVaults},
-	{name: "passwd", group: "Managing vaults", usage: "passwd VAULT",
-		summary: "Change a vault's passphrase.", run: cmdPasswd},
-	{name: "touchid", group: "Managing vaults", usage: "touchid on|off|list [VAULT]",
-		summary: "Turn Touch ID unlocking on or off for a vault on this Mac; list the Macs that can unlock it.",
+	{name: "passwd", group: "Managing vaults", usage: "passwd VAULT [--no-rotate]",
+		summary: "Set a new vault passphrase and replace the vault key.",
+		flags:   []flagSpec{{name: "no-rotate"}}, run: cmdPasswd},
+	{name: "touchid", group: "Managing vaults", usage: "touchid on|off|status",
+		summary: "Turn Touch ID on or off for your identity on this Mac (it opens every vault you're a member of).",
 		run:     cmdTouchID},
+	{name: "trust", group: "Managing vaults", usage: "trust VAULT [--expect CODE] [--accept-rollback]",
+		summary: "Check a vault's state against a code from another member, or repair a change that raced another.",
+		flags:   []flagSpec{{name: "accept-rollback"}}, run: cmdTrust},
+	{name: "rebuild", group: "Managing vaults", usage: "rebuild VAULT [--yes]",
+		summary: "Recreate a vault under your identity (lost identity, or a full history); members join again.",
+		flags:   []flagSpec{fYes}, run: cmdRebuild},
 
-	{name: "member", group: "Sharing", usage: "member approve|rm|list|requests VAULT [NAME]",
-		summary: "Per-person keys: approve a join request, remove a member, list members or requests.",
-		flags:   []flagSpec{fYes, {name: "fingerprint", value: true}}, run: cmdMember},
+	{name: "member", group: "Sharing", usage: "member approve|rm|list|requests|log VAULT [NAME]",
+		summary: "Per-person keys: approve a join request, remove a member, list members, requests or the signed history.",
+		flags: []flagSpec{fYes, {name: "fingerprint", value: true}, {name: "readd"}, {name: "keep-passphrase"},
+			{name: "new-passphrase"}, {name: "new-passphrase-stdin"}, {name: "folder-access-removed"}}, run: cmdMember},
 	{name: "identity", group: "Sharing", usage: "identity export|import FILE",
 		summary: "Move your identity to another Mac (passphrase-protected file).", run: cmdIdentity},
 
@@ -201,13 +211,15 @@ func (a *app) dispatch(c *command, args []string) int {
 			return ExitOK
 		}
 	}
-	specs := append([]flagSpec{fJSON, fPassStd}, c.flags...)
+	specs := append([]flagSpec{fJSON, fPassStd, fExpect, fSignFP}, c.flags...)
 	p, err := parseArgs(args, specs)
 	if err != nil {
 		return a.fail(err, c)
 	}
 	a.asJSON = p.has("json")
 	a.passStdin = p.has("passphrase-stdin")
+	a.expectCode = p.str("expect")
+	a.signerFP = p.str("signer-fingerprint")
 	if err := c.run(a, p); err != nil {
 		return a.fail(err, c)
 	}

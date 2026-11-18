@@ -41,11 +41,12 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 		}
 	}
 
-	ok(owner, passA+"\n", "init", "one", "--path", dirA, "--passphrase-stdin", "--desc", "first vault")
-	ok(owner, passB+"\n", "init", "two", "--path", dirB, "--passphrase-stdin")
-	run(owner, wrong+"\n", "unlock", "one", "--passphrase-stdin") // wrong passphrase
-	ok(owner, passA+"\n", "unlock", "one", "--passphrase-stdin")
-	ok(owner, passB+"\n", "unlock", "two", "--passphrase-stdin")
+	ok(owner, personal+"\n"+passA+"\n", "init", "one", "--path", dirA, "--passphrase-stdin", "--desc", "first vault", "--as", "owner")
+	ok(owner, personal+"\n"+passB+"\n", "init", "two", "--path", dirB, "--passphrase-stdin")
+	ok(owner, "", "lock", "--all")
+	run(owner, wrong+"\n"+wrong+"\n", "unlock", "one", "--passphrase-stdin") // wrong passphrases
+	ok(owner, wrong+"\n"+passA+"\n", "unlock", "one", "--passphrase-stdin")   // identity fails, vault passphrase works
+	ok(owner, personal+"\n", "unlock", "two", "--passphrase-stdin")
 	ok(owner, vals[0], "set", "EXAMPLE_KEY_ONE", "--desc", "first", "--vault", "one")
 	ok(owner, vals[1], "set", "EXAMPLE_KEY_TWO", "--vault", "one")
 	ok(owner, vals[2], "set", "EXAMPLE_KEY_THREE", "--vault", "two")
@@ -55,6 +56,7 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 	run(owner, "", "get", pasted) // pasted where a name goes
 	run(owner, "", "list", "--"+pasted)
 	run(owner, "", "get", "EXAMPLE_KEY_ONE", "extra", pasted)
+	run(owner, "", "trust", "one", "--expect", pasted)
 	ok(owner, "", "list")
 	ok(owner, "", "list", "--json")
 	ok(owner, "", "search", "example")
@@ -65,6 +67,8 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 	ok(owner, "", "vaults")
 	ok(owner, "", "status")
 	ok(owner, "", "status", "--json")
+	ok(owner, "", "trust", "one")
+	ok(owner, "", "member", "log", "one")
 	ok(owner, "", "mv", "EXAMPLE_KEY_TWO", "--to", "two")
 	ok(owner, "", "rename", "EXAMPLE_KEY_TWO", "EXAMPLE_KEY_RENAMED")
 	ok(owner, "", "copy", "EXAMPLE_KEY_ONE")
@@ -72,9 +76,9 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 	ok(owner, "", "get", "EXAMPLE_KEY_ONE")
 	ok(owner, "", "get", "EXAMPLE_KEY_ONE", "--json")
 	owner.term.stdoutTTY = false
-	ok(owner, "", "touchid", "on", "one")
-	ok(owner, "", "touchid", "list")
-	ok(owner, "", "touchid", "off", "one")
+	ok(owner, personal+"\n", "touchid", "on", "--passphrase-stdin")
+	ok(owner, "", "touchid", "status")
+	ok(owner, "", "touchid", "off")
 	ok(owner, "", "config", "set", "default-ttl", "2h")
 	ok(owner, "", "config", "list")
 	ok(owner, "", "alias", "add", "kv")
@@ -83,14 +87,14 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 	ok(owner, "", "rm", "EXAMPLE_KEY_RENAMED", "--yes")
 	ok(owner, "", "run", "-k", "EXAMPLE_KEY_ONE", "--", "true")
 	run(owner, "", "run", "-k", "EXAMPLE_KEY_ONE", "--", "/no/such/program", pasted)
-	ok(owner, passA+"\n"+passB+"\n", "passwd", "one", "--passphrase-stdin")
+	ok(owner, personal+"\n"+passB+"\n", "passwd", "one", "--passphrase-stdin")
 	ok(owner, "", "lock", "--all")
 	run(owner, "", "get", "EXAMPLE_KEY_ONE")
 	run(owner, "", "run", "-k", "EXAMPLE_KEY_ONE", "--", "true")
-	ok(owner, passB+"\n", "unlock", "one", "--passphrase-stdin")
+	ok(owner, personal+"\n", "unlock", "one", "--passphrase-stdin")
 
 	// Members and identities.
-	ok(dan, personal+"\n", "attach", "one", dirA, "--as", "dan", "--passphrase-stdin")
+	ok(dan, danPass+"\n", "attach", "one", dirA, "--as", "dan", "--passphrase-stdin")
 	ok(owner, "", "member", "requests", "one")
 	ok(owner, "", "member", "requests", "one", "--json")
 	reqs := decodeJSON[map[string]any](t, func() string {
@@ -99,15 +103,29 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 		return out.String()
 	}())
 	fp := reqs["requests"].([]any)[0].(map[string]any)["fingerprint"].(string)
-	ok(owner, "", "member", "approve", "one", "dan", "--fingerprint", fp)
+	run(owner, personal+"\n", "member", "approve", "one", "dan", "--fingerprint", pasted, "--passphrase-stdin")
+	ok(owner, personal+"\n", "member", "approve", "one", "dan", "--fingerprint", fp, "--passphrase-stdin")
 	ok(owner, "", "member", "list", "one")
-	ok(dan, personal+"\n", "unlock", "one", "--passphrase-stdin")
+	ml := decodeJSON[map[string]any](t, func() string {
+		var out, errb bufferPair
+		owner.runTo(&out, &errb, "", "member", "list", "one", "--json")
+		return out.String()
+	}())
+	var ownerFP string
+	for _, m := range ml["members"].([]any) {
+		if m.(map[string]any)["name"] == "owner" {
+			ownerFP = m.(map[string]any)["fingerprint"].(string)
+		}
+	}
+	run(dan, danPass+"\n", "unlock", "one", "--passphrase-stdin", "--signer-fingerprint", pasted)
+	ok(dan, danPass+"\n", "unlock", "one", "--passphrase-stdin", "--signer-fingerprint", ownerFP)
 	ok(dan, "", "status")
 	file := filepath.Join(dan.home, "id.export")
-	ok(dan, personal+"\n"+transfer+"\n", "identity", "export", file, "--passphrase-stdin")
+	ok(dan, danPass+"\n"+transfer+"\n", "identity", "export", file, "--passphrase-stdin")
 	mac2 := newEnvAt(t, filepath.Join(h.HomeDir, "mac2"))
 	ok(mac2, transfer+"\n"+danPass+"\n", "identity", "import", file, "--passphrase-stdin")
-	ok(owner, passB+"\n", "member", "rm", "one", "dan", "--yes", "--passphrase-stdin")
+	ok(owner, personal+"\n", "member", "rm", "one", "dan", "--yes", "--folder-access-removed", "--passphrase-stdin")
+	ok(owner, personal+"\n"+passB+"\n", "rebuild", "two", "--yes", "--passphrase-stdin")
 
 	// Out-of-band: legitimate outputs of values, not scanned.
 	owner.runIn("", "get", "EXAMPLE_KEY_ONE")

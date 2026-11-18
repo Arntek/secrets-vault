@@ -1,16 +1,58 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Arntek/secrets-vault/internal/format"
 )
 
 const personalPass = "personal passphrase 1"
 
+// myFingerprint returns e's identity fingerprint (from member list).
+func (e *testEnv) fingerprintOf(vault, name string) string {
+	e.t.Helper()
+	l := decodeJSON[map[string]any](e.t, e.mustRun("member", "list", vault, "--json").out)
+	for _, m := range l["members"].([]any) {
+		mm := m.(map[string]any)
+		if mm["name"] == name {
+			return mm["fingerprint"].(string)
+		}
+	}
+	e.t.Fatalf("%s is not a member of %s", name, vault)
+	return ""
+}
+
+func (e *testEnv) requestFingerprint(vault, name string) string {
+	e.t.Helper()
+	j := decodeJSON[map[string]any](e.t, e.mustRun("member", "requests", vault, "--json").out)
+	for _, r := range j["requests"].([]any) {
+		rr := r.(map[string]any)
+		if rr["name"] == name {
+			return rr["fingerprint"].(string)
+		}
+	}
+	e.t.Fatalf("no request from %s", name)
+	return ""
+}
+
+// join has p attach to owner's vault and owner approve them; p then
+// confirms the owner's fingerprint on first use.
+func join(t *testing.T, owner, p *testEnv, vault, dir, name string) {
+	t.Helper()
+	p.mustRunIn(personalPass+"\n", "attach", vault, dir, "--as", name, "--passphrase-stdin")
+	fp := owner.requestFingerprint(vault, name)
+	owner.mustRunIn(testPass+"\n", "member", "approve", vault, name, "--fingerprint", fp, "--passphrase-stdin")
+	ownerFP := owner.fingerprintOf(vault, testUser)
+	p.mustRunIn(personalPass+"\n", "unlock", vault, "--passphrase-stdin", "--signer-fingerprint", ownerFP)
+}
+
 // TestMembersFlowThroughCLI: two people, two identities, one shared folder:
-// attach -> join request -> approve -> read, then removal with rotation.
+// attach -> join request -> approve (typed fingerprint) -> first use (typed
+// fingerprint of the approver) -> read, then removal with rotation.
 func TestMembersFlowThroughCLI(t *testing.T) {
 	skipWindows(t)
 	owner := newEnv(t)
@@ -19,109 +61,376 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 	owner.unlock("team")
 	owner.set("EXAMPLE_TEAM_KEY", "", "team-secret-value")
 
-	// Dan attaches: first run creates his identity and files a request.
+	// Dan attaches: first run creates his identity and files a signed request.
 	r := dan.runIn(personalPass+"\n", "attach", "team", vdir, "--as", "dan", "--passphrase-stdin")
 	expectCode(t, r, 0)
 	if !strings.Contains(r.out, "not a member") || !strings.Contains(r.out, "Ask a member to approve fingerprint") {
 		t.Fatalf("attach output: %s", r)
 	}
-	// Without a terminal and without --as, a first-time attach explains itself.
 	stranger := newEnv(t)
 	expectCode(t, stranger.run("attach", "team", vdir), ExitError)
-
-	// Dan cannot read yet.
 	expectCode(t, dan.runIn(personalPass+"\n", "get", "EXAMPLE_TEAM_KEY", "--passphrase-stdin"), ExitError)
 
-	// The owner sees the request (also in status).
-	req := decodeJSON[map[string]any](t, owner.mustRun("member", "requests", "team", "--json").out)
-	reqs := req["requests"].([]any)
-	if len(reqs) != 1 {
-		t.Fatalf("requests: %v", req)
+	fp := owner.requestFingerprint("team", "dan")
+	if !strings.Contains(owner.mustRun("status").out, "1 join request") {
+		t.Fatal("status should show the pending request")
 	}
-	fp := reqs[0].(map[string]any)["fingerprint"].(string)
-	if fp == "" || reqs[0].(map[string]any)["name"] != "dan" {
-		t.Fatalf("request: %v", reqs[0])
+	// G4: the fingerprint is typed, never shown for a y/N.
+	if strings.Contains(owner.mustRun("member", "requests", "team").out, fp) {
+		t.Fatal("requests table must not show the fingerprint to compare against")
 	}
-	if !strings.Contains(owner.mustRun("status").out, "1 join request") || !strings.Contains(owner.mustRun("status").out, fp) {
-		t.Fatal("status should show the pending request and its fingerprint")
-	}
-	if !strings.Contains(owner.mustRun("member", "requests", "team").out, fp) {
-		t.Fatal("requests table should show the fingerprint")
-	}
-
-	// Approval needs a human check: nothing happens without it.
-	expectCode(t, owner.run("member", "approve", "team", "dan"), ExitError)                                     // no terminal
-	expectCode(t, owner.run("member", "approve", "team", "dan", "--fingerprint", "WRONG-WORD-0000"), ExitError) // wrong fingerprint
+	expectCode(t, owner.run("member", "approve", "team", "dan"), ExitError) // no terminal
+	expectCode(t, owner.runIn(testPass+"\n", "member", "approve", "team", "dan", "--fingerprint", "WRONG-WORD-ZERO-0000", "--passphrase-stdin"), ExitError)
 	owner.term.stdinTTY = true
-	r = owner.runIn("n\n", "member", "approve", "team", "dan")
+	owner.term.queue(testPass)
+	r = owner.runIn("ACID-ACID-ACID-0000\n", "member", "approve", "team", "dan")
 	expectCode(t, r, ExitError)
-	if !strings.Contains(r.out, fp) {
-		t.Fatalf("approve should show the fingerprint: %s", r)
-	}
-	if l := decodeJSON[map[string]any](t, owner.mustRun("member", "list", "team", "--json").out); len(l["members"].([]any)) != 0 {
+	if l := decodeJSON[map[string]any](t, owner.mustRun("member", "list", "team", "--json").out); len(l["members"].([]any)) != 1 {
 		t.Fatalf("nothing should have been approved: %v", l)
 	}
-	owner.mustRunIn("y\n", "member", "approve", "team", "dan")
+	owner.term.queue(testPass)
+	r = owner.mustRunIn(strings.ToLower(strings.ReplaceAll(fp, "-", " "))+"\n", "member", "approve", "team", "dan")
 	owner.term.stdinTTY = false
-	expectCode(t, owner.run("member", "approve", "team", "dan", "--fingerprint", fp), ExitError) // request is gone now
-
-	ml := owner.mustRun("member", "list", "team").out
-	if !strings.Contains(ml, "dan") || !strings.Contains(ml, fp) {
-		t.Fatalf("member list: %s", ml)
+	ownerFP := owner.fingerprintOf("team", testUser)
+	if !strings.Contains(r.out, ownerFP) {
+		t.Fatalf("approve should give the approver's fingerprint to read out: %s", r)
 	}
 
-	// Dan reads with his own key: no vault passphrase involved.
+	// Dan's first use: he must type the approver's fingerprint.
 	r = dan.runIn(personalPass+"\n", "get", "EXAMPLE_TEAM_KEY", "--passphrase-stdin")
-	expectCode(t, r, 0)
-	if r.out != "team-secret-value\n" {
-		t.Fatalf("dan's read: %q", r.out)
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "added to 'team' by "+testUser) {
+		t.Fatalf("first use must ask who added him: %s", r)
 	}
-	// Unlocked for the window: no more passphrase.
+	expectCode(t, dan.runIn(personalPass+"\n", "get", "EXAMPLE_TEAM_KEY", "--passphrase-stdin", "--signer-fingerprint", fp), ExitError) // his own, not the approver's
+	r = dan.runIn(personalPass+"\n", "get", "EXAMPLE_TEAM_KEY", "--passphrase-stdin", "--signer-fingerprint", ownerFP)
+	if r.code != 0 || r.out != "team-secret-value\n" {
+		t.Fatalf("dan's read: %s", r)
+	}
 	if got := dan.mustRun("get", "EXAMPLE_TEAM_KEY").out; got != "team-secret-value\n" {
 		t.Fatalf("%q", got)
 	}
-	// Without a terminal and after locking, Dan is told to unlock.
-	dan.mustRun("lock", "--all")
-	expectCode(t, dan.run("get", "EXAMPLE_TEAM_KEY"), ExitLocked)
-	// He can also write: the owner then reads Dan's key.
-	dan.mustRunIn(personalPass+"\n", "unlock", "team", "--passphrase-stdin")
 	dan.mustRunIn("from-dan", "set", "EXAMPLE_DAN_KEY", "--vault", "team")
 	if got := owner.mustRun("get", "EXAMPLE_DAN_KEY").out; got != "from-dan\n" {
 		t.Fatalf("%q", got)
 	}
-	info := decodeJSON[map[string]any](t, owner.mustRun("info", "EXAMPLE_DAN_KEY", "--json").out)
-	if info["updated_by"] != "dan" {
-		t.Fatalf("updated_by: %v", info)
+	ml := decodeJSON[map[string]any](t, owner.mustRun("member", "list", "team", "--json").out)
+	if len(ml["members"].([]any)) != 2 {
+		t.Fatalf("member list: %v", ml)
+	}
+	logOut := owner.mustRun("member", "log", "team").out
+	if !strings.Contains(logOut, "add-member") || !strings.Contains(logOut, "genesis") {
+		t.Fatalf("member log: %s", logOut)
 	}
 
-	// Removal: confirmation, the vault passphrase to keep recovery, rotation.
-	expectCode(t, owner.runIn(testPass+"\n", "member", "rm", "team", "dan", "--passphrase-stdin"), ExitError) // needs --yes without a terminal
-	expectCode(t, owner.runIn("wrong passphrase!\n", "member", "rm", "team", "dan", "--yes", "--passphrase-stdin"), ExitError)
-	expectCode(t, owner.run("member", "rm", "team", "nobody", "--yes"), ExitError)
-	r = owner.mustRunIn(testPass+"\n", "member", "rm", "team", "dan", "--yes", "--passphrase-stdin")
-	for _, want := range []string{"EXAMPLE_TEAM_KEY", "EXAMPLE_DAN_KEY", "Rotate them"} {
+	// Removal: folder access confirmation, --yes, rotation, passphrase dropped.
+	expectCode(t, owner.run("member", "rm", "team", "dan", "--yes"), ExitError) // no folder-access confirmation
+	expectCode(t, owner.run("member", "rm", "team", "nobody", "--yes", "--folder-access-removed"), ExitError)
+	r = owner.mustRunIn(testPass+"\n", "member", "rm", "team", "dan", "--yes", "--folder-access-removed", "--passphrase-stdin")
+	for _, want := range []string{"EXAMPLE_TEAM_KEY", "EXAMPLE_DAN_KEY", "Rotate them", "no longer opens", "State code", "shared folder"} {
 		if !strings.Contains(r.out, want) {
-			t.Errorf("removal should list exposed keys; missing %q:\n%s", want, r.out)
+			t.Errorf("removal output missing %q:\n%s", want, r.out)
 		}
 	}
-	// The owner keeps working without another prompt, on the new key.
 	if got := owner.mustRun("get", "EXAMPLE_TEAM_KEY").out; got != "team-secret-value\n" {
 		t.Fatalf("%q", got)
 	}
-	if l := decodeJSON[map[string]any](t, owner.mustRun("member", "list", "team", "--json").out); len(l["members"].([]any)) != 0 {
-		t.Fatalf("dan should be gone: %v", l)
+	// ue1.6: the old vault passphrase no longer opens it.
+	owner.mustRun("lock", "--all")
+	vf, _ := format.ReadVaultFile(vdir)
+	if len(vf.UnlockersOf(format.UnlockerPassphrase)) != 0 {
+		t.Fatal("passphrase unlocker kept")
 	}
-	// Dan is locked out: his pinned key no longer matches, and his member
-	// key opens nothing.
+	// Dan is locked out.
 	dan.mustRun("lock", "--all")
 	r = dan.runIn(personalPass+"\n", "get", "EXAMPLE_TEAM_KEY", "--passphrase-stdin")
 	if r.code == 0 {
 		t.Fatalf("a removed member must not read: %s", r)
 	}
 	notContains(t, "removed member's output", r.out+r.err, "team-secret-value")
-	r = dan.runIn(personalPass+"\n", "unlock", "team", "--accept-key-change", "--passphrase-stdin")
+	expectCode(t, dan.run("unlock", "team", "--accept-key-change"), ExitUsage) // that flag is gone
+}
+
+// TestUE11RegressionCLI is the security finding ue1.1 end to end: mallory,
+// who can write the shared folder but is not a member, plants a member
+// unlocker named "bob" for her own key; alice then removes carol. It must
+// now fail for mallory: the vault refuses to open, nothing is re-wrapped.
+func TestUE11RegressionCLI(t *testing.T) {
+	skipWindows(t)
+	alice, bob, carol, mallory := newEnv(t), newEnv(t), newEnv(t), newEnv(t)
+	vdir := alice.initVault("team")
+	alice.unlock("team")
+	alice.set("API_KEY", "", "secret-value")
+	join(t, alice, bob, "team", vdir, "bob")
+	join(t, alice, carol, "team", vdir, "carol")
+
+	// Mallory gets her own age recipient by filing a request, then deletes it.
+	mallory.mustRunIn(personalPass+"\n", "attach", "team", vdir, "--as", "mallory", "--passphrase-stdin")
+	reqData, err := os.ReadFile(filepath.Join(vdir, "requests", "mallory.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rf struct{ Body []byte }
+	_ = json.Unmarshal(reqData, &rf)
+	var body struct {
+		Recipient string `json:"recipient"`
+		SignKey   string `json:"sign_key"`
+	}
+	_ = json.Unmarshal(rf.Body, &body)
+	_ = os.Remove(filepath.Join(vdir, "requests", "mallory.json"))
+
+	// Plant: a member entry and unlocker named "bob" with her keys, the
+	// wrapped key copied from a real entry (as in the PoC).
+	vf, _ := format.ReadVaultFile(vdir)
+	for i := range vf.Members {
+		if vf.Members[i].Name == "bob" {
+			vf.Members = append(vf.Members, format.Member{Name: "bobby", Recipient: body.Recipient, SignKey: body.SignKey, Role: format.RoleMember})
+		}
+	}
+	format.SortMembers(vf.Members)
+	var planted format.Unlocker
+	for _, u := range vf.Unlockers {
+		if u.Label == "bob" {
+			planted = u
+		}
+	}
+	planted.Label, planted.Recipient = "bobby", body.Recipient
+	vf.Unlockers = append(vf.Unlockers, planted)
+	data, _ := json.MarshalIndent(vf, "", "  ")
+	if err := os.WriteFile(filepath.Join(vdir, "vault.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := alice.runIn(testPass+"\n", "member", "rm", "team", "carol", "--yes", "--folder-access-removed", "--passphrase-stdin")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "changed outside secrets-vault") {
+		t.Fatalf("alice should be told vault.json was tampered with: %s", r)
+	}
+	after, _ := os.ReadFile(filepath.Join(vdir, "vault.json"))
+	if string(after) != string(data) {
+		t.Fatal("the tampered vault.json was rewritten")
+	}
+	r = mallory.runIn(personalPass+"\n", "get", "API_KEY", "--passphrase-stdin")
 	if r.code == 0 {
-		t.Fatalf("a removed member must not unlock even if they accept the key change: %s", r)
+		t.Fatalf("mallory read a secret: %s", r)
+	}
+	notContains(t, "mallory's output", r.out+r.err, "secret-value")
+}
+
+// Attacker 4 / ue1.2 through the CLI: a removed member restores the old
+// folder; machines that saw the removal refuse, the state code refuses,
+// and a leftover file blocks writes.
+func TestRollbackRefusedCLI(t *testing.T) {
+	skipWindows(t)
+	alice, bob, carol := newEnv(t), newEnv(t), newEnv(t)
+	vdir := alice.initVault("team")
+	alice.unlock("team")
+	alice.set("API_KEY", "", "old-value")
+	join(t, alice, bob, "team", vdir, "bob")
+	join(t, alice, carol, "team", vdir, "carol")
+	snap := filepath.Join(t.TempDir(), "snap")
+	copyTree(t, vdir, snap)
+
+	r := alice.mustRunIn(testPass+"\n", "member", "rm", "team", "carol", "--yes", "--folder-access-removed", "--passphrase-stdin")
+	code := r.out[strings.LastIndex(r.out, ": ")+2:]
+	code = strings.TrimSpace(code)
+	alice.set("API_KEY", "", "new-value")
+	alice.set("AFTER", "", "x")
+
+	// carol restores vault.json and API_KEY from her snapshot.
+	copyFile(t, filepath.Join(snap, "vault.json"), filepath.Join(vdir, "vault.json"))
+	copyFile(t, filepath.Join(snap, "secrets", "API_KEY.age"), filepath.Join(vdir, "secrets", "API_KEY.age"))
+
+	// alice saw the removal: hard refusal, no prompt, no flag.
+	alice.mustRun("lock", "--all")
+	r = alice.runIn(testPass+"\n", "get", "API_KEY", "--passphrase-stdin")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "older than, or different from") || strings.Contains(r.err, "expected") {
+		t.Fatalf("rollback message: %s", r)
+	}
+	// bob never saw the removal: the folder matches his pin...
+	bob.mustRun("lock", "--all")
+	if got := bob.runIn(personalPass+"\n", "get", "API_KEY", "--passphrase-stdin"); got.code != 0 || got.out != "old-value\n" {
+		t.Fatalf("bob's read: %s", got)
+	}
+	// ...but the write guard sees AFTER under a newer key and refuses.
+	r = bob.runIn("bob-new", "set", "BOB_NEW", "--vault", "team")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "newer state") {
+		t.Fatalf("write guard: %s", r)
+	}
+	if _, err := os.Stat(filepath.Join(vdir, "secrets", "BOB_NEW.age")); err == nil {
+		t.Fatal("bob's write went through")
+	}
+	// And alice's state code makes bob's machine refuse carol's state.
+	r = bob.runIn("", "trust", "team", "--expect", code)
+	expectCode(t, r, ExitError)
+}
+
+// M1 through the CLI: a vault.json for another vault ID is refused.
+func TestSubstitutedVaultRefused(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.mustRun("lock", "--all")
+	e2 := newEnv(t)
+	e2.initVault("evil")
+	evilJSON, err := os.ReadFile(filepath.Join(e2.home, "vaults", "evil", "vault.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.activate()
+	if err := os.WriteFile(filepath.Join(dir, "vault.json"), evilJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "different vault") {
+		t.Fatalf("expected the different-vault refusal: %s", r)
+	}
+}
+
+// M3: a pinned v2 vault replaced by a v1 file is refused, not migrated; a
+// genuine personal v1 vault is upgraded once, with the passphrase.
+func TestMigrationAndDowngrade(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	vf, _ := format.ReadVaultFile(dir)
+	v1 := map[string]any{"version": 1, "id": vf.ID, "name": "main", "key_id": vf.KeyID, "unlockers": vf.UnlockersOf(format.UnlockerPassphrase)}
+	data, _ := json.Marshal(v1)
+	if err := os.WriteFile(filepath.Join(dir, "vault.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.mustRun("lock", "--all")
+	r := e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "downgrade") {
+		t.Fatalf("downgrade: %s", r)
+	}
+
+	// A fresh machine with a genuine v1 vault: upgraded once.
+	f := newEnv(t)
+	fdir := filepath.Join(f.home, "old")
+	if err := os.MkdirAll(filepath.Join(fdir, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fdir, "vault.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fdir, "index.json"), []byte(`{"version":1,"entries":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.mustRun("attach", "old", fdir, "--no-request")
+	// This person's identity (created along with a scratch vault).
+	f.mustRunIn(personalPass+"\n"+personalPass+"\n", "init", "scratch", "--path", filepath.Join(f.home, "scratch"), "--passphrase-stdin", "--as", "fresh")
+	r = f.runIn(testPass+"\n"+personalPass+"\n", "unlock", "old", "--passphrase-stdin")
+	if r.code != 0 || !strings.Contains(r.err, "Upgraded 'old'") {
+		t.Fatalf("migration: %s", r)
+	}
+	got, _ := format.ReadVaultFile(fdir)
+	if got.Version != format.VaultVersion || got.Members[0].Name != "fresh" || got.ID != vf.ID {
+		t.Fatalf("migrated file: %+v", got)
+	}
+	// A shared v1 vault is refused outright.
+	g := newEnv(t)
+	gdir := filepath.Join(g.home, "shared")
+	_ = os.MkdirAll(filepath.Join(gdir, "secrets"), 0o700)
+	shared := map[string]any{"version": 1, "id": vf.ID, "name": "shared", "key_id": vf.KeyID,
+		"unlockers": append(vf.UnlockersOf(format.UnlockerPassphrase), format.Unlocker{Type: format.UnlockerMember, Label: "x", Recipient: vf.Members[0].Recipient, WrappedKey: []byte("w"), Created: vf.Unlockers[0].Created})}
+	sd, _ := json.Marshal(shared)
+	_ = os.WriteFile(filepath.Join(gdir, "vault.json"), sd, 0o600)
+	g.mustRun("attach", "shared", gdir, "--no-request")
+	r = g.runIn(testPass+"\n", "unlock", "shared", "--passphrase-stdin")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "share it again") {
+		t.Fatalf("shared v1: %s", r)
+	}
+}
+
+// ue1.6 through the CLI: passwd rotates; --keep-passphrase is explicit.
+func TestPassphrasePolicyCLI(t *testing.T) {
+	skipWindows(t)
+	alice, dan := newEnv(t), newEnv(t)
+	vdir := alice.initVault("team")
+	alice.unlock("team")
+	alice.set("K", "", "v")
+	before, _ := format.ReadVaultFile(vdir)
+	r := alice.mustRunIn(testPass+"\nnew vault passphrase\n", "passwd", "team", "--passphrase-stdin")
+	if !strings.Contains(r.out, "vault key replaced") {
+		t.Fatalf("passwd: %s", r)
+	}
+	after, _ := format.ReadVaultFile(vdir)
+	if after.KeyID == before.KeyID {
+		t.Fatal("passwd did not rotate")
+	}
+	join(t, alice, dan, "team", vdir, "dan")
+	expectCode(t, alice.runIn(testPass+"\nx\n", "passwd", "team", "--no-rotate", "--passphrase-stdin"), ExitUsage) // shared: must rotate
+	r = alice.mustRunIn(testPass+"\nnew vault passphrase\n", "member", "rm", "team", "dan", "--yes", "--folder-access-removed", "--keep-passphrase", "--passphrase-stdin")
+	if !strings.Contains(r.out, "passphrase was kept") {
+		t.Fatalf("keep: %s", r)
+	}
+	if !strings.Contains(alice.mustRun("member", "log", "team").out, "kept") {
+		t.Fatal("kept policy not in the log")
+	}
+}
+
+// Touch ID protects the identity, so it survives a rotation.
+func TestTouchIDOnIdentity(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	e.touch.avail = true
+	e.term.stdinTTY = true
+	e.term.queue(testPass, testPass, testPass, testPass)
+	e.mustRunIn("\n", "init", "main", "--path", filepath.Join(e.home, "vaults", "main"), "--as", testUser) // Enter: Touch ID yes
+	e.term.stdinTTY = false
+	st := decodeJSON[map[string]any](t, e.mustRun("touchid", "status", "--json").out)
+	if st["touchid"] != true {
+		t.Fatalf("touchid status: %v", st)
+	}
+	e.mustRun("unlock", "main") // Touch ID, no passphrase
+	e.set("K", "", "touch-value")
+	e.mustRunIn("rotated passphrase\n", "passwd", "main", "--passphrase-stdin")
+	e.mustRun("lock", "--all")
+	before := e.touch.unwraps
+	if got := e.mustRun("get", "K").out; got != "touch-value\n" {
+		t.Fatalf("after rotation: %q", got)
+	}
+	if e.touch.unwraps == before {
+		t.Fatal("Touch ID was not used after the rotation")
+	}
+	e.mustRun("touchid", "off")
+	e.mustRun("lock", "--all")
+	expectCode(t, e.run("get", "K"), ExitLocked)
+	e.mustRunIn(testPass+"\n", "touchid", "on", "--passphrase-stdin")
+	e.touch.avail = false
+	expectCode(t, e.run("touchid", "on"), ExitError)
+	expectCode(t, e.run("touchid"), ExitUsage)
+}
+
+func TestTrustAndRebuild(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("K", "", "v")
+	r := e.mustRun("trust", "main", "--json")
+	j := decodeJSON[map[string]any](t, r.out)
+	code := j["state_code"].(string)
+	e.mustRun("trust", "main", "--expect", code)
+	expectCode(t, e.run("trust", "main", "--expect", "main@0 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE"), ExitError)
+	expectCode(t, e.run("trust", "main", "--accept-rollback"), ExitError) // nothing to accept
+	// Rebuild: new vault ID, same secrets, only member is me.
+	oldVF, _ := format.ReadVaultFile(dir)
+	e.mustRunIn(testPass+"\nrebuilt passphrase\n", "rebuild", "main", "--yes", "--passphrase-stdin")
+	newVF, _ := format.ReadVaultFile(dir)
+	if newVF.ID == oldVF.ID || len(newVF.Log) != 1 {
+		t.Fatalf("rebuild: %+v", newVF)
+	}
+	if got := e.mustRun("get", "K").out; got != "v\n" {
+		t.Fatalf("after rebuild: %q", got)
 	}
 }
 
@@ -131,18 +440,16 @@ func TestMemberRemoveAsksOnTerminal(t *testing.T) {
 	dan := newEnv(t)
 	vdir := owner.initVault("team")
 	owner.unlock("team")
-	dan.mustRunIn(personalPass+"\n", "attach", "team", vdir, "--as", "dan", "--passphrase-stdin")
-	owner.mustRun("member", "approve", "team", "dan", "--fingerprint", func() string {
-		j := decodeJSON[map[string]any](t, owner.mustRun("member", "requests", "team", "--json").out)
-		return j["requests"].([]any)[0].(map[string]any)["fingerprint"].(string)
-	}())
+	join(t, owner, dan, "team", vdir, "dan")
 	owner.term.stdinTTY = true
+	expectCode(t, owner.runIn("n\n", "member", "rm", "team", "dan"), ExitError) // folder access not removed
 	owner.term.queue(testPass)
-	expectCode(t, owner.runIn("n\n", "member", "rm", "team", "dan"), ExitError) // declined
-	if l := decodeJSON[map[string]any](t, owner.mustRun("member", "list", "team", "--json").out); len(l["members"].([]any)) != 1 {
+	expectCode(t, owner.runIn("y\nn\n", "member", "rm", "team", "dan"), ExitError) // declined
+	if l := decodeJSON[map[string]any](t, owner.mustRun("member", "list", "team", "--json").out); len(l["members"].([]any)) != 2 {
 		t.Fatalf("declined removal must change nothing: %v", l)
 	}
-	owner.mustRunIn("y\n", "member", "rm", "team", "dan")
+	owner.term.queue(testPass)
+	owner.mustRunIn("y\ny\n", "member", "rm", "team", "dan")
 }
 
 func TestIdentityExportImportAndSecondMac(t *testing.T) {
@@ -153,13 +460,8 @@ func TestIdentityExportImportAndSecondMac(t *testing.T) {
 	vdir := owner.initVault("team")
 	owner.unlock("team")
 	owner.set("EXAMPLE_TEAM_KEY", "", "team-secret-value")
+	join(t, owner, mac1, "team", vdir, "dan")
 
-	mac1.mustRunIn(personalPass+"\n", "attach", "team", vdir, "--as", "dan", "--passphrase-stdin")
-	j := decodeJSON[map[string]any](t, owner.mustRun("member", "requests", "team", "--json").out)
-	fp := j["requests"].([]any)[0].(map[string]any)["fingerprint"].(string)
-	owner.mustRun("member", "approve", "team", "dan", "--fingerprint", fp)
-
-	// Export from the first Mac, import on the second.
 	file := filepath.Join(mac1.home, "identity.export")
 	expectCode(t, mac2.run("identity", "export", file), ExitError) // no identity there yet
 	mac1.mustRunIn(personalPass+"\n"+"transfer passphrase 1\n", "identity", "export", file, "--passphrase-stdin")
@@ -169,17 +471,30 @@ func TestIdentityExportImportAndSecondMac(t *testing.T) {
 	expectCode(t, mac1.runIn(personalPass+"\n"+"transfer passphrase 1\n", "identity", "export", file, "--passphrase-stdin"), ExitError) // never overwrites
 	expectCode(t, mac2.runIn("wrong transfer pass\nnew personal pass 22\n", "identity", "import", file, "--passphrase-stdin"), ExitError)
 	mac2.mustRunIn("transfer passphrase 1\nmac two passphrase 2\n", "identity", "import", file, "--passphrase-stdin")
-	expectCode(t, mac2.runIn("transfer passphrase 1\nmac two passphrase 2\n", "identity", "import", file, "--passphrase-stdin"), ExitError) // already has one
 
-	// Same person: attach is registered straight away (already a member).
-	r := mac2.mustRun("attach", "team", vdir)
+	// Same person on a second Mac: no fingerprint question (dan was added by
+	// the owner, so it IS asked: dan types the owner's fingerprint).
+	ownerFP := owner.fingerprintOf("team", testUser)
+	r := mac2.runIn("", "attach", "team", vdir)
+	expectCode(t, r, ExitError)
+	mac2.mustRun("detach", "team")
+	r = mac2.mustRun("attach", "team", vdir, "--signer-fingerprint", ownerFP)
 	if !strings.Contains(r.out, "Registered 'team' (1 keys)") || strings.Contains(r.out, "not a member") {
 		t.Fatalf("second Mac attach: %s", r)
 	}
 	if got := mac2.runIn("mac two passphrase 2\n", "get", "EXAMPLE_TEAM_KEY", "--passphrase-stdin"); got.out != "team-secret-value\n" {
 		t.Fatalf("second Mac read: %s", got)
 	}
-	// Exported files are not accepted as an identity of their own.
+	// The owner's own second Mac: genesis signed by the owner, so no
+	// fingerprint question, but the head is shown (S2).
+	ofile := filepath.Join(owner.home, "owner.export")
+	owner.mustRunIn(testPass+"\n"+"transfer passphrase 2\n", "identity", "export", ofile, "--passphrase-stdin")
+	omac2 := newEnv(t)
+	omac2.mustRunIn("transfer passphrase 2\nowner mac two pass\n", "identity", "import", ofile, "--passphrase-stdin")
+	r = omac2.mustRun("attach", "team", vdir)
+	if !strings.Contains(r.err, "Trusting vault 'team' at team@") {
+		t.Fatalf("owner second Mac first pin: %s", r)
+	}
 	expectCode(t, mac2.run("identity", "bogus", file), ExitUsage)
 }
 
@@ -190,7 +505,7 @@ func TestAttachFilesPendingRequestOnce(t *testing.T) {
 	vdir := owner.initVault("team")
 	dan.mustRunIn(personalPass+"\n", "attach", "team", vdir, "--as", "dan", "--passphrase-stdin")
 	dan.mustRun("detach", "team")
-	r := dan.mustRun("attach", "team", vdir) // identity exists now; request already pending
+	r := dan.mustRunIn(personalPass+"\n", "attach", "team", vdir, "--passphrase-stdin") // request already pending
 	if !strings.Contains(r.out, "already waiting") {
 		t.Fatalf("%s", r)
 	}
@@ -205,5 +520,38 @@ func TestAttachFilesPendingRequestOnce(t *testing.T) {
 	eve.mustRunIn("eve\nn\n", "attach", "team", vdir)
 	if !strings.Contains(owner.mustRun("member", "requests", "team").out, "eve") {
 		t.Fatal("eve's request should be listed")
+	}
+}
+
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func copyTree(t *testing.T, src, dst string) {
+	t.Helper()
+	err := filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, p)
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, b, 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

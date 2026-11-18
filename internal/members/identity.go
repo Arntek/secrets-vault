@@ -595,3 +595,37 @@ func (s *Store) Import(data []byte, from crypto.KeyWrapper, wrappers ...crypto.K
 	}
 	return pub, nil
 }
+
+// UnlockerRecipients returns the recipients of the identity's unlockers of
+// type t (for example this Mac's Touch ID key), without unlocking anything.
+func (s *Store) UnlockerRecipients(t format.UnlockerType) ([]string, error) {
+	f, err := s.load(kindIdentity)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, u := range f.Unlockers {
+		if u.Type == t {
+			out = append(out, u.Recipient)
+		}
+	}
+	return out, nil
+}
+
+// RemoveUnlockers removes every unlocker of type t from the identity (for
+// example Touch ID on this Mac). At least one unlocker must remain.
+func (s *Store) RemoveUnlockers(t format.UnlockerType) error {
+	f, err := s.load(kindIdentity)
+	if err != nil {
+		return err
+	}
+	vf := &format.VaultFile{Unlockers: f.Unlockers}
+	if vf.RemoveUnlockers(func(u format.Unlocker) bool { return u.Type == t }) == 0 {
+		return nil
+	}
+	if len(vf.Unlockers) == 0 {
+		return errors.New("members: that would leave the identity with no way to open it")
+	}
+	f.Unlockers = vf.Unlockers
+	return s.save(f)
+}

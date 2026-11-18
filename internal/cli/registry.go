@@ -16,6 +16,7 @@ import (
 
 	"github.com/Arntek/secrets-vault/internal/agent"
 	"github.com/Arntek/secrets-vault/internal/format"
+	"github.com/Arntek/secrets-vault/internal/members"
 )
 
 // EnvConfig overrides the registry file location (used by tests).
@@ -41,8 +42,12 @@ type VaultEntry struct {
 	TTL            string `toml:"ttl,omitempty"`
 	TouchEveryRead *bool  `toml:"touch_every_read,omitempty"`
 	Dialog         string `toml:"dialog,omitempty"`
-	// KeyID pins the vault key this Mac last saw, so a vault.json swapped
-	// by someone with write access to the folder is noticed.
+	// ID is the vault ID recorded at init or attach. vault.json is only
+	// accepted if it holds this vault (design M1); the trust pin for it is
+	// kept outside the registry, under trust/<ID>.json.
+	ID string `toml:"id,omitempty"`
+	// KeyID is the legacy key pin from before trust pins. It is read once,
+	// by the migration and first-use checks, then dropped.
 	KeyID string `toml:"key_id,omitempty"`
 }
 
@@ -127,11 +132,18 @@ func pathless(err error) error {
 
 // --- vault handles ---
 
-// vaultRef is a registered vault.
+// vaultRef is a registered vault. After app.open, chain is its verified
+// vault.json (or v1 a version-1 file awaiting migration), pin this
+// machine's trust pin and class how the two relate.
 type vaultRef struct {
 	name  string
 	entry *VaultEntry
 	dir   string
+
+	chain *members.Chain
+	v1    *format.VaultFile
+	pin   *members.Pin
+	class members.Classification
 }
 
 func (a *app) expandEntry(e *VaultEntry) (string, error) { return a.expandPath(e.Path) }
@@ -195,19 +207,6 @@ func (a *app) vaultNames() ([]string, error) {
 	return names, nil
 }
 
-// open reads vault.json and finishes any interrupted key rotation, as the
-// format documentation requires whenever a vault is opened.
-func (v *vaultRef) open() (*format.VaultFile, error) {
-	vf, err := format.ReadVaultFile(v.dir)
-	if err != nil {
-		return nil, failf("cannot open vault '%s': %v", v.name, vaultErr(err))
-	}
-	if _, err := format.RecoverRotation(v.dir, vf.KeyID); err != nil {
-		return nil, failf("vault '%s' has an unfinished key rotation that could not be completed: %v", v.name, vaultErr(err))
-	}
-	return vf, nil
-}
-
 func vaultErr(err error) error {
 	if errors.Is(err, fs.ErrNotExist) {
 		return errors.New("the folder or vault.json is missing (not synced yet, or moved?)")
@@ -215,20 +214,17 @@ func vaultErr(err error) error {
 	return pathless(err)
 }
 
-// index returns the vault's index, rebuilding it from secrets/ if it is
-// missing, broken or has drifted. A rebuilt index is written back (it holds
-// names only).
+// index returns the vault's index, rebuilt in memory from secrets/ if it
+// is missing, broken or has drifted. Reading never writes to the vault
+// folder (design section 6); the next write stores the rebuilt index.
 func (v *vaultRef) index() (*format.Index, error) {
 	old, rerr := format.ReadIndex(v.dir)
 	if rerr != nil {
 		old = nil
 	}
-	idx, changed, err := format.RebuildIndex(v.dir, old)
+	idx, _, err := format.RebuildIndex(v.dir, old)
 	if err != nil {
 		return nil, failf("cannot read the index of vault '%s': %v", v.name, vaultErr(err))
-	}
-	if changed {
-		_ = format.WriteIndex(v.dir, idx)
 	}
 	return idx, nil
 }
@@ -254,18 +250,6 @@ func (a *app) touchEveryRead(v *vaultRef) bool {
 	}
 	c, _ := a.loadConfig()
 	return c.TouchEveryRead
-}
-
-// pinKey remembers the vault key id this Mac has seen.
-func (a *app) pinKey(v *vaultRef, keyID string) {
-	c, err := a.loadConfig()
-	if err != nil {
-		return
-	}
-	if e, ok := c.Vaults[v.name]; ok && e.KeyID != keyID {
-		e.KeyID = keyID
-		_ = a.saveConfig(c)
-	}
 }
 
 // --- agent status helpers ---
@@ -328,9 +312,9 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 		if err != nil {
 			return nil, err
 		}
-		vf, err := v.open()
+		vf, err := format.ReadVaultFile(v.dir)
 		if err != nil {
-			a.warnf("%v", err)
+			a.warnf("vault '%s' is unavailable: %v", n, vaultErr(err))
 			continue
 		}
 		idx, err := v.index()

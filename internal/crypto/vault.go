@@ -134,6 +134,8 @@ type RotateOptions struct {
 	// this machine's key from a rotation that lost a race. Files under them
 	// are re-sealed to the new key as well.
 	ExtraKeys []*VaultKey
+	// NewVaultID lets Next give the vault a new ID (vault rebuild).
+	NewVaultID bool
 }
 
 // Rotate replaces the vault key: it creates a new key, re-encrypts every
@@ -190,7 +192,7 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 		newKey.Destroy()
 		return nil, err
 	}
-	if next.KeyID != newKey.ID() || next.ID != vf.ID {
+	if next.KeyID != newKey.ID() || (next.ID != vf.ID && !opt.NewVaultID) {
 		newKey.Destroy()
 		return nil, errors.New("crypto: rotated vault file does not match the new key")
 	}

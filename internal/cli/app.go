@@ -15,6 +15,7 @@ import (
 	"github.com/Arntek/secrets-vault/internal/agent"
 	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
+	"github.com/Arntek/secrets-vault/internal/members"
 	"github.com/Arntek/secrets-vault/internal/touchid"
 )
 
@@ -92,6 +93,14 @@ type app struct {
 
 	asJSON    bool
 	passStdin bool
+	// expectCode is --expect: a state code from another member's machine
+	// (design section 8). signerFP is --signer-fingerprint: the fingerprint
+	// of whoever added this person, for a first use without a terminal.
+	expectCode string
+	signerFP   string
+	// identity is this person's identity once unlocked in this command,
+	// so one command never asks for it twice. close() destroys it.
+	identity *members.Unlocked
 
 	cfgPath string
 	cfg     *Config
@@ -138,6 +147,7 @@ func newApp(prog string, stdin io.Reader, stdout, stderr io.Writer) *app {
 }
 
 func (a *app) close() {
+	a.identity.Destroy()
 	if a.agentC != nil {
 		_ = a.agentC.Close()
 		a.agentC = nil

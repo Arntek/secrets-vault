@@ -448,7 +448,7 @@ func cmdSet(a *app, p *parsed) error {
 		if v, err = a.defaultVault(p.str("vault")); err != nil {
 			return err
 		}
-		if vf, err = v.open(); err != nil {
+		if vf, err = a.open(v); err != nil {
 			return err
 		}
 	}
@@ -599,7 +599,7 @@ func cmdMv(a *app, p *parsed) error {
 	if dst.name == k.v.name {
 		return failf("the key is already in that vault")
 	}
-	dvf, err := dst.open()
+	dvf, err := a.open(dst)
 	if err != nil {
 		return err
 	}
