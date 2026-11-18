@@ -243,3 +243,7 @@ make fuzz    # run every fuzz target briefly
 If Swift fails to build on macOS with `redefinition of module 'SwiftBridging'`, that's a known Command Line Tools packaging bug. The Makefile works around it automatically with a compiler overlay, without changing system files.
 
 Developer docs: [docs/architecture.md](docs/architecture.md) (packages and how they fit), [docs/vault-format.md](docs/vault-format.md) (on-disk format and crypto API).
+
+## License
+
+[MIT](LICENSE) © 2026 Arntek
