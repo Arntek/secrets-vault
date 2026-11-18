@@ -280,11 +280,6 @@ func (a *app) readValueInfo(k *keyRef, p purpose) ([]byte, format.IndexEntry, er
 	return a.decryptInfo(k, key)
 }
 
-func (a *app) decrypt(k *keyRef, key *crypto.VaultKey) ([]byte, error) {
-	val, _, err := a.decryptInfo(k, key)
-	return val, err
-}
-
 // decryptInfo opens the vault's authenticated index with key and reads one
 // key through it: the value is returned only if the entry and the file
 // agree (docs/design/index-auth.md).

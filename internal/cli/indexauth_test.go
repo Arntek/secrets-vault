@@ -330,8 +330,7 @@ func TestIndexOnlyCommandsHonourExpectation(t *testing.T) {
 		notContains(t, "output", r.out, "test key api_key")
 	}
 	r = e.mustRun("list", "--json")
-	var entries []map[string]any
-	entries = decodeJSON[[]map[string]any](t, r.out)
+	entries := decodeJSON[[]map[string]any](t, r.out)
 	if len(entries) != 1 || entries[0]["vault"] != "main" || entries[0]["error"] == nil || entries[0]["name"] != nil {
 		t.Fatalf("list --json = %s", r.out)
 	}
@@ -632,8 +631,6 @@ func TestIndexSnapshotAnchoringAndReset(t *testing.T) {
 	}
 	// A snapshot whose pin head is not in the chain is treated as absent:
 	// with the index deleted the key is NOT vouched for.
-	forged := strings.Replace(string(good), `"pin_head": "`, `"pin_head": "0`, 1)
-	forged = strings.Replace(forged, `"pin_head": "0`+string(good[strings.Index(string(good), `"pin_head": "`)+13:][:1]), `"pin_head": "`+strings.Repeat("0", 1), 1)
 	var doc map[string]any
 	_ = json.Unmarshal(good, &doc)
 	doc["pin_head"] = strings.Repeat("0", 64)

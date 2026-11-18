@@ -329,14 +329,14 @@ func TestIM1SnapshotVouches(t *testing.T) {
 func TestTombstoneResurrection(t *testing.T) {
 	e := newEnv(t)
 	s := e.session(nil)
-	snap := e.set(s, "API_KEY", "v1", "x")
+	e.set(s, "API_KEY", "v1", "x")
 	file := e.secretBytes("API_KEY")
 	v, _ := s.Load()
 	res, err := s.Commit(v, tombstone("API_KEY", v.Floor("API_KEY")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap = res.Snapshot
+	snap := res.Snapshot
 	_ = os.Remove(filepath.Join(e.dir, "secrets", "API_KEY.age"))
 	// The file reappears (a trashed copy moved back).
 	e.putSecretBytes("API_KEY", file)

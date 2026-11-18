@@ -67,7 +67,7 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 	ok(owner, "", "vaults")
 	ok(owner, "", "doctor", "one")
 	run(owner, "", "doctor", "one", "--adopt", "EXAMPLE_KEY_ONE", "--yes") // not unlisted: refused
-	ok(owner, "", "upgrade", "one")                                       // already current
+	ok(owner, "", "upgrade", "one")                                        // already current
 	ok(owner, "", "status")
 	ok(owner, "", "status", "--json")
 	ok(owner, "", "trust", "one")
