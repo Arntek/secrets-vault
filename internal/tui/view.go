@@ -75,10 +75,16 @@ func (m *Model) dialogNote() []string {
 
 // View draws the screen. It is blank once the person quit, so the last
 // frame (which could hold a revealed value) is never left behind.
-func (m *Model) View() string {
+func (m *Model) View() (out string) {
 	if m.quitting {
 		return ""
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			m.crash() // wipes; the next Update quits
+			out = ""
+		}
+	}()
 	w, h := max(m.w, 20), max(m.h, 10)
 	mm := *m
 	mm.w, mm.h = w, h
@@ -325,7 +331,11 @@ func (m *Model) promptBox(w, h int) []string {
 	}
 	in := string(p.buf)
 	if p.hidden {
-		in = strings.Repeat("•", len(p.buf))
+		// A fixed mask: the number of bullets would give the length away.
+		in = ""
+		if len(p.buf) > 0 {
+			in = strings.Repeat("•", 12)
+		}
 	} else {
 		in = clean(in)
 	}
@@ -411,12 +421,24 @@ func wrapLine(s string, w int) []string {
 	}
 	var out []string
 	for ansi.StringWidth(s) > w {
-		cut := strings.LastIndexByte(s[:min(len(s), w)], ' ')
-		if cut <= 0 {
-			cut = min(len(s), w)
+		// Cut on rune boundaries, at the last space that fits if any.
+		rs, width, cut := []rune(s), 0, 0
+		for cut < len(rs) {
+			rw := ansi.StringWidth(string(rs[cut]))
+			if width+rw > w {
+				break
+			}
+			width += rw
+			cut++
 		}
-		out = append(out, s[:cut])
-		s = strings.TrimLeft(s[cut:], " ")
+		if cut == 0 {
+			cut = 1
+		}
+		if sp := strings.LastIndex(string(rs[:cut]), " "); sp > 0 && cut < len(rs) {
+			cut = len([]rune(string(rs[:cut])[:sp]))
+		}
+		out = append(out, string(rs[:cut]))
+		s = strings.TrimLeft(string(rs[cut:]), " ")
 	}
 	return append(out, s)
 }

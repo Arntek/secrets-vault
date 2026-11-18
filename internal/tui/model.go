@@ -5,7 +5,9 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -128,13 +130,17 @@ type Model struct {
 	statusErr bool
 	busy      string
 	quitting  bool
+	crashed   bool
+	// closing is set when the UI is ending, so a value that finishes
+	// decrypting after that is cleared by the goroutine that got it.
+	closing *atomic.Bool
 
 	st styles
 }
 
 // New makes a model. It registers itself as the backend's prompter.
 func New(b Backend, o Options) *Model {
-	m := &Model{b: b, opts: o, now: o.Now, w: 80, h: 24, st: newStyles(!o.NoColor)}
+	m := &Model{b: b, opts: o, now: o.Now, closing: new(atomic.Bool), w: 80, h: 24, st: newStyles(!o.NoColor)}
 	if m.now == nil {
 		m.now = time.Now
 	}
@@ -188,18 +194,54 @@ func (m *Model) wipe() {
 func (m *Model) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 	defer func() {
 		if r := recover(); r != nil {
-			m.wipe()
-			panic("vault ui: internal error")
+			// Never let Bubble Tea see a panic: it prints the value and a
+			// stack trace on the normal screen (scrollback). Wipe, blank the
+			// screen and quit; Run reports a fixed message.
+			m.crash()
+			model, cmd = m, tea.Quit
 		}
 	}()
-	return m.update(msg)
+	model, cmd = m.update(msg)
+	return model, m.safe(cmd)
 }
+
+// crashMsg is what a command that panicked returns.
+type crashMsg struct{}
+
+func (m *Model) crash() {
+	m.closing.Store(true)
+	m.wipe()
+	m.crashed = true
+	m.quitting = true
+}
+
+// safe makes a command recover from a panic in its own goroutine (the
+// backend), so the crash is handled like one in Update.
+func (m *Model) safe(cmd tea.Cmd) tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	return func() (msg tea.Msg) {
+		defer func() {
+			if r := recover(); r != nil {
+				msg = crashMsg{}
+			}
+		}()
+		return cmd()
+	}
+}
+
+// Crashed reports whether the UI ended because of an internal error.
+func (m *Model) Crashed() bool { return m.crashed }
 
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
 		m.clampSel()
+	case crashMsg:
+		m.crash()
+		return m, tea.Quit
 	case tickMsg:
 		return m, m.onTick(time.Time(msg))
 	case snapMsg:
@@ -424,6 +466,7 @@ func (m *Model) key(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) quit() tea.Cmd {
+	m.closing.Store(true)
 	m.wipe()
 	m.quitting = true
 	if m.pr != nil && m.pr.cancel != nil {
@@ -556,7 +599,15 @@ func (m *Model) listHeight() int { return max(m.paneHeight()-3, 1) }
 
 // --- prompts ---
 
+// maxInput is the most characters a prompt takes (a long pasted token).
+const maxInput = 8192
+
 func (m *Model) openPrompt(p *prompt) {
+	if cap(p.buf) < maxInput {
+		nb := make([]rune, len(p.buf), maxInput)
+		copy(nb, p.buf)
+		p.buf = nb
+	}
 	m.hide()
 	m.pr = p
 	m.mode = modePrompt
@@ -584,7 +635,12 @@ func (m *Model) promptKey(msg tea.KeyMsg) tea.Cmd {
 			cancel(m)
 		}
 	case tea.KeyEnter:
-		text := []byte(string(p.buf))
+		// Encode into one fixed-capacity buffer and clear it: no string
+		// copy of a typed value is made here.
+		text := make([]byte, 0, len(p.buf)*utf8.UTFMax)
+		for _, r := range p.buf {
+			text = utf8.AppendRune(text, r)
+		}
 		submit := p.submit
 		m.closePrompt()
 		cmd := submit(m, text)
@@ -599,10 +655,14 @@ func (m *Model) promptKey(msg tea.KeyMsg) tea.Cmd {
 		clear(p.buf)
 		p.buf = p.buf[:0]
 	case tea.KeySpace:
-		p.buf = append(p.buf, ' ')
+		if len(p.buf) < cap(p.buf) {
+			p.buf = append(p.buf, ' ')
+		}
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
-			if r >= ' ' && r != 0x7f { // pasted newlines and controls are dropped
+			// Pasted newlines and controls are dropped. The buffer never
+			// grows (a growing slice leaves an uncleared copy behind).
+			if r >= ' ' && r != 0x7f && len(p.buf) < cap(p.buf) {
 				p.buf = append(p.buf, r)
 			}
 		}

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,29 @@ type keyRow struct {
 	IndexState    string `json:"index_state"`
 
 	updatedAt time.Time // for the terminal UI; not in --json
+}
+
+// MarshalJSON: a row that is not verified (a name the folder claims, never
+// checked with the vault key) carries the name only. Its description, tags,
+// date and author were written by whoever can write the folder, so they are
+// null: they must never reach an AI agent that reads this output.
+func (r keyRow) MarshalJSON() ([]byte, error) {
+	if r.Verified {
+		type plain keyRow
+		return json.Marshal(plain(r))
+	}
+	return json.Marshal(struct {
+		Name          string  `json:"name"`
+		Vault         string  `json:"vault"`
+		Description   *string `json:"description"`
+		Tags          *string `json:"tags"`
+		Updated       *string `json:"updated"`
+		UpdatedBy     *string `json:"updated_by"`
+		Locked        bool    `json:"locked"`
+		Verified      bool    `json:"verified"`
+		PendingChange bool    `json:"pending_change,omitempty"`
+		IndexState    string  `json:"index_state"`
+	}{Name: r.Name, Vault: r.Vault, Locked: r.Locked, PendingChange: r.PendingChange, IndexState: r.IndexState})
 }
 
 // vaultError is a vault that could not be listed, in --json output.
@@ -123,16 +147,24 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []
 			if tag != "" && !slices.Contains(e.Tags, tag) {
 				continue
 			}
+			verified := lr.Verified || lv.State == index.StateLegacy
+			if tag != "" && !verified {
+				continue // an unverified entry's tags are not believed
+			}
 			count++
-			tags := e.Tags
+			tags := cleanTexts(e.Tags)
 			if tags == nil {
 				tags = []string{}
 			}
-			rows = append(rows, keyRow{
-				Name: e.Name, Vault: n, Description: e.Description, Tags: tags,
-				Updated: e.Updated.UTC().Format("2006-01-02T15:04:05Z"), UpdatedBy: e.UpdatedBy,
-				Locked: !unlocked, Verified: lr.Verified || lv.State == index.StateLegacy, PendingChange: lr.Pending, IndexState: lv.State, updatedAt: e.Updated,
-			})
+			row := keyRow{
+				Name: e.Name, Vault: n, Description: cleanText(e.Description), Tags: tags,
+				Updated: e.Updated.UTC().Format("2006-01-02T15:04:05Z"), UpdatedBy: cleanText(e.UpdatedBy),
+				Locked: !unlocked, Verified: verified, PendingChange: lr.Pending, IndexState: lv.State, updatedAt: e.Updated,
+			}
+			if !verified {
+				row.Description, row.Tags, row.Updated, row.UpdatedBy, row.updatedAt = "", []string{}, "", "", time.Time{}
+			}
+			rows = append(rows, row)
 		}
 		sums = append(sums, vaultSummary{Name: n, Keys: count, Unlocked: unlocked, IndexState: lv.State, expires: states[vf.ID].Expires})
 	}
@@ -152,6 +184,9 @@ func (a *app) printKeyTable(rows []keyRow, sums []vaultSummary) {
 		t := newTable(a.out, "NAME", "VAULT", "DESCRIPTION")
 		for _, r := range rows {
 			d := r.Description
+			if !r.Verified {
+				d = "[unverified]"
+			}
 			if !r.Verified {
 				d = "[unverified] " + d
 			}
@@ -219,7 +254,10 @@ func cmdSearch(a *app, p *parsed) error {
 	}
 	out := rows[:0:0]
 	for _, r := range rows {
-		hay := strings.ToLower(r.Name + " " + r.Description + " " + strings.Join(r.Tags, " "))
+		hay := strings.ToLower(r.Name) // an unverified row has nothing else
+		if r.Verified {
+			hay = strings.ToLower(r.Name + " " + r.Description + " " + strings.Join(r.Tags, " "))
+		}
 		ok := true
 		for _, w := range words {
 			if !strings.Contains(hay, w) {
@@ -247,7 +285,18 @@ func cmdInfo(a *app, p *parsed) error {
 		return err
 	}
 	e := k.entry
-	tags := e.Tags
+	if !k.verified {
+		// Only the name: everything else was written by the folder's writer.
+		if a.asJSON {
+			return a.printJSON(map[string]any{"name": e.Name, "vault": k.v.name, "description": nil, "tags": nil,
+				"updated": nil, "updated_by": nil, "verified": false})
+		}
+		a.printf("Name         %s\nVault        %s\n", e.Name, k.v.name)
+		a.printf("Verified     no (unlock %s to check this entry with the vault key; nothing else is shown until then)\n", k.v.name)
+		return nil
+	}
+	e.Description, e.UpdatedBy = cleanText(e.Description), cleanText(e.UpdatedBy)
+	tags := cleanTexts(e.Tags)
 	if tags == nil {
 		tags = []string{}
 	}

@@ -36,7 +36,7 @@ func cmdPrime(a *app, p *parsed) error {
 				vaults = append(vaults, vrow{Name: n, State: "unavailable"})
 				continue
 			}
-			r := vrow{Name: n, Description: v.entry.Description, State: "locked"}
+			r := vrow{Name: n, Description: cleanText(v.entry.Description), State: "locked"}
 			if vf, err := format.ReadVaultFile(v.dir); err != nil {
 				r.State = "unavailable"
 			} else if st := states[vf.ID]; st.Unlocked {

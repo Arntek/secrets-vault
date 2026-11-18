@@ -11,7 +11,8 @@ import (
 
 // clean removes everything that could change the terminal's state or
 // disguise text: control characters (including ESC, so no escape sequences),
-// the C1 range, and bidirectional overrides. Applied to every string from a
+// the C1 range, zero-width and other format characters (Cf), line and
+// paragraph separators, and bidirectional overrides. Applied to every string from a
 // vault before it is drawn.
 func clean(s string) string {
 	return strings.Map(func(r rune) rune {
@@ -20,7 +21,9 @@ func clean(s string) string {
 			return ' '
 		case r == '\n' || r == '\r':
 			return '⏎'
-		case unicode.IsControl(r), r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0x200e, r == 0x200f, r == 0x061c:
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r):
+			// Control, zero-width, bidi and other format characters, line and
+			// paragraph separators: a dot, so they cannot hide or imitate a name.
 			return '·'
 		case r == 0xfffd:
 			return '·'

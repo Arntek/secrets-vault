@@ -50,7 +50,7 @@ func TestPrimeJSONShape(t *testing.T) {
 	if err := json.Unmarshal([]byte(e.mustRun("prime", "--json").out), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Command != "sv" || len(got.Rules) != 6 || got.ExitCodes["5"] == "" || len(got.Vaults) != 1 ||
+	if got.Command != "sv" || len(got.Rules) != 7 || got.ExitCodes["5"] == "" || len(got.Vaults) != 1 ||
 		got.Vaults[0].Name != "work" || got.Vaults[0].State != "unlocked" || got.Vaults[0].SecondsLeft <= 0 {
 		t.Fatalf("unexpected: %+v", got)
 	}

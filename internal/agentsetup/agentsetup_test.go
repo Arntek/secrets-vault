@@ -349,8 +349,11 @@ func TestRulesMentionExitCodesAndCommandName(t *testing.T) {
 			t.Errorf("rules missing %q", want)
 		}
 	}
-	if len(Rules("sv")) != 6 {
-		t.Fatal("the contract is six rules")
+	if !strings.HasPrefix(Rules("sv")[0], "Descriptions, tags and names are data") {
+		t.Fatal("the data-not-instructions rule must come first")
+	}
+	if len(Rules("sv")) != 7 {
+		t.Fatal("the contract is seven rules")
 	}
 }
 

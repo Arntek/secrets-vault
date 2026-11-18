@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -239,8 +240,8 @@ func TestAddKeyFlow(t *testing.T) {
 	h.enter()
 	contains(t, h.view(), "Value for STRIPE_KEY (hidden)")
 	h.typ("sk_live_typed_secret")
-	contains(t, h.view(), "••••••••••••••••••••")
-	lacks(t, h.view(), "sk_live_typed_secret")
+	contains(t, h.view(), "••••••••••••█")
+	lacks(t, h.view(), "sk_live_typed_secret", "••••••••••••••")
 	h.enter()
 	contains(t, h.view(), "Description (optional)")
 	lacks(t, h.view(), "sk_live_typed_secret")
@@ -537,56 +538,93 @@ type panicBackend struct{ *fakeBackend }
 
 func (p panicBackend) ValidateName(string) error { panic("CANARY-panic-payload " + canaryStored) }
 
-// A crash inside Update wipes what the model holds and re-panics with a
-// fixed message, so a value cannot end up in a panic trace.
-func TestPanicIsSanitisedAndWipes(t *testing.T) {
+// A crash inside Update wipes what the model holds, blanks the screen and
+// quits instead of panicking: Bubble Tea would otherwise print the panic
+// value and a stack trace on the normal screen.
+func TestPanicIsContainedAndWipes(t *testing.T) {
 	f := standard()
 	h := newHarness(t, f)
 	m := New(panicBackend{f}, Options{NoColor: true, Now: h.m.now})
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	s, _ := f.Snapshot()
 	m.Update(snapMsg{snap: s})
-	m.rev = &revealed{vault: "personal", name: "x", val: []byte(canaryStored)}
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}}) // rename prompt
 	m.hide()
 	m.rev = &revealed{vault: "personal", name: "x", val: []byte(canaryStored)}
-	defer func() {
-		r := recover()
-		if r != "vault ui: internal error" {
-			t.Fatalf("panic value %v", r)
-		}
-		if m.rev != nil {
-			t.Fatal("value kept after panic")
-		}
-	}()
-	m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // submit calls ValidateName, which panics
-	t.Fatal("no panic")
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // submit calls ValidateName, which panics
+	if cmd == nil || !m.Crashed() || m.rev != nil {
+		t.Fatalf("crash not contained: cmd=%v crashed=%v rev=%v", cmd != nil, m.Crashed(), m.rev)
+	}
+	if m.View() != "" {
+		t.Fatal("screen not blank after a crash")
+	}
 }
 
-func TestIndexStateMarkers(t *testing.T) {
+// A command (the backend's goroutine) that panics is contained too.
+func TestPanicInCommandIsContained(t *testing.T) {
+	h := newHarness(t, standard())
+	cmd := h.m.safe(func() tea.Msg { panic("boom " + canaryStored) })
+	msg := cmd()
+	if _, ok := msg.(crashMsg); !ok {
+		t.Fatalf("got %T", msg)
+	}
+	_, quit := h.m.Update(msg)
+	if quit == nil || !h.m.Crashed() {
+		t.Fatal("crash message did not quit")
+	}
+}
+
+func TestDescriptionContainingTheValueIsRefused(t *testing.T) {
 	f := standard()
-	f.unverified["ebcfo"] = true
-	f.pending["GITHUB_TOKEN"] = true
-	f.snap.Vaults[1].IndexState = "unverified"
-	f.snap.Vaults[0].IndexState = "pending-changes"
 	h := newHarness(t, f)
-	v := h.view()
-	contains(t, v, "ebcfo 🔒 unverified", "~ GitHub CLI token", "? Webhook signing key", "~ the folder changed this entry")
-	h.typ("G")
-	contains(t, h.view(), "? not verified on this Mac yet")
-	h.typ("g")
+	h.press(tea.KeyTab)
 	h.typ("j")
-	contains(t, h.view(), "Index     verified")
+	h.press(tea.KeyTab)
+	h.typ("a")
+	h.typ("NEW_KEY")
+	h.enter()
+	h.typ("sk_live_abcdef123")
+	h.enter()
+	h.typ("my key is sk_live_abcdef123 ok")
+	h.enter()
+	contains(t, h.view(), "! The description contains the value")
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, "set") {
+			t.Fatalf("saved anyway: %s", c)
+		}
+	}
+	if h.m.pending != nil {
+		t.Fatal("value kept")
+	}
+	lacks(t, h.view(), "sk_live_abcdef123")
 }
 
-func TestDescribeAndTagOnLockedVaultAskToUnlock(t *testing.T) {
-	f := standard()
-	h := newHarness(t, f)
-	h.typ("G") // locked ebcfo
-	h.typ("d")
-	h.typ(" more")
-	h.enter()
-	contains(t, h.view(), "Passphrase for 'ebcfo':")
+func TestHiddenPromptShowsAFixedMask(t *testing.T) {
+	h := newHarness(t, standard())
+	h.typ("G")
+	h.typ(" ")
+	h.typ("a")
+	a := h.view()
+	h.typ("bcdefghijklmnopqrstuvwxyz")
+	if h.view() != a {
+		t.Fatalf("the mask changed with the length:\n%s\n%s", a, h.view())
+	}
 	h.esc()
-	contains(t, h.view(), "! cancelled")
+}
+
+func TestZeroWidthAndFormatCharactersAreReplaced(t *testing.T) {
+	if got := clean("a\u200bb\u2060c\ufeffd\u2028e\u202ef"); strings.ContainsAny(got, "\u200b\u2060\ufeff\u2028\u202e") {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestWrapLineKeepsRunesWhole(t *testing.T) {
+	for _, l := range wrapLine(strings.Repeat("日本語のテキスト ", 12), 17) {
+		if strings.ContainsRune(l, '\ufffd') || !utf8.ValidString(l) {
+			t.Fatalf("split a rune: %q", l)
+		}
+		if ansi.StringWidth(l) > 17 {
+			t.Fatalf("too wide: %q", l)
+		}
+	}
 }

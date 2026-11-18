@@ -19,16 +19,23 @@ func Run(b Backend, o Options, in io.Reader, out io.Writer) (err error) {
 	m.send = p.Send
 	defer func() {
 		m.wipe()
-		// Belt and braces: leave the alternate screen and clear it even if
-		// the program ended abnormally. Both are harmless if already done.
-		_, _ = io.WriteString(out, "\x1b[2J\x1b[H\x1b[?1049l")
+		// Belt and braces: leave the alternate screen (its contents go with
+		// it) even if the program ended abnormally. Harmless if already done.
+		// The normal screen is never cleared.
+		_, _ = io.WriteString(out, "\x1b[?1049l")
 	}()
 	_, rerr := p.Run()
+	if m.Crashed() {
+		return errors.New("the terminal UI hit an internal error and closed")
+	}
 	switch {
 	case rerr == nil, errors.Is(rerr, tea.ErrProgramKilled):
 		return nil
 	case errors.Is(rerr, tea.ErrProgramPanic):
-		return errors.New("the terminal UI hit an internal error and closed. Nothing was changed on screen or disk by it")
+		return errors.New("the terminal UI hit an internal error and closed")
+	}
+	if m.Crashed() {
+		return errors.New("the terminal UI hit an internal error and closed")
 	}
 	return fmt.Errorf("the terminal UI could not run: %w", rerr)
 }

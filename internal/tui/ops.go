@@ -46,6 +46,10 @@ func (m *Model) doReveal() tea.Cmd {
 		// The call site for the audit hook is inside Backend.Reveal (the
 		// CLI's revealValue records the read).
 		val, err := b.Reveal(k.Vault, k.Name)
+		if m.closing.Load() { // the UI ended while this was decrypting
+			clear(val)
+			val, err = nil, ErrCancelled
+		}
 		snap, serr := b.Snapshot()
 		return revealMsg{vault: k.Vault, name: k.Name, val: val, err: err, snap: snap, serr: serr}
 	}
@@ -137,6 +141,13 @@ func (m *Model) startAdd() tea.Cmd {
 				desc := string(text)
 				val := m.pending
 				m.pending = nil
+				// The description is shown in clear and stored unencrypted:
+				// refuse one that is, or contains, the value just typed.
+				if len(val) >= minGuard && strings.Contains(desc, string(val)) {
+					clear(val)
+					m.setStatus("The description contains the value. Nothing was saved: a description is stored in clear.", true)
+					return nil
+				}
 				v := vault
 				return m.runOp("Saving", v, name, func(b Backend) (string, error) {
 					defer clear(val)
@@ -193,6 +204,10 @@ func (m *Model) startAdd() tea.Cmd {
 		}})
 	return nil
 }
+
+// minGuard is the shortest value the description guard compares (a one or
+// two letter value would match ordinary words).
+const minGuard = 6
 
 func (m *Model) dropPending() {
 	clear(m.pending)
