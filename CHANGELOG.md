@@ -17,9 +17,12 @@ Phase 2: agents, the terminal UI, an authenticated index, npm and Windows.
 - A native macOS password dialog for agents that hit a locked vault (`vault config set dialog false` turns it off).
 - An authenticated index: a folder writer who is not a member can no longer relabel, plant or delete entries unnoticed; a locked `list` shows the last state this Mac verified and flags anything newer.
 - npm install (macOS, Linux, Windows) and passphrase-only Windows builds.
+- Python and Node helpers (`helpers/`) that call the program without exposing values.
 
 ### Security
 
 - Unverified index rows show the name only (no description, tags, date or author) in text and `--json`, and descriptions are cleaned of control, bidi and zero-width characters (r1q.6.1).
 - `vault ui` hardening: fixed-size input buffers that are cleared, a crash handler that leaves nothing on the normal screen, zero-width and bidi characters replaced, a description that contains the value is refused, a fixed password mask (r1q.6.3).
+- The npm installer checks the download against SHA-256 hashes pinned inside the npm package (`packaging/npm/checksums.json`, written at publish time by `scripts/npm-pin-checksums.js`), not against a `checksums.txt` fetched from the same place; without a pin it refuses to install. A mirror can no longer serve a different program (r1q.6.2).
+- Helper fixes: the Node helper's `interactive` mode gives the program your terminal's stdin and stderr so the passphrase prompt works; the Windows helpers look the program up on `PATH` and return an absolute path, never the current folder (r1q.6.4).
 - Tests can never show the real dialog or Touch ID sheet or touch the clipboard.
