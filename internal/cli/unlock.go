@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -184,6 +185,9 @@ func (a *app) enrolledDevice() *touchid.Device {
 // ensureDevice enrols this Mac's Secure Enclave key if needed.
 func (a *app) ensureDevice() (*touchid.Device, error) {
 	if !a.touch.available() {
+		if runtime.GOOS == "windows" {
+			return nil, failf("Touch ID is a Mac feature and Windows Hello is not supported yet: on Windows, vaults open with a passphrase only")
+		}
 		return nil, failf("Touch ID is not available here (no sensor, an SSH session, or this build lacks it)")
 	}
 	if d := a.enrolledDevice(); d != nil {

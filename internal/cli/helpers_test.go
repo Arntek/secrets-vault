@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -191,7 +192,23 @@ var curEnv *testEnv
 // newEnv builds an isolated user: own HOME, registry, agent and fakes.
 func newEnv(t *testing.T) *testEnv {
 	t.Helper()
+	skipWindows(t)
 	return newEnvAt(t, t.TempDir())
+}
+
+// newEnvNoAgent is newEnv for a system with no unlock agent (what Windows
+// is): dialing the agent reports ErrUnsupported. It runs on every OS, so
+// the Windows flow (a passphrase prompt per command) is tested everywhere.
+func newEnvNoAgent(t *testing.T) *testEnv {
+	t.Helper()
+	e := newEnvAt(t, t.TempDir())
+	prev := testHook
+	testHook = func(a *app) {
+		prev(a)
+		a.dialAgent = func(bool) (agent.Client, error) { return nil, agent.ErrUnsupported }
+	}
+	t.Cleanup(func() { testHook = prev })
+	return e
 }
 
 // newEnvAt is newEnv with a chosen HOME (the leak harness scans its own).
@@ -200,7 +217,12 @@ func newEnvAt(t *testing.T, home string) *testEnv {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ad, err := os.MkdirTemp("/tmp", "svt")
+	// /tmp keeps the agent's socket path short enough on macOS and Linux.
+	adBase := "/tmp"
+	if runtime.GOOS == "windows" {
+		adBase = ""
+	}
+	ad, err := os.MkdirTemp(adBase, "svt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +273,7 @@ func newEnvAt(t *testing.T, home string) *testEnv {
 func (e *testEnv) activate() {
 	curEnv = e
 	e.t.Setenv("HOME", e.home)
+	e.t.Setenv("USERPROFILE", e.home)
 	e.t.Setenv("XDG_CONFIG_HOME", filepath.Join(e.home, "xdg"))
 	e.t.Setenv(EnvConfig, e.cfg)
 	e.t.Setenv("SECRETS_VAULT_AGENT_DIR", e.agentDir)

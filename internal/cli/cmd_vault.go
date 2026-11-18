@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -124,7 +125,9 @@ func cmdInit(a *app, p *parsed) error {
 	if pw == nil {
 		a.warnf("warning: '%s' has no recovery passphrase; if your identity is lost it cannot be opened. Add a second trusted member, or set one with: %s passwd %s", name, a.prog, name)
 	}
-	if !unlocked {
+	if !unlocked && runtime.GOOS == "windows" {
+		a.infof("On Windows there is no unlock agent, so every command that needs a key asks for the passphrase. Touch ID and Windows Hello are not supported yet.")
+	} else if !unlocked {
 		a.infof("The vault is locked: the unlock agent could not be reached. Run: %s unlock %s", a.prog, name)
 	}
 	return nil
@@ -694,6 +697,9 @@ func cmdAlias(a *app, p *parsed) error {
 	if len(p.args) == 0 {
 		return usageErrf("usage: %s", usage)
 	}
+	if runtime.GOOS == "windows" && p.args[0] != "list" {
+		return failf("short names are not made by this command on Windows (links there need special rights). The npm install already provides sv and vault; use sv")
+	}
 	cfg, err := a.loadConfig()
 	if err != nil {
 		return err
@@ -846,8 +852,36 @@ func (a *app) otherOnPath(name, ourDir string) string {
 		if filepath.Clean(d) == filepath.Clean(ourDir) {
 			return ""
 		}
-		p := filepath.Join(d, name)
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+		if p := a.executableIn(d, name); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+// executableIn returns the path of the program called name in folder d, or
+// "". Windows has no execute bit: a program is a file with a PATHEXT
+// extension (.exe, .cmd, ...), so those names are tried.
+func (a *app) executableIn(d, name string) string {
+	names := []string{name}
+	if runtime.GOOS == "windows" {
+		exts := a.getenv("PATHEXT")
+		if exts == "" {
+			exts = ".COM;.EXE;.BAT;.CMD"
+		}
+		for _, e := range strings.Split(exts, ";") {
+			if e != "" {
+				names = append(names, name+strings.ToLower(e))
+			}
+		}
+	}
+	for _, n := range names {
+		p := filepath.Join(d, n)
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() {
+			continue
+		}
+		if runtime.GOOS == "windows" || fi.Mode()&0o111 != 0 {
 			return p
 		}
 	}

@@ -61,13 +61,17 @@ brew install arntek/tap/secrets-vault
 
 macOS builds include Touch ID unlock; Linux builds use the passphrase only. The builds are not signed or notarised (no paid Apple account), which is fine for Homebrew and npm installs. Downloading an archive from GitHub Releases in a browser shows a macOS warning, so use Homebrew or npm.
 
-npm (macOS, Linux, Windows), *(coming in Phase 2)*:
+npm (macOS, Linux, Windows):
 
 ```bash
 npm install -g secrets-vault
 ```
 
-The program installs as `secrets-vault`, with two short names: `sv` (always) and `vault`. Homebrew adds `vault` only when no other `vault` program is installed (for example HashiCorp Vault), so on such a machine you get `sv` only. Manage the short names any time:
+The npm package contains no program of its own: on install it downloads the build for your machine from the GitHub Release with the same version, over HTTPS only, and checks its SHA-256 against the release's `checksums.txt` (any mismatch stops the install). No telemetry. For offline or corporate installs see [packaging/npm/README.md](packaging/npm/README.md) (`SECRETS_VAULT_MIRROR`, `SECRETS_VAULT_BINARY_PATH`).
+
+**Windows** builds are passphrase-only for now: there is no unlock agent, so each command that needs a key asks for the passphrase (or exits with code `3` when there is no console to ask on), and there is no Touch ID or Windows Hello yet. The config lives in `%LOCALAPPDATA%\vault`. File permissions work differently there: the program does not check Windows folder permissions (ACLs), so keep your config folder and any vault folder in places only you (and the people you share with) can read. Folders under your user profile are private by default.
+
+The program installs as `secrets-vault`, with two short names: `sv` (always) and `vault`. Homebrew adds `vault` only when no other `vault` program is installed (for example HashiCorp Vault), so on such a machine you get `sv` only. **npm cannot skip just one name:** if another `vault` is already in npm's bin folder, `npm install -g secrets-vault` stops with `EEXIST` and installs nothing. Remove the other one first, or use `--force` (which overwrites it), or install with Homebrew; `sv` is the safe short name everywhere. Manage the short names any time (macOS and Linux; on Windows the npm install provides `sv` and `vault`):
 
 ```bash
 sv alias list
@@ -218,6 +222,22 @@ vault run -k EXAMPLE_API_KEY -- node send.js
 # Also fine: one variable for one process
 EXAMPLE_API_KEY="$(secrets-vault get EXAMPLE_API_KEY)" node send.js
 ```
+
+### Python and Node helpers
+
+Small single-file helpers that call `secrets-vault get NAME` for you: no shell, stdout captured, and the value is never logged or put in an error message. Exit codes `3`, `4` and `5` become distinct exceptions.
+
+```python
+from secrets_vault import get_secret          # helpers/python/secrets_vault.py
+api_key = get_secret("EXAMPLE_API_KEY", vault="work")
+```
+
+```js
+const { getSecret } = require('./index.js');  // helpers/node/index.js
+const apiKey = await getSecret('EXAMPLE_API_KEY', { vault: 'work' });
+```
+
+See [helpers/python](helpers/python/README.md) and [helpers/node](helpers/node/README.md). Where you can, still prefer `vault run -k NAME -- your-command`, so the script never holds the value at all.
 
 Don't load a whole vault, loop over `vault list` to fetch everything, or write values into a `.env` file. Document at the top of each script which key names it uses.
 

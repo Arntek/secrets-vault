@@ -134,15 +134,23 @@ func checkRecipient(s string) error {
 // Store is a directory holding this user's identity.
 type Store struct{ dir string }
 
-// DefaultDir returns ~/.config/vault/identity (honouring XDG_CONFIG_HOME).
+// DefaultDir returns ~/.config/vault/identity (honouring XDG_CONFIG_HOME;
+// %LOCALAPPDATA%\vault\identity on Windows).
 func DefaultDir() (string, error) {
 	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" && runtime.GOOS == "windows" {
+		base = os.Getenv("LOCALAPPDATA")
+	}
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
-		base = filepath.Join(home, ".config")
+		if runtime.GOOS == "windows" {
+			base = filepath.Join(home, "AppData", "Local")
+		} else {
+			base = filepath.Join(home, ".config")
+		}
 	}
 	return filepath.Join(base, "vault", "identity"), nil
 }

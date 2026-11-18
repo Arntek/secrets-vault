@@ -190,6 +190,8 @@ func (a *app) client(start bool) agent.Client {
 func (a *app) agentUnavailableErr() error {
 	err := a.agentErr
 	switch {
+	case errors.Is(err, agent.ErrUnsupported) && runtime.GOOS == "windows":
+		return failf("there is no unlock agent on Windows yet, so a vault cannot stay unlocked between commands. Each command that needs a key asks for the passphrase")
 	case err == nil, errors.Is(err, agent.ErrUnsupported):
 		return failf("the unlock agent is not available on this system")
 	case errors.Is(err, agent.ErrPathTooLong), errors.Is(err, agent.ErrUnsafeDir):
@@ -369,16 +371,35 @@ func (a *app) configFile() (string, error) {
 		a.cfgPath = p
 		return p, nil
 	}
-	base := a.getenv("XDG_CONFIG_HOME")
+	base := configBase(runtime.GOOS, a.getenv, a.home())
 	if base == "" {
-		h := a.home()
-		if h == "" {
-			return "", failf("cannot find your home folder; set %s", EnvConfig)
-		}
-		base = filepath.Join(h, ".config")
+		return "", failf("cannot find your home folder; set %s", EnvConfig)
 	}
 	a.cfgPath = filepath.Join(base, "vault", "config.toml")
 	return a.cfgPath, nil
+}
+
+// configBase is the folder that holds the "vault" config folder:
+// XDG_CONFIG_HOME when set, else %LOCALAPPDATA% on Windows (not the roaming
+// profile: the identity and Touch ID/Hello keys belong to this machine),
+// else ~/.config. It returns "" when no home folder can be found.
+func configBase(goos string, getenv func(string) string, home string) string {
+	if x := getenv("XDG_CONFIG_HOME"); x != "" {
+		return x
+	}
+	if goos == "windows" {
+		if l := getenv("LOCALAPPDATA"); l != "" {
+			return l
+		}
+		if home != "" {
+			return filepath.Join(home, "AppData", "Local")
+		}
+		return ""
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config")
 }
 
 func (a *app) configDir() (string, error) {

@@ -1,0 +1,10 @@
+{
+  "name": "secrets-vault-helper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read one secret from secrets-vault in a Node script, without leaking it.",
+  "license": "MIT",
+  "main": "index.js",
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test test.js" }
+}
