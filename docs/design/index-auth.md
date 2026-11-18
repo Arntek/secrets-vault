@@ -1,8 +1,24 @@
 # Design: authenticated index and secret-file rollback (issues ue1.7, ue1.12)
 
-Status: **revision 1, for Security review. No code yet.**
+Status: **revision 2, for Security re-review (review of b845619: IM1, IM2, IS1-IS8). No code yet.**
 
 Covers `ue1.7` (authenticate `index.json`, detect rollback of a single `secrets/NAME.age`) and the polish items in `ue1.12`. Builds on [membership-auth.md](membership-auth.md); read its sections 4-8 and 10 first.
+
+## Changes in revision 2 (Security review of b845619)
+
+| Item | Where | Change |
+|---|---|---|
+| IM1 (must-fix) | Verification step 1 | Legacy mode comes **only** from the verified chain's `State.Format` (2). In a format-3 vault a missing, v1, unparseable or wrong-`vault_id` index is **"index damaged"**: no key is readable unless the snapshot vouches for it (file version >= snapshot version, entry reconstructed from the snapshot); otherwise exit 5. |
+| IM2 (must-fix) | Rotation, merge, repair | Only entries that verify under the **verified head's current key** are ever carried forward. Rotation (`Rotate`, `RecoverRotation`), conflict-copy merge and lost-race repair never accept an entry under a retired key. K3 -> K4 repair re-MACs only this machine's own pending entries (from its pending record), not the index found in the folder. |
+| IS1 | Tombstones | Kept until the next rotation, and in the snapshot; the trash purge removes files, not tombstones. A rotation drops tombstones that have no file or trash copy left. |
+| IS2 | Verification 3 | Entry whose file is missing: exit 5 (not found would hide a deletion by a folder writer). |
+| IS3 | Snapshot | Records the trust pin's seq/head and `key_id` it was verified against. `trust --accept-rollback` shows the snapshot in its confirmation and resets it (every key then reads as first use on this Mac); `rebuild` creates a fresh one for the new vault id. |
+| IS4 | Verification 2 | Entries are parsed one by one: MAC failures are dropped first, duplicates are checked only among verified entries. A planted duplicate can't make the parser reject the file or knock out the real entry. |
+| IS5 | Snapshot | Private index: a label-free form (HMAC'd name under a key derived from the vault key, `rev`, `version`, `deleted`, `mac`), so rollback detection still works; nothing readable is stored. |
+| IS6 | Verification 4 | Lost-update reconstruction honours a snapshot tombstone: a trashed file moved back into `secrets/` is not reconstructed. |
+| IS7 | Counters | `version` and `rev` stop at 2^31-1: a write that would pass it is refused ("this key has reached its change limit; save it under a new name and delete this one"). Never wraps. A rename starts the new name's own counter. |
+| IS8 | Resolution | An unverified-only candidate never triggers an unlock prompt for a vault the person didn't name; the command stops with the "name the vault with --vault" message. |
+| Q3 | Unlisted files | `vault doctor VAULT --adopt NAME`: after unlock, shows the file's version and timestamps, asks for confirmation, writes an entry (`rev` above any snapshot value). Refuses a file older than the snapshot or tombstone. |
 
 ## The problem
 
@@ -72,7 +88,7 @@ A build from before this change reads `vault.json` first and refuses version 3 w
 
 - `vault_id` is advisory (an early reject for a copied-in index); nothing trusts it. There is no authenticated index header: entries are the only authority.
 - `mac = HMAC-SHA256(K_idx, "secrets-vault/v3 index entry\0" || enc(vault_id, key_id, name, version, rev, deleted, description, tags in order, updated, updated_by))`, where `enc` is length-prefixed fields (our own encoding, as for the membership digests, so it is deterministic), `key_id` is the **verified head's** key id (never read from the file), and `K_idx = HKDF-SHA256(vault key, salt empty, info "secrets-vault/v3 index mac key")`. Verify with `hmac.Equal`.
-- **Tombstones.** `rm` sets `deleted: true`, `rev+1`, keeps `version` and clears description and tags. The entry stays until the trash purge removes the file (30 days), then is dropped by a write. A resurrected file (a deleted key's file put back) therefore has no live entry.
+- **Tombstones.** `rm` sets `deleted: true`, `rev+1`, keeps `version` and clears description and tags. The entry stays **until the next rotation** (IS1), and stays in the snapshot; the trash purge removes files only. A rotation drops tombstones that have no file or trash copy left, since anything sealed under the old key can no longer be opened by a rolled-back file. A resurrected file (a deleted key's file put back) therefore has no live entry.
 - Limits as today (`MaxIndexEntries`, 1 MiB, strict parsing, no control or bidi characters); `mac` must be 64 hex characters.
 
 ### Secret-file header
@@ -91,15 +107,15 @@ A bare `version: 3` in `vault.json` can be rewritten by a folder writer, and a M
 
 `index.Verify(dir, chain, key, pin) → View` runs after the usual open order (membership-auth 6) and before any value is used:
 
-1. Parse `index.json` strictly (a v1 index or a missing one gives the legacy view, below).
-2. Per entry: MAC check with the chain's head `key_id`. Failures are **dropped from the view** and counted ("3 entries failed verification"), never half-trusted. Duplicate names: both dropped (A2).
+1. Read `index.json`. **Legacy mode exists only if the verified chain says format 2** (see Migration). In a format-3 vault, a missing, v1, unparseable or wrong-`vault_id` index is **"index damaged"** (IM1): every key is refused with exit 5 ("the index of 'X' is missing or damaged; names it lists can't be trusted") **unless the snapshot vouches for it**: the name is in the snapshot, not tombstoned, and the file's `version >= snapshot.version`. Such keys are readable and the next write rebuilds the index from the snapshot (re-MAC'd under the current key, `rev+1`). Everything else waits for `doctor --adopt`. Without this, deleting `index.json` after rolling back one file would turn A5 into a free pass on a Mac that never saw the key.
+2. Parse entries one by one (IS4). Per entry: MAC check with the chain's head `key_id`. Failures are **dropped from the view** and counted ("3 entries failed verification"), never half-trusted. Only then are duplicates looked for, **among verified entries**: a duplicate verified pair (two members racing) keeps the higher `rev`, and a tie keeps the one whose `version` matches the file. A planted duplicate has no valid MAC and so never reaches this point.
 3. Cross-check each surviving entry against its file's header (`VersionOf`, `KeyIDOf`; no decrypt):
    - `file.version == entry.version` → good.
    - `file.version < entry.version` → **rolled back, or the file hasn't synced yet.** The key is refused (exit 5, "X is older than the index says; it may still be syncing; if it persists someone restored an old copy").
    - `file.version > entry.version` → the **index is behind** (stale or still syncing). The file is authentic (header MAC) so the value is readable; a warning says the index lags and the next write repairs it.
    - Tombstoned entry with a live file, or a live file with no entry: **unlisted**. Not readable by name, not listed as a key; `doctor` reports it (A2, A3).
-   - Entry with no file: shown by `doctor` as missing; `get` reports not found.
-4. Compare with the pin snapshot, per name: `entry.rev < snap.rev` or `entry.version < snap.version` → **rolled back** (A4, A6): the entry is dropped and the key refused with exit 5. A snapshot name absent from the folder's index while its file is present and `file.version >= snap.version` is a **lost update** (two writers raced): the entry is reconstructed from the snapshot (in memory on reads; written, re-MAC'd with `rev+1`, on the next write). A snapshot name absent *and* its file older than `snap.version` is a rollback.
+   - Entry with no file (IS2): **exit 5** ("X is listed but its file is missing; it may have been deleted outside secrets-vault, or is still syncing"), listed by `doctor`. A tombstoned entry with no file is the normal deleted state.
+4. Compare with the pin snapshot, per name: `entry.rev < snap.rev` or `entry.version < snap.version` → **rolled back** (A4, A6): the entry is dropped and the key refused with exit 5. A snapshot name absent from the folder's index while its file is present, not tombstoned in the snapshot (IS6), and `file.version >= snap.version` is a **lost update** (two writers raced): the entry is reconstructed from the snapshot (in memory on reads; written, re-MAC'd with `rev+1`, on the next write). A snapshot name absent *and* its file older than `snap.version` is a rollback.
 5. The verified view replaces the snapshot (it only moves forward, per name, to the highest `rev`/`version` seen) and the snapshot's display fields.
 
 A failed entry never blocks other keys, and a membership change (`member rm`, `passwd`) is **never** blocked by index damage: rotation re-MACs what verifies and reports what it dropped.
@@ -114,7 +130,9 @@ A failed entry never blocks other keys, and a membership change (`member rm`, `p
                  "description": "…", "tags": [], "updated": "…", "updated_by": "…" } ] }
 ```
 
-- Strictly parsed and fuzzed like the trust pin. Entries only move forward. `detach` deletes it. It is **not stored for a `private` index** (the display fields would defeat hiding; such a vault shows only names counted from the verified entry set, and locked `list` says the index is private).
+- Also records `pin_seq`, `pin_head` and `key_id` of the trust pin it was verified against (IS3), so a snapshot that doesn't belong to this pin is dropped rather than trusted.
+- Strictly parsed and fuzzed like the trust pin. Entries only move forward. `detach` deletes it. `trust --accept-rollback` lists it in its confirmation and resets it; `rebuild` starts a fresh one.
+- **Private index** (IS5): stored label-free: `name_tag = HMAC(K_idx, "snapshot name\0" || name)` in place of name and no description, tags or `updated*`. Rollback detection (`rev`, `version`, `deleted`, `mac`) still works when unlocked; locked `list` says the index is private and shows nothing.
 - A snapshot older-format file, or none, means "never verified on this Mac".
 - Downgrade protection on this Mac: a snapshot at format 3 for a vault whose folder presents format 2 is refused as a downgrade even before the chain check.
 
@@ -125,7 +143,7 @@ Nothing can be verified without the key, and these commands must not prompt (and
 - Rows come from the **snapshot where it has the name**, using the *snapshot's* labels. A folder entry whose `mac`, `rev` or presence differs from the snapshot is a **pending change**, never shown as truth.
 - Names the snapshot lacks are listed as **unverified** (`verified: false` in `--json`, a marker in the table).
 - Output states it once per vault: `index verified when last unlocked (2026-11-20 10:02); 2 changes in the folder are not verified yet: unlock to check them`, or `index not verified on this Mac yet`. `--json` gets `index_state: "verified" | "pending-changes" | "unverified"` and per-row `verified`.
-- **Resolution** (`get NAME` with several vaults): candidates that are verified beat unverified ones; ambiguity is declared (exit 2) only among candidates of the same class, and says "unverified entries: name the vault with --vault, or unlock one to verify". An unverified candidate that resolves is checked by the MAC as soon as the vault is unlocked, before any value is read, so a planted entry (A2) can't make a wrong vault answer.
+- **Resolution** (`get NAME` with several vaults): candidates that are verified beat unverified ones; an unverified-only candidate set never prompts to unlock a vault the person didn't name (IS8); ambiguity is declared (exit 2) only among candidates of the same class, and says "unverified entries: name the vault with --vault, or unlock one to verify". An unverified candidate that resolves is checked by the MAC as soon as the vault is unlocked, before any value is read, so a planted entry (A2) can't make a wrong vault answer.
 - Every command that holds the key (`unlock`, `get`, `set`, `run`, …) refreshes the snapshot, so a vault becomes verified the first time it is used after a change.
 
 This answers "what does `list` show while locked": the last verified view, plus honest flags. No prompts, no new agent protocol (the agent is untouched).
@@ -144,15 +162,15 @@ The index write is a **compare-and-swap on the exact bytes read** (`format.Write
 
 **Conflict copies.** If Dropbox/Box makes `index (conflicted copy).json` because two machines wrote offline, the next write merges every conflict copy whose entries **verify** into the result: per name the higher `rev` wins; equal `rev` with different MACs (rare) keeps the one whose `version` matches the file and warns. Merged copies are left in place; `vault doctor` says a copy is already merged ("safe to delete") when all its entries are `<=` the main index's. Entries that don't verify are ignored. Because every entry authenticates alone, no key is needed to *produce* a merge candidate and none can be forged.
 
-**Rotation (`member rm`, `passwd`, lost-race rebase).** `crypto.Rotate` already re-seals every file into a staging folder committed by `vault.json`. It now also stages **`index.json`** (re-MAC'd under the new key, entries that verified under the old/extra keys only, tombstones and `rev`/`version` unchanged) and moves it with the rest in `CommitStaged`. `RecoverRotation` verifies the staged index's MACs under the new key like it does for secrets. Until the moves finish, readers see an index that doesn't verify under the new key and treat everything as unverified with the existing "unfinished rotation" message; nothing is lost.
+**Rotation (`member rm`, `passwd`, lost-race rebase).** `crypto.Rotate` already re-seals every file into a staging folder committed by `vault.json`. It now also stages **`index.json`**: re-MAC'd under the new key, carrying forward **only entries that verify under the verified head's current key at the time of the rotation** (IM2: never under a retired key, so a member removed in an earlier epoch can't plant entries that the next rotation launders), tombstones kept except the droppable ones (IS1), `rev`/`version` unchanged and moves it with the rest in `CommitStaged`. `RecoverRotation` verifies the staged index's MACs under the new key like it does for secrets. Until the moves finish, readers see an index that doesn't verify under the new key and treat everything as unverified with the existing "unfinished rotation" message; nothing is lost.
 
-**Lost rotation race.** The loser's files are re-sealed K3 → K4 at their existing versions (membership 10). The index is re-MAC'd in the same rotation. No new rule.
+**Lost rotation race.** The loser's files are re-sealed K3 -> K4 at their existing versions (membership 10). The index is rebuilt in the same rotation from **this machine's own pending entries** (its snapshot and the files it moved under K3) and from folder entries that verify under the winner's current key only; nothing MAC'd under a retired key, including K3's neighbours, is carried (IM2). Conflict-copy merge has the same rule: only entries that verify under the current key.
 
 ## Migration from format 2 (`vault upgrade NAME`)
 
 Explicit, not on first write, because it makes every member upgrade their build at once and needs the identity to sign:
 
-- Reads of a format-2 vault keep working in **legacy mode** (v1 index shown, flagged unverified; secret files read without versions; a one-line notice says to upgrade). **Every write command refuses** with "run: vault upgrade NAME (every member must upgrade secrets-vault first)". Agents and scripts fail loudly, never silently on an un-authenticated index.
+- Reads of a format-2 vault (as decided by the **chain**, never by the index file: IM1) keep working in **legacy mode** (v1 index shown, flagged unverified; secret files read without versions; a one-line notice says to upgrade). **Every write command refuses** with "run: vault upgrade NAME (every member must upgrade secrets-vault first)". Agents and scripts fail loudly, never silently on an un-authenticated index.
 - `vault upgrade` (needs the key and the identity): verify, `prepareWrite`; re-seal all live and trashed files into `sv-vaultkey3` at version 1 (idempotent; existing `UpgradeSecrets` pattern); write index v2 from the old index (descriptions, tags kept; names with no file dropped; files with no entry get a bare entry), `rev 1`, MAC'd; append the signed `upgrade-format` record and write `vault.json` version 3 with CAS **last** (commit point). A crash before it leaves a format-2 vault whose files older builds can no longer open; rerunning finishes it.
 - **Smooth one-off (coordinator requirement; v0.1.0 ships format-2 vaults):** a personal vault upgrades with just the identity unlock (no passphrase prompt); in a shared vault any member can run it (the signed record is the only authority). Every command that can't proceed on a format-2 vault prints one line naming `vault upgrade NAME`, plus the brew/npm upgrade hint for members on older builds. A test upgrades a format-2 vault created by the current main build (773be93, built in the test and driven through the CLI).
 - **The existing index is trusted once**: whatever labels are in a v1 index at upgrade time are blessed. The command says so and tells the person to look over `vault list` after. Files are adopted at whatever value they have.
@@ -193,6 +211,7 @@ A new package **`internal/index`** (imports `format`, `crypto`; listed in `arch_
 
 ## Tests (step 2)
 
+- **IM1:** A5 plus a deleted `index.json`, and A5 plus a v1 index, on a Mac with no snapshot: refused (exit 5); with a snapshot that vouches, readable and repaired on the next write. **IM2:** an entry MAC'd under a retired key is dropped by rotation, by merge and by lost-race repair, never re-MAC'd. **IS1-IS8**, one test each (tombstone resurrection after trash purge, missing file exit 5, `--accept-rollback` resets the snapshot, planted duplicate, private-index snapshot has no labels, snapshot tombstone vs a trashed file moved back, counter ceiling, unverified-only resolution doesn't prompt, `doctor --adopt`).
 - **A1:** edited description, tags, `updated_by` each fail MAC; locked `list` shows the snapshot and flags the change; unlocked `get` refuses the key. **A2:** planted entry and junk file; ambiguity resolved by verified-first; unverified ambiguity message; the entry never reaches a read. **A3:** deleted entry, file unlisted, `get` refuses, snapshot reconstructs on write. **A4:** old index below the snapshot's `rev`; below a file's version (index lags, benign). **A5:** one file replaced by an older sealed copy: refused with no snapshot at all. **A6:** index+file together, refused on a Mac with a snapshot, accepted on one without (documented). Resurrected file after `rm`.
 - **Concurrent writers:** two goroutines `set` different keys against one folder (no lost entry); same key (warning, one consistent final state); CAS retry; a conflict copy merged; a conflict copy with a forged entry ignored; interleaved `set` and rotation.
 - **Rotation:** index re-MAC'd, tombstones and counters preserved, a forged entry dropped and reported, old-key entries fail afterwards, crash between commit and move recovers.
@@ -216,4 +235,4 @@ A new package **`internal/index`** (imports `format`, `crypto`; listed in `arch_
 2. **D-c/D-d:** a version in the header plus `rev` and `version` in the entry: any way to make them disagree usefully that I missed?
 3. **Unlisted files are not keys** (not adopted automatically): too strict, or right?
 4. **The snapshot is trusted local state** like the trust pin: anything else it should record (for example the head of the chain it was verified against)?
-5. **Chain `format`:** is a signed `upgrade-format` record the right way to stop downgrade on first-use Macs, or too heavy?
+5. **Chain `format`** (answered: right, not heavy): is a signed `upgrade-format` record the right way to stop downgrade on first-use Macs, or too heavy?
