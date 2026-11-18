@@ -103,7 +103,7 @@ The main Claude session is the **coordinator**: it talks to Arnold, plans work a
 A command-line secrets manager installed by Homebrew (Phase 1) and npm (Phase 2). Commands: `secrets-vault`, with short names `vault` and `sv`.
 
 - **Stack overrides `docs/standards/stack.md`:** Go (1.27+) for the CLI, plus a small Swift helper or Swift library for macOS Touch ID (CryptoKit Secure Enclave). No web framework, database, Neon, hosting or dev login. "UI" means the terminal UI (`vault ui`); there is no browser UI by design.
-- **Design doc:** `/Users/asmyth/Documents/Development/the-secrets-vault/docs/private/vault-cli-design.html` (local only, git-ignored because it contains personal paths and vault names). Read it before working. Its Decisions section (D1-D10) is settled.
+- **Design doc:** `docs/private/vault-cli-design.html` in the main checkout (the first path in `git worktree list`; local only, git-ignored because it contains personal paths and vault names). Read it before working. Its Decisions section (D1-D10) is settled.
 - **Never commit vault data, real keys, personal paths or real key names.** Tests use generated keys and canary values. This repo is public.
 - **Phase 0 (done):** `spikes/phase0-touchid` proves Touch ID via the Secure Enclave from an unsigned ad-hoc build. This Mac's Command Line Tools need the vfsoverlay in that README to compile Swift.
 - **Security testing is required from the first commit:** leak tests (canary values must never appear in output/logs/errors), tamper tests, Go fuzzing of every parser, gosec, govulncheck, CodeQL, gitleaks. See the design doc's Security testing section.

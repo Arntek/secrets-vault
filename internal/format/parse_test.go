@@ -221,7 +221,7 @@ func TestParseIndexRejects(t *testing.T) {
 }
 
 func TestValidateVaultNameAndTag(t *testing.T) {
-	for _, ok := range []string{"personal", "ebcfo", "client-1", "a_b", "9"} {
+	for _, ok := range []string{"personal", "work", "client-1", "a_b", "9"} {
 		if err := ValidateVaultName(ok); err != nil {
 			t.Errorf("ValidateVaultName(%q) = %v", ok, err)
 		}
