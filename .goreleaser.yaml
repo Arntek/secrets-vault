@@ -1,0 +1,76 @@
+# GoReleaser config. See docs/releasing.md.
+# No code signing or notarisation on purpose (design decision D10: no paid
+# Apple account; Homebrew and npm installs are not quarantined).
+version: 2
+
+project_name: secrets-vault
+
+before:
+  hooks:
+    # Each macOS arch needs its own Swift static library (Touch ID bridge).
+    - make touchid-lib TOUCHID_DIR=build/touchid-arm64 SWIFT_ARCH=arm64
+    - make touchid-lib TOUCHID_DIR=build/touchid-amd64 SWIFT_ARCH=x86_64
+
+builds:
+  # macOS: cgo + Swift static library, "touchid" tag. Needs a macOS host.
+  # SWIFT_SDK and SWIFT_TCLIB come from scripts/swift-env.sh.
+  - id: macos-arm64
+    main: ./cmd/secrets-vault
+    binary: secrets-vault
+    goos: [darwin]
+    goarch: [arm64]
+    tags: [touchid]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version={{ .Tag }}
+    env:
+      - CGO_ENABLED=1
+      - MACOSX_DEPLOYMENT_TARGET=13.0
+      - CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries -L{{ .Env.PWD }}/build/touchid-arm64 -lsvtouchid -L{{ .Env.SWIFT_SDK }}/usr/lib/swift -L{{ .Env.SWIFT_TCLIB }}
+  - id: macos-amd64
+    main: ./cmd/secrets-vault
+    binary: secrets-vault
+    goos: [darwin]
+    goarch: [amd64]
+    tags: [touchid]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version={{ .Tag }}
+    env:
+      - CGO_ENABLED=1
+      - MACOSX_DEPLOYMENT_TARGET=13.0
+      - CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries -L{{ .Env.PWD }}/build/touchid-amd64 -lsvtouchid -L{{ .Env.SWIFT_SDK }}/usr/lib/swift -L{{ .Env.SWIFT_TCLIB }}
+  # Linux: pure Go, no Touch ID.
+  - id: linux
+    main: ./cmd/secrets-vault
+    binary: secrets-vault
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version={{ .Tag }}
+    env:
+      - CGO_ENABLED=0
+
+archives:
+  - formats: [tar.gz]
+    name_template: "secrets-vault_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+release:
+  github:
+    owner: Arntek
+    name: secrets-vault
+
+changelog:
+  use: github
+
+# SBOM (syft) is a follow-up: it needs syft installed on the runner.
+# Homebrew formula publishing lives in .github/workflows/release.yml
+# (disabled until the Arntek/homebrew-tap repo exists).

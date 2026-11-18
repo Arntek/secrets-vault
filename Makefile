@@ -51,7 +51,7 @@ TAGFLAG := $(if $(strip $(TAGS)),-tags '$(strip $(TAGS))')
 TOOLBIN := $(shell $(GO) env GOPATH)/bin
 tool = $(or $(shell command -v $(1) 2>/dev/null),$(TOOLBIN)/$(1))
 
-.PHONY: all build cross touchid-lib touchid-manual test test-short lint fmt fmt-check vet staticcheck gosec vulncheck gitleaks actionlint fuzz tools clean
+.PHONY: all build snapshot cross touchid-lib touchid-manual test test-short lint fmt fmt-check vet staticcheck gosec vulncheck gitleaks actionlint fuzz tools clean
 
 all: lint test build
 
@@ -63,6 +63,11 @@ test: $(TOUCHID_DEPS)
 
 test-short: $(TOUCHID_DEPS)
 	$(GO) test $(TAGFLAG) -short ./...
+
+# Local dry run of the release build (no upload). macOS only; needs goreleaser.
+snapshot:
+	@set -e; for kv in $$(./scripts/swift-env.sh); do export "$$kv"; done; \
+	goreleaser release --snapshot --clean --skip=publish
 
 # Non-macOS release targets build without cgo (no Touch ID).
 cross:
