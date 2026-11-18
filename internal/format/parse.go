@@ -9,14 +9,20 @@ import (
 
 // ParseVaultFile strictly decodes and validates vault.json. A file written
 // by a newer format version returns ErrUnsupportedVersion; anything else
-// that is not exactly a valid version-1 file returns an error wrapping
-// ErrMalformed (or ErrTooLarge). It never returns a partly filled value.
+// that is not exactly a valid version-1 or version-2 file returns an error
+// wrapping ErrMalformed (or ErrTooLarge). It never returns a partly filled
+// value. It checks structure only: the membership log's signatures are
+// verified by package members, and callers must refuse version 1 except
+// for migration.
 func ParseVaultFile(data []byte) (*VaultFile, error) {
-	if err := checkVersion(data); err != nil {
+	if len(data) > MaxVaultFileSize {
+		return nil, fmt.Errorf("vault.json: %w", ErrTooLarge)
+	}
+	if err := checkVersion(data, MaxVaultFileSize, VaultVersion); err != nil {
 		return nil, fmt.Errorf("vault.json: %w", err)
 	}
 	var vf VaultFile
-	if err := decodeStrict(data, &vf); err != nil {
+	if err := decodeStrictMax(data, MaxVaultFileSize, &vf); err != nil {
 		return nil, fmt.Errorf("vault.json: %w", err)
 	}
 	if err := vf.Validate(); err != nil {
@@ -28,7 +34,7 @@ func ParseVaultFile(data []byte) (*VaultFile, error) {
 // ParseIndex strictly decodes and validates index.json, with the same
 // guarantees as ParseVaultFile.
 func ParseIndex(data []byte) (*Index, error) {
-	if err := checkVersion(data); err != nil {
+	if err := checkVersion(data, MaxFileSize, IndexVersion); err != nil {
 		return nil, fmt.Errorf("index.json: %w", err)
 	}
 	var idx Index
@@ -43,8 +49,8 @@ func ParseIndex(data []byte) (*Index, error) {
 
 // checkVersion reads only the version field, so a file from a newer build
 // (which may add fields) reports "upgrade" instead of "malformed".
-func checkVersion(data []byte) error {
-	if err := checkJSONShape(data); err != nil {
+func checkVersion(data []byte, maxSize, newest int) error {
+	if err := checkJSONShapeMax(data, maxSize); err != nil {
 		return err
 	}
 	var v struct {
@@ -57,7 +63,7 @@ func checkVersion(data []byte) error {
 	if err := json.Unmarshal(v.Version, &n); err != nil {
 		return fmt.Errorf("%w: missing or non-integer version", ErrMalformed)
 	}
-	if n > CurrentVersion {
+	if n > newest {
 		return ErrUnsupportedVersion
 	}
 	if n < 1 {
@@ -67,11 +73,19 @@ func checkVersion(data []byte) error {
 }
 
 // Validate checks every field of vf. Marshal calls it, so an invalid vault
-// file is never written.
+// file is never written. Version 1 (pre-membership-log, read only for
+// migration) and version 2 have different rules.
 func (vf *VaultFile) Validate() error {
-	if vf.Version != CurrentVersion {
-		return fmt.Errorf("%w: unsupported version", ErrMalformed)
+	switch vf.Version {
+	case 1:
+		return vf.validateV1()
+	case VaultVersion:
+		return vf.validateV2()
 	}
+	return fmt.Errorf("%w: unsupported version", ErrMalformed)
+}
+
+func (vf *VaultFile) validateHeader() error {
 	if err := ValidateVaultID(vf.ID); err != nil {
 		return err
 	}
@@ -86,6 +100,16 @@ func (vf *VaultFile) Validate() error {
 	}
 	if len(vf.Unlockers) > MaxUnlockers {
 		return fmt.Errorf("%w: more than %d unlockers", ErrMalformed, MaxUnlockers)
+	}
+	return nil
+}
+
+func (vf *VaultFile) validateV1() error {
+	if err := vf.validateHeader(); err != nil {
+		return err
+	}
+	if len(vf.Members) != 0 || len(vf.Log) != 0 {
+		return fmt.Errorf("%w: version 1 has no members or log", ErrMalformed)
 	}
 	passphrases := 0
 	seen := map[string]bool{}
@@ -106,6 +130,78 @@ func (vf *VaultFile) Validate() error {
 			}
 			seen[k] = true
 		}
+	}
+	return nil
+}
+
+// validateV2 checks the structure of a version-2 file: a non-empty member
+// set sorted by name with unique names, recipients and signing keys;
+// exactly one member unlocker per member (same label and recipient) and at
+// most one passphrase unlocker, nothing else; and 1-MaxLogEntries log
+// entries. Signatures and the hashes in the log are package members' job.
+func (vf *VaultFile) validateV2() error {
+	if err := vf.validateHeader(); err != nil {
+		return err
+	}
+	if err := ValidateMembers(vf.Members); err != nil {
+		return err
+	}
+	byName := make(map[string]Member, len(vf.Members))
+	for _, m := range vf.Members {
+		byName[m.Name] = m
+	}
+	passphrases := 0
+	unlocked := map[string]bool{}
+	for i, u := range vf.Unlockers {
+		if err := u.Validate(); err != nil {
+			return fmt.Errorf("unlocker %d: %w", i+1, err)
+		}
+		switch u.Type {
+		case UnlockerPassphrase:
+			passphrases++
+			if passphrases > 1 {
+				return fmt.Errorf("%w: more than one passphrase unlocker", ErrMalformed)
+			}
+			if u.Label != "" || u.Recipient != "" {
+				return fmt.Errorf("unlocker %d: %w: passphrase unlocker has a label or recipient", i+1, ErrMalformed)
+			}
+		case UnlockerMember:
+			m, ok := byName[u.Label]
+			if !ok || m.Recipient != u.Recipient {
+				return fmt.Errorf("unlocker %d: %w: member unlocker does not match a member", i+1, ErrMalformed)
+			}
+			if unlocked[u.Label] {
+				return fmt.Errorf("unlocker %d: %w: two unlockers for one member", i+1, ErrMalformed)
+			}
+			unlocked[u.Label] = true
+		default:
+			return fmt.Errorf("unlocker %d: %w: unlocker type not allowed in this format version", i+1, ErrMalformed)
+		}
+	}
+	if len(unlocked) != len(vf.Members) {
+		return fmt.Errorf("%w: a member has no unlocker", ErrMalformed)
+	}
+	if len(vf.Log) == 0 || len(vf.Log) > MaxLogEntries {
+		return fmt.Errorf("%w: membership log must have 1-%d records", ErrMalformed, MaxLogEntries)
+	}
+	for i, e := range vf.Log {
+		if err := e.Validate(); err != nil {
+			return fmt.Errorf("log record %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// Validate checks one log entry's structure.
+func (e *LogEntry) Validate() error {
+	if len(e.Body) == 0 || len(e.Body) > MaxRecordSize {
+		return fmt.Errorf("%w: record body must be 1-%d bytes", ErrMalformed, MaxRecordSize)
+	}
+	if err := ValidateMemberName(e.By); err != nil {
+		return fmt.Errorf("%w: bad signer name", ErrMalformed)
+	}
+	if len(e.Sig) != SignatureSize {
+		return fmt.Errorf("%w: bad signature length", ErrMalformed)
 	}
 	return nil
 }
@@ -139,8 +235,12 @@ func (u *Unlocker) Validate() error {
 	return nil
 }
 
-// MarshalVaultFile validates vf and encodes it as indented JSON.
+// MarshalVaultFile validates vf and encodes it as indented JSON. Only the
+// current version is ever written.
 func MarshalVaultFile(vf *VaultFile) ([]byte, error) {
+	if vf.Version != VaultVersion {
+		return nil, fmt.Errorf("%w: only version %d is written", ErrMalformed, VaultVersion)
+	}
 	if err := vf.Validate(); err != nil {
 		return nil, err
 	}
@@ -189,7 +289,7 @@ func (vf *VaultFile) RemoveUnlockers(drop func(Unlocker) bool) int {
 
 // Validate checks every field of idx. Marshal calls it.
 func (idx *Index) Validate() error {
-	if idx.Version != CurrentVersion {
+	if idx.Version != IndexVersion {
 		return fmt.Errorf("%w: unsupported version", ErrMalformed)
 	}
 	if len(idx.Entries) > MaxIndexEntries {

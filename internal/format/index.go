@@ -9,7 +9,7 @@ import (
 
 // NewIndex returns an empty index at the current version.
 func NewIndex() *Index {
-	return &Index{Version: CurrentVersion, Entries: []IndexEntry{}}
+	return &Index{Version: IndexVersion, Entries: []IndexEntry{}}
 }
 
 // Get returns the entry for name.

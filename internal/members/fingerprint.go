@@ -37,10 +37,10 @@ const (
 	// each) and a four-digit number (log2(10000) = 13.29 bits).
 	FingerprintBits = 33 + 13.29
 
-	// The "v2" strings separate this format from the two-word v1 one, so a
-	// v1 fingerprint can never equal a v2 one for the same key.
-	fpDomain = "secrets-vault/v2 member fingerprint\x00"
-	fpSalt   = "secrets-vault/v2 fingerprint salt"
+	// The "v3" strings separate this format (over both public keys) from
+	// earlier ones (over the age key only).
+	fpDomain = "secrets-vault/v3 member fingerprint\x00"
+	fpSalt   = "secrets-vault/v3 fingerprint salt"
 	// scrypt cost: ~8 MiB and ~15 ms per fingerprint. At 46 bits, forging a
 	// second key with the same fingerprint takes about 2^46 key generations
 	// and fingerprints: tens of thousands of CPU-years even at this cost.
@@ -83,10 +83,12 @@ func CheckFingerprintFormat(s string) error {
 	return nil
 }
 
-// Fingerprint derives the human-readable fingerprint of an age X25519
-// recipient: WORD-WORD-WORD-NNNN, e.g. MAPLE-RIVER-OTTER-4417.
+// Fingerprint derives the human-readable fingerprint of a person's two
+// public keys, their age X25519 recipient and their Ed25519 signing key:
+// WORD-WORD-WORD-NNNN, e.g. MAPLE-RIVER-OTTER-4417. Checking it aloud
+// checks both keys.
 //
-// It is the scrypt hash of the canonical recipient string, split into
+// It is the scrypt hash of the canonical recipient and signing key, split into
 // three 11-bit words and a number below 10000, so it carries about 46 bits. That is enough to catch a swapped or mistyped key when two people
 // read it to each other once, at the moment of approval. It is not a
 // long-term identifier, and the scrypt cost is there so that an attacker who
@@ -95,17 +97,21 @@ func CheckFingerprintFormat(s string) error {
 //
 // The recipient must be a valid age X25519 recipient in canonical (lower
 // case) form.
-func Fingerprint(recipient string) (string, error) {
+func Fingerprint(recipient, signKey string) (string, error) {
 	r, err := age.ParseX25519Recipient(recipient)
 	if err != nil || r.String() != recipient {
 		return "", ErrInvalidRecipient
 	}
-	if fp, ok := fpCache.get(recipient); ok {
+	if err := checkSignKey(signKey); err != nil {
+		return "", err
+	}
+	in := recipient + "\x00" + signKey
+	if fp, ok := fpCache.get(in); ok {
 		return fp, nil
 	}
-	fp, err := computeFingerprint(recipient)
+	fp, err := computeFingerprint(in)
 	if err == nil {
-		fpCache.put(recipient, fp)
+		fpCache.put(in, fp)
 	}
 	return fp, err
 }
@@ -136,8 +142,8 @@ func (c *fpMemo) put(k, v string) {
 	c.m[k] = v
 }
 
-func computeFingerprint(recipient string) (string, error) {
-	dk, err := scrypt.Key([]byte(fpDomain+recipient), []byte(fpSalt), fpN, fpR, fpP, 8)
+func computeFingerprint(in string) (string, error) {
+	dk, err := scrypt.Key([]byte(fpDomain+in), []byte(fpSalt), fpN, fpR, fpP, 8)
 	if err != nil {
 		return "", fmt.Errorf("members: fingerprint: %w", err)
 	}
@@ -149,11 +155,16 @@ func computeFingerprint(recipient string) (string, error) {
 	return fmt.Sprintf("%s-%s-%s-%04d", strings.ToUpper(w1), strings.ToUpper(w2), strings.ToUpper(w3), n), nil
 }
 
-// NormalizeFingerprint trims space and upper-cases what a person typed, so
-// "maple-river-otter-4417 " compares equal to the real fingerprint. Nothing else
-// is forgiven: every word and digit must match.
+// NormalizeFingerprint tidies what a person typed: case, surrounding space
+// and the separators between the words and digits (spaces, dots, dashes or
+// none at a word boundary) are forgiven, so "maple river otter 4417"
+// compares equal to MAPLE-RIVER-OTTER-4417. Every word and digit must
+// still match.
 func NormalizeFingerprint(s string) string {
-	return strings.ToUpper(strings.TrimSpace(s))
+	f := strings.FieldsFunc(strings.ToUpper(s), func(r rune) bool {
+		return r == ' ' || r == '-' || r == '.' || r == '_' || r == '\t' || r == '\n' || r == '\r' || r == ','
+	})
+	return strings.Join(f, "-")
 }
 
 // FingerprintsEqual compares two fingerprints exactly.

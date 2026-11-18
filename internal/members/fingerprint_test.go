@@ -1,12 +1,12 @@
 package members
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"math"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -56,34 +56,55 @@ func newRecipient(t testing.TB) string {
 
 var fpRe = regexp.MustCompile(`^[A-Z]{3,8}-[A-Z]{3,8}-[A-Z]{3,8}-[0-9]{4}$`)
 
+// newSignKey returns a fresh Ed25519 public key in hex.
+func newSignKey(t testing.TB) string {
+	t.Helper()
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hex.EncodeToString(pub)
+}
+
 func TestFingerprint(t *testing.T) {
 	r1, r2 := newRecipient(t), newRecipient(t)
-	a, err := Fingerprint(r1)
+	sk := newSignKey(t)
+	a, err := Fingerprint(r1, sk)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !fpRe.MatchString(a) {
 		t.Fatalf("unexpected format %q", a)
 	}
-	again, _ := Fingerprint(r1)
+	again, _ := Fingerprint(r1, sk)
 	if a != again {
 		t.Fatal("not deterministic")
 	}
-	b, _ := Fingerprint(r2)
+	b, _ := Fingerprint(r2, sk)
 	if a == b {
 		t.Fatalf("two random keys share %q (1 in 3e10; rerun)", a)
+	}
+	// The fingerprint covers the signing key too: pairing someone's age key
+	// with another signing key changes it.
+	c, _ := Fingerprint(r1, newSignKey(t))
+	if a == c {
+		t.Fatalf("signing key not covered by %q", a)
 	}
 }
 
 // Public test vector (the matching private key was discarded). Pins the
-// derivation: scrypt parameters, bit split, upper-casing.
+// derivation: scrypt parameters, bit split, upper-casing. The signing key
+// is the Ed25519 public key of a fixed, published seed (all bytes 7), so no
+// key-like constant sits in the repository.
 const (
 	knownRecipient   = "age1kcxhuxclcv3a27xa5planrvg5444lzwcchw4d5xeu4zzvj86ts7qsp93hz"
-	knownFingerprint = "EMPLOY-WRITE-LOAD-4806"
+	knownFingerprint = "OBTAIN-MORNING-AMUSED-7560"
 )
 
+var knownSignKey = hex.EncodeToString(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)).Public().(ed25519.PublicKey))
+
 func TestFingerprintKnownAnswer(t *testing.T) {
-	got, err := Fingerprint(knownRecipient)
+	got, err := Fingerprint(knownRecipient, knownSignKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,15 +123,22 @@ func TestFingerprintRejectsBadRecipients(t *testing.T) {
 		"plugin":    "age1yubikey1qfakefakefake",
 		"space":     good + " ",
 	} {
-		if _, err := Fingerprint(in); !errors.Is(err, ErrInvalidRecipient) {
+		if _, err := Fingerprint(in, knownSignKey); !errors.Is(err, ErrInvalidRecipient) {
 			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	for _, bad := range []string{"", "xyz", strings.ToUpper(knownSignKey), knownSignKey[:62]} {
+		if _, err := Fingerprint(good, bad); !errors.Is(err, ErrInvalidRecipient) {
+			t.Errorf("sign key %q: err = %v", bad, err)
 		}
 	}
 }
 
 func TestFingerprintComparison(t *testing.T) {
-	if NormalizeFingerprint("  maple-river-otter-4417\n") != "MAPLE-RIVER-OTTER-4417" {
-		t.Fatal("normalize")
+	for _, typed := range []string{"  maple-river-otter-4417\n", "maple river otter 4417", "Maple.River.Otter.4417", "MAPLE--RIVER  OTTER-4417"} {
+		if NormalizeFingerprint(typed) != "MAPLE-RIVER-OTTER-4417" {
+			t.Fatalf("normalize %q = %q", typed, NormalizeFingerprint(typed))
+		}
 	}
 	if !FingerprintsEqual("MAPLE-RIVER-OTTER-4417", "MAPLE-RIVER-OTTER-4417") {
 		t.Fatal("equal")
@@ -126,11 +154,11 @@ func TestFingerprintComparison(t *testing.T) {
 }
 
 func FuzzFingerprint(f *testing.F) {
-	f.Add(newRecipient(f))
-	f.Add("age1")
-	f.Add("")
-	f.Fuzz(func(t *testing.T, s string) {
-		fp, err := Fingerprint(s)
+	f.Add(newRecipient(f), newSignKey(f))
+	f.Add("age1", "")
+	f.Add("", "00")
+	f.Fuzz(func(t *testing.T, s, k string) {
+		fp, err := Fingerprint(s, k)
 		if err == nil && !fpRe.MatchString(fp) {
 			t.Fatalf("bad fingerprint %q", fp)
 		}
@@ -151,27 +179,8 @@ func TestCheckFingerprintFormat(t *testing.T) {
 		}
 	}
 	// Real fingerprints always pass.
-	fp, _ := Fingerprint(newRecipient(t))
+	fp, _ := Fingerprint(newRecipient(t), newSignKey(t))
 	if err := CheckFingerprintFormat(fp); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// A v1 two-word fingerprint (or request file) is rejected with a clear error.
-func TestOldTwoWordFormatRejected(t *testing.T) {
-	alice, bob := newPerson(t, "alice"), newPerson(t, "bob")
-	dir, key := newSharedVault(t, alice)
-	if err := WriteRequest(dir, bob.pub, t0); err != nil {
-		t.Fatal(err)
-	}
-	_, err := ApproveRequest(dir, key, "bob", "DUTCH-PREDICT-1767", "alice")
-	if !errors.Is(err, ErrFingerprintFormat) || !errors.Is(err, ErrFingerprintMismatch) {
-		t.Fatalf("old form on approve: %v", err)
-	}
-	p := filepath.Join(dir, "requests", "bob.json")
-	data, _ := os.ReadFile(p)
-	old := strings.Replace(string(data), bob.pub.Fingerprint, "DUTCH-PREDICT-1767", 1)
-	if _, err := ParseRequest([]byte(old)); !errors.Is(err, ErrMalformed) || !strings.Contains(err.Error(), "three-word") {
-		t.Fatalf("old form in request file: %v", err)
 	}
 }

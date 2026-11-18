@@ -131,15 +131,11 @@ func TestStagingCommit(t *testing.T) {
 	if ids, _ := PendingRotations(dir); !slices.Equal(ids, []string{testKeyID}) {
 		t.Fatalf("PendingRotations = %v", ids)
 	}
-	// Recovery for a different current key leaves the staging alone.
-	if done, err := RecoverRotation(dir, "ffffffffffffffffffffffffffffffff"); done || err != nil {
-		t.Fatalf("RecoverRotation(other) = %v, %v", done, err)
-	}
 	if got, _ := ReadSecretFile(dir, "A"); string(got) != "old-a" {
 		t.Fatal("live file changed before commit")
 	}
-	if done, err := RecoverRotation(dir, testKeyID); !done || err != nil {
-		t.Fatalf("RecoverRotation = %v, %v", done, err)
+	if err := CommitStaged(dir, testKeyID); err != nil {
+		t.Fatalf("CommitStaged = %v", err)
 	}
 	if got, _ := ReadSecretFile(dir, "A"); string(got) != "new-a" {
 		t.Fatalf("A after commit = %q", got)

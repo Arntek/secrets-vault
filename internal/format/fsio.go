@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -120,17 +121,106 @@ func TrashPath(vaultDir string) string { return filepath.Join(vaultDir, SecretsD
 
 // ReadVaultFile reads and parses vaultDir/vault.json.
 func ReadVaultFile(vaultDir string) (*VaultFile, error) {
-	data, err := readRegular(VaultFilePath(vaultDir), MaxFileSize)
-	if err != nil {
-		return nil, err
+	vf, _, err := ReadVaultFileBytes(vaultDir)
+	return vf, err
+}
+
+// ReadVaultFileBytes reads and parses vaultDir/vault.json and also returns
+// the exact bytes read, for WriteVaultFileCAS.
+func ReadVaultFileBytes(vaultDir string) (*VaultFile, []byte, error) {
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return nil, nil, err
 	}
-	return ParseVaultFile(data)
+	data, err := readRegular(VaultFilePath(vaultDir), MaxVaultFileSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	vf, err := ParseVaultFile(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return vf, data, nil
+}
+
+// WriteVaultFileCAS validates vf and writes vaultDir/vault.json atomically,
+// but only if the file still holds exactly expect (the bytes the caller
+// read and verified). Otherwise it returns ErrChanged and writes nothing.
+// A nil expect means the file must not exist yet.
+func WriteVaultFileCAS(vaultDir string, vf *VaultFile, expect []byte) error {
+	data, err := MarshalVaultFile(vf)
+	if err != nil {
+		return err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
+	cur, err := readRegular(VaultFilePath(vaultDir), MaxVaultFileSize)
+	switch {
+	case expect == nil && errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return err
+	case expect == nil || !bytes.Equal(cur, expect):
+		return ErrChanged
+	}
+	return WriteFileAtomic(VaultFilePath(vaultDir), data, FileMode)
+}
+
+// CheckVaultDirs refuses a vault folder whose own directory, secrets/,
+// secrets/.trash/, requests/ or any rotation staging folder is a symlink,
+// is not a directory or (on Unix) is not owned by the current user.
+// Folders that do not exist are fine (except the vault folder itself).
+// Every function here that writes, renames or deletes under a vault calls
+// it first, so a folder writer cannot redirect those operations elsewhere
+// on the machine.
+func CheckVaultDirs(vaultDir string) error {
+	if err := checkDir(vaultDir, false); err != nil {
+		return err
+	}
+	for _, rel := range []string{SecretsDir, filepath.Join(SecretsDir, TrashDir), RequestsDir} {
+		if err := checkDir(filepath.Join(vaultDir, rel), true); err != nil {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(SecretsPath(vaultDir))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), stagingPrefix) {
+			if err := checkDir(filepath.Join(SecretsPath(vaultDir), e.Name()), true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkDir requires path to be a real directory owned by the current user.
+func checkDir(path string, missingOK bool) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if missingOK && errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 || !fi.IsDir() || !ownedByMe(fi) {
+		return fmt.Errorf("%s: %w", filepath.Base(path), ErrUnsafeDir)
+	}
+	return nil
 }
 
 // WriteVaultFile validates vf and writes vaultDir/vault.json atomically.
+// Prefer WriteVaultFileCAS for any update of an existing vault.
 func WriteVaultFile(vaultDir string, vf *VaultFile) error {
 	data, err := MarshalVaultFile(vf)
 	if err != nil {
+		return err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
 		return err
 	}
 	return WriteFileAtomic(VaultFilePath(vaultDir), data, FileMode)
@@ -152,6 +242,9 @@ func WriteIndex(vaultDir string, idx *Index) error {
 	if err != nil {
 		return err
 	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
 	return WriteFileAtomic(IndexPath(vaultDir), data, FileMode)
 }
 
@@ -169,6 +262,9 @@ func CreateVault(vaultDir string, vf *VaultFile) error {
 		return err
 	}
 	if err := os.MkdirAll(SecretsPath(vaultDir), DirMode); err != nil {
+		return err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
 		return err
 	}
 	if err := WriteIndex(vaultDir, NewIndex()); err != nil {
@@ -195,6 +291,9 @@ func WriteSecretFile(vaultDir, name string, ciphertext []byte) error {
 	}
 	if len(ciphertext) > MaxSecretFileSize {
 		return ErrTooLarge
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), DirMode); err != nil {
 		return err
@@ -255,4 +354,57 @@ func secretNameFromFile(file string) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+// LeaseFileName is the rotation lease at the vault root (package members
+// writes and checks it).
+const LeaseFileName = "rotation.lease"
+
+// maxLeaseSize bounds the lease file.
+const maxLeaseSize = 8 << 10
+
+// ReadLease returns the raw rotation lease, or an error wrapping
+// fs.ErrNotExist if there is none.
+func ReadLease(vaultDir string) ([]byte, error) {
+	return readRegular(filepath.Join(vaultDir, LeaseFileName), maxLeaseSize)
+}
+
+// WriteLease writes the rotation lease atomically.
+func WriteLease(vaultDir string, data []byte) error {
+	if len(data) > maxLeaseSize {
+		return ErrTooLarge
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
+	return WriteFileAtomic(filepath.Join(vaultDir, LeaseFileName), data, FileMode)
+}
+
+// RemoveLease deletes the rotation lease if present.
+func RemoveLease(vaultDir string) error {
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
+	err := os.Remove(filepath.Join(vaultDir, LeaseFileName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// ReadVaultFileCopy reads and parses a sync-conflict copy of vault.json
+// (rel as reported by FindConflicts), and returns its bytes too.
+func ReadVaultFileCopy(vaultDir, rel string) (*VaultFile, []byte, error) {
+	if strings.Contains(rel, "/") || strings.Contains(rel, `\`) || rel == "" || rel == "." || rel == ".." {
+		return nil, nil, fmt.Errorf("%w: not a file in the vault root", ErrMalformed)
+	}
+	data, err := readRegular(filepath.Join(vaultDir, rel), MaxVaultFileSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	vf, err := ParseVaultFile(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return vf, data, nil
 }

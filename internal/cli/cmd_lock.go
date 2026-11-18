@@ -9,7 +9,7 @@ import (
 	"github.com/Arntek/secrets-vault/internal/members"
 )
 
-// cmdUnlock: unlock [VAULT] [--for DUR] [--accept-key-change]
+// cmdUnlock: unlock [VAULT] [--for DUR] [--expect CODE]
 func cmdUnlock(a *app, p *parsed) error {
 	if err := p.wantArgs(0, 1, a.prog+" unlock [VAULT] [--for DURATION]"); err != nil {
 		return err
@@ -33,22 +33,17 @@ func cmdUnlock(a *app, p *parsed) error {
 		}
 		ttl = d
 	}
-	vf, err := v.open()
-	if err != nil {
+	if _, err := a.open(v); err != nil {
 		return err
 	}
 	// An explicit unlock always asks, so --for can reset the window; an
 	// already-unlocked vault with no --for is left alone.
-	key, err := a.openKey(v, vf, openOpts{
-		forceAuth: false, ttl: ttl, acceptKeyChg: p.has("accept-key-change"), requireAgent: true,
-	})
+	key, err := a.openKey(v, nil, openOpts{forceAuth: false, ttl: ttl, requireAgent: true})
 	if err != nil {
 		return err
 	}
 	defer key.Destroy()
-	if p.has("accept-key-change") {
-		a.pinKey(v, vf.KeyID)
-	}
+	vf := v.chain.File
 	if ttl != 0 {
 		// Re-store with the requested window.
 		cl := a.client(true)
@@ -135,12 +130,21 @@ func cmdStatus(a *app, p *parsed) error {
 		Name        string `json:"name"`
 		Fingerprint string `json:"fingerprint"`
 	}
+	type head struct {
+		Seq       int    `json:"seq"`
+		Time      string `json:"time"`
+		By        string `json:"by"`
+		Hash      string `json:"hash"`
+		StateCode string `json:"state_code"`
+		Trusted   bool   `json:"trusted"`
+	}
 	type row struct {
 		Vault       string `json:"vault"`
 		Unlocked    bool   `json:"unlocked"`
 		SecondsLeft int    `json:"seconds_left"`
 		Expires     string `json:"expires,omitempty"`
 		Requests    []req  `json:"join_requests"`
+		Head        *head  `json:"head,omitempty"`
 		Error       string `json:"error,omitempty"`
 		left        time.Duration
 	}
@@ -163,7 +167,18 @@ func cmdStatus(a *app, p *parsed) error {
 			r.SecondsLeft = int(r.left.Seconds())
 			r.Expires = st.Expires.UTC().Format(time.RFC3339)
 		}
-		reqs, _, err := members.ListRequests(v.dir)
+		if c, _, err := members.Load(v.dir, v.entry.ID); err == nil {
+			h := c.Head()
+			r.Head = &head{Seq: h.Seq, Time: h.Time.UTC().Format(time.RFC3339), By: h.By, Hash: h.Head, StateCode: members.StateCode(c, h.Seq)}
+			if ts, err := a.trustStore(); err == nil {
+				pin, _ := ts.Load(c.File.ID)
+				cl := members.Classify(c, pin)
+				r.Head.Trusted = cl.Outcome == members.Same || cl.Outcome == members.Extension
+			}
+		} else if vf.Version == format.VaultVersion {
+			r.Error = "does not verify"
+		}
+		reqs, _, err := members.ListRequests(v.dir, vf.ID)
 		if err == nil {
 			for _, q := range reqs {
 				r.Requests = append(r.Requests, req{q.Identity.Name, q.Identity.Fingerprint})
@@ -178,14 +193,23 @@ func cmdStatus(a *app, p *parsed) error {
 		a.printf("No vaults yet. Create one with: %s init NAME --path DIR\n", a.prog)
 		return nil
 	}
-	t := newTable(a.out, "VAULT", "STATE", "TIME LEFT", "")
+	t := newTable(a.out, "VAULT", "STATE", "TIME LEFT", "STATE CODE", "")
 	for _, r := range rows {
-		state, left, note := "locked", "", ""
+		state, left, note, code := "locked", "", "", ""
 		switch {
 		case r.Error != "":
-			state = "unavailable"
+			state = r.Error
+			if r.Error == "unavailable" {
+				state = "unavailable"
+			}
 		case r.Unlocked:
 			state, left = "unlocked", timeLeft(r.left)+" left"
+		}
+		if r.Head != nil {
+			code = r.Head.StateCode
+			if !r.Head.Trusted {
+				code += " (not yet trusted here)"
+			}
 		}
 		if len(r.Requests) > 0 {
 			note = plural(len(r.Requests), "join request") + ":"
@@ -193,7 +217,7 @@ func cmdStatus(a *app, p *parsed) error {
 				note += " " + q.Name + " (" + q.Fingerprint + ")"
 			}
 		}
-		t.row(r.Vault, state, left, note)
+		t.row(r.Vault, state, left, code, note)
 	}
 	t.flush()
 	return nil

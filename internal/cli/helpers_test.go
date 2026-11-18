@@ -274,11 +274,17 @@ func (e *testEnv) mustRunIn(stdin string, args ...string) result {
 	return r
 }
 
+// testUser is the identity name every test environment uses.
+const testUser = "tester"
+
 // initVault creates a vault with the test passphrase (non-interactive).
+// The first vault also creates this user's identity, with the same
+// passphrase; stdin carries it twice either way: identity (created or
+// unlocked), then the vault's recovery passphrase.
 func (e *testEnv) initVault(name string) string {
 	e.t.Helper()
 	dir := filepath.Join(e.home, "vaults", name)
-	e.mustRunIn(testPass+"\n", "init", name, "--path", dir, "--passphrase-stdin")
+	e.mustRunIn(testPass+"\n"+testPass+"\n", "init", name, "--path", dir, "--passphrase-stdin", "--as", testUser)
 	return dir
 }
 

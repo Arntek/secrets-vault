@@ -86,7 +86,7 @@ Create a vault in a folder you choose:
 vault init personal --path ~/Vaults/personal --desc "My own accounts"
 ```
 
-You choose a passphrase (keep it in your password manager: there is no recovery), and on a Mac with Touch ID you're offered Touch ID unlock. The new vault is left unlocked, so you can add keys straight away.
+The first time, this also creates your identity: a name, a personal passphrase and, on a Mac with Touch ID, Touch ID unlock. Then you choose the vault's recovery passphrase (keep it in your password manager). You are the vault's owner, and the new vault is left unlocked, so you can add keys straight away.
 
 Add a key. The value is typed hidden or piped in, never passed as an argument, so it never lands in shell history:
 
@@ -145,36 +145,40 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 
 | Command | What it does |
 |---|---|
-| `vault unlock [VAULT] [--for 2h]` | Unlock ahead of time (default vault if none named). `--accept-key-change` trusts a vault whose key changed since this Mac last used it |
+| `vault unlock [VAULT] [--for 2h]` | Unlock ahead of time (default vault if none named) |
 | `vault lock [VAULT \| --all]` | Forget unlocked keys now |
-| `vault status` | Each vault: locked or unlocked, time left |
+| `vault status` | Each vault: locked or unlocked, time left, its state code |
 
 **Vaults, members and settings**
 
 | Command | What it does |
 |---|---|
-| `vault init NAME --path DIR` | Create a vault in a folder you choose |
+| `vault init NAME --path DIR [--as NAME]` | Create a vault in a folder you choose (and your identity, the first time) |
 | `vault attach NAME DIR [--as NAME] [--no-request]` | Register an existing vault; if you aren't a member, files a join request (`--no-request` to skip) |
 | `vault detach NAME` | Remove from this machine's registry (files untouched) |
 | `vault vaults` | List registered vaults and their folders |
-| `vault passwd VAULT` | Change a vault's passphrase |
-| `vault touchid on\|off\|list [VAULT]` | Turn Touch ID unlock on or off on this Mac |
-| `vault member approve\|rm\|list\|requests VAULT [NAME]` | Manage who can open a shared vault |
+| `vault passwd VAULT` | Set a new vault passphrase; also replaces the vault key, so the old passphrase opens nothing new (`--no-rotate` for a one-member vault) |
+| `vault touchid on\|off\|status` | Turn Touch ID on or off for your identity on this Mac (it opens every vault you're a member of) |
+| `vault member approve\|rm\|list\|requests\|log VAULT [NAME]` | Manage who can open a shared vault; `log` shows the signed history |
+| `vault trust VAULT [--expect CODE]` | Check a vault against a state code another member gave you, or finish a change that raced someone else's |
+| `vault doctor VAULT [--quarantine-staging]` | Check for sync conflicts and leftover key-rotation folders; move a foreign one aside (nothing is deleted) |
+| `vault rebuild VAULT` | Recreate a vault under your identity (if the only member's identity is lost); others join again |
 | `vault identity export\|import FILE` | Move your personal identity to another machine |
 | `vault config set KEY VALUE [--vault V]`, `vault config list` | Settings: `default-ttl` (5m to 24h), `default-vault`, `touch-every-read`, `dialog` *(dialog is used in Phase 2)* |
 | `vault alias add\|rm\|list NAME [--force]` | Manage the short command names. `--force` only skips the "same name elsewhere on PATH" check; it never replaces an existing file |
 
-**Scripts and terminals:** `--passphrase-stdin` (any command) reads passphrases from stdin instead of the terminal. `rm` and `member rm` need `--yes` without a terminal; `member approve` needs a terminal or `--fingerprint FP`. `get -n` omits the trailing newline.
+**Scripts and terminals:** `--passphrase-stdin` (any command) reads passphrases from stdin instead of the terminal. `rm` needs `--yes` without a terminal; `member rm` also needs `--folder-access-removed`. `member approve` needs a terminal or `--fingerprint FP`; a first use after being added needs a terminal or `--signer-fingerprint FP`. `get -n` omits the trailing newline.
 
 *(coming in Phase 2)*: `vault ui` (full-screen terminal interface), `vault prime` and `vault setup claude|agents` (AI agent setup), `vault log` (read history), `vault doctor`, `vault backup`.
 
-**Exit codes:** `0` ok, `1` error, `2` usage, `3` vault locked and no way to ask for unlock, `4` key not found.
+**Exit codes:** `0` ok, `1` error, `2` usage, `3` vault locked and no way to ask for unlock, `4` key not found, `5` the vault failed verification (changed outside secrets-vault, replaced, rolled back, or behind a state code you were given). Scripts and AI agents must treat `5` as "stop and tell the user", never as "key missing". `list --json` includes such a vault as `{"vault": ..., "error": ...}`.
 
 ## Unlocking and Touch ID
 
 - Each vault unlocks separately. Unlocking your work vault does not unlock your personal one.
-- **Touch ID** is the normal way in on a Mac. Run `vault touchid on VAULT` once per Mac. It creates a key inside the Mac's Secure Enclave that only works after your fingerprint, and that key can never leave the chip. It works in Terminal, iTerm, VS Code and commands run by AI agents, with no paid Apple developer account involved.
-- **The passphrase** always works too: over SSH, on Linux and Windows, or if you cancel the Touch ID prompt. It is also your recovery route, so keep it safe.
+- **Touch ID** is the normal way in on a Mac. It unlocks your identity, which opens every vault you are a member of. You are offered it when your identity is created; otherwise run `vault touchid on` once per Mac. It uses a key inside the Mac's Secure Enclave that only works after your fingerprint and can never leave the chip. It works in Terminal, iTerm, VS Code and commands run by AI agents, with no paid Apple developer account involved, and it keeps working when a vault's key is replaced.
+- **Your personal passphrase** always works too: over SSH, on Linux and Windows, or if you cancel the Touch ID prompt.
+- **The vault passphrase** is the recovery route if your identity is lost. Keep it safe. It is dropped when a member is removed (set a new one with `vault passwd`).
 - **How long it stays unlocked:** 4 hours by default. Change it globally (`vault config set default-ttl 6h`), per vault (`--vault work`), or once (`vault unlock --for 30m`).
 - Unlocked keys are held by a small background helper, like `ssh-agent`, in memory only. Only your own user account can talk to it. Restarting or logging out locks everything. If your home folder path is very long, the helper's socket goes in a short folder under the temp directory instead; you can also choose one with `SECRETS_VAULT_AGENT_DIR`.
 
@@ -183,14 +187,21 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 Put the vault folder somewhere you both can reach (a shared Box or Dropbox folder, for example). Each person has their own identity, so nobody shares a passphrase.
 
 1. Your colleague installs secrets-vault and runs `vault attach work <their path to the shared folder>`. The first time, this creates their identity (a name and a personal passphrase) and shows a fingerprint such as `MAPLE-RIVER-OTTER-4417`.
-2. Because they aren't a member yet, this drops a join request into the folder.
+2. Because they aren't a member yet, this drops a signed join request into the folder.
 3. You see it in `vault status` or `vault member requests work`.
-4. **Check the fingerprint with them by phone or chat**, then run `vault member approve work THEIR-NAME` and type `y` to confirm it matches (or pass `--fingerprint` in a script). This check matters: anyone who can write to the shared folder can file a request.
-5. After the folder syncs, they unlock with their own Touch ID or passphrase.
+4. **Call them (phone or video).** They read their fingerprint out; you run `vault member approve work THEIR-NAME` and **type** what they read. Then read them yours, which the command shows.
+5. After the folder syncs, they open the vault for the first time and are asked to type **your** fingerprint. That check means nobody who can write to the shared folder can slip in a fake vault or a fake member.
 
-To remove someone: `vault member rm work THEIR-NAME`. This gives the vault a new key and re-encrypts everything, so their old access stops working. Rotate any keys they could have seen at the service that issued them; the command lists which.
+Every change to who can open the vault is signed by a member and recorded (`vault member log work`), and each machine remembers the last state it checked, so a folder that someone edited or rolled back is refused rather than used.
 
-Keep at least two members on a shared vault (or a member plus a recovery passphrase), so losing one Mac never locks everyone out.
+To remove someone:
+
+1. **First remove their access to the shared folder** in Box or Dropbox. Otherwise they could put back an old copy of the vault for members who haven't opened it since.
+2. Run `vault member rm work THEIR-NAME`. It asks you to confirm step 1, gives the vault a new key and re-encrypts everything. The vault passphrase stops working (anyone could have known it); set a new one with `vault passwd work`, or keep it with `--keep-passphrase` (recorded in the log).
+3. Rotate any keys they could have seen at the service that issued them; the command lists which.
+4. Send the other members the **state code** it prints. They run `vault trust work --expect CODE`, which makes sure their copy is the new one.
+
+Keep at least two members on a shared vault (or a member plus a recovery passphrase), so losing one identity never locks everyone out. If the only member's identity is lost, open the vault with its passphrase and run `vault rebuild work`.
 
 ## Using it from scripts
 
@@ -227,7 +238,8 @@ These rules make the safe path the easy one, and a local read log (`vault log`) 
 
 ## Security
 
-- Encryption uses the [age](https://age-encryption.org) format. Each vault has one random vault key; each secret is its own age file; the vault key is wrapped separately for each way of unlocking it (passphrase via scrypt, Touch ID via the Secure Enclave, each member's X25519 key).
+- Encryption uses the [age](https://age-encryption.org) format. Each vault has one random vault key; each secret is its own age file; the vault key is wrapped separately for each member's X25519 key and for the recovery passphrase (scrypt). Touch ID (Secure Enclave) protects each person's identity.
+- Who can open a vault is a hash-chained log of changes, each signed (Ed25519) by a member of the vault at that point. Every machine verifies the whole log and remembers the last state it verified, outside the shared folder. See [docs/design/membership-auth.md](docs/design/membership-auth.md).
 - Key names and descriptions in `index.json` are readable without unlocking. Don't put anything sensitive in a description.
 - Every change is checked in CI with race-tested unit tests, leak tests (canary values must never appear in any output, log, error or temp file), tamper tests, fuzzing of every file parser, `gosec`, `govulncheck`, CodeQL and `gitleaks`.
 - See [SECURITY.md](SECURITY.md) to report a vulnerability privately, and [docs/threat-model.md](docs/threat-model.md) for what this does and doesn't protect against.

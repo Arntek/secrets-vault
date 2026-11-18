@@ -267,6 +267,17 @@ func (a *app) myName() string {
 // unlockIdentity opens the personal identity: Touch ID first (when this Mac
 // is enrolled), then the personal passphrase.
 func (a *app) unlockIdentity() (*members.Unlocked, error) {
+	if a.identity != nil {
+		return a.identity, nil
+	}
+	un, err := a.unlockIdentityNow()
+	if err == nil {
+		a.identity = un
+	}
+	return un, err
+}
+
+func (a *app) unlockIdentityNow() (*members.Unlocked, error) {
 	s, err := a.identityStore()
 	if err != nil {
 		return nil, err
@@ -308,33 +319,42 @@ func (a *app) unlockIdentity() (*members.Unlocked, error) {
 // createIdentity makes this person's identity: a name, a personal
 // passphrase, and Touch ID when offered and available.
 func (a *app) createIdentity(name string) (members.Identity, error) {
+	id, _, err := a.createIdentityOpts(name, true, false)
+	return id, err
+}
+
+// createIdentityOpts is createIdentity choosing whether to offer Touch ID
+// (offer) or turn it on without asking (force).
+// It also returns the new identity unlocked, so the caller need not ask
+// for the passphrase again.
+func (a *app) createIdentityOpts(name string, offer, force bool) (members.Identity, *members.Unlocked, error) {
 	s, err := a.identityStore()
 	if err != nil {
-		return members.Identity{}, err
+		return members.Identity{}, nil, err
 	}
 	if name == "" {
 		if !a.term.StdinTTY() {
-			return members.Identity{}, failf("this is your first time: choose a name with --as NAME (a-z, 0-9, - and _)")
+			return members.Identity{}, nil, failf("this is your first time: choose a name with --as NAME (a-z, 0-9, - and _)")
 		}
 		if name, err = a.ask("Your name for other members (a-z, 0-9, - and _): "); err != nil {
-			return members.Identity{}, failf("no name given")
+			return members.Identity{}, nil, failf("no name given")
 		}
 	}
 	if err := members.ValidateMemberName(name); err != nil {
-		return members.Identity{}, failf("%v", err)
+		return members.Identity{}, nil, failf("%v", err)
 	}
 	pass, err := a.askNewPassphrase("Choose a personal passphrase for your identity")
 	if err != nil {
-		return members.Identity{}, err
+		return members.Identity{}, nil, err
 	}
 	pw, err := a.passphraseWrapper(pass)
 	clear(pass)
 	if err != nil {
-		return members.Identity{}, failf("that passphrase cannot be used")
+		return members.Identity{}, nil, failf("that passphrase cannot be used")
 	}
 	defer destroyWrapper(pw)
 	wrappers := []crypto.KeyWrapper{pw}
-	if a.touch.available() && a.term.StdinTTY() && a.confirmDefaultYes("Use Touch ID to unlock your identity on this Mac?") {
+	if a.touch.available() && (force || offer && a.term.StdinTTY() && a.confirmDefaultYes("Use Touch ID to unlock your identity on this Mac?")) {
 		if d, err := a.ensureDevice(); err == nil {
 			if tw, err := a.touch.wrapper(d, ""); err == nil {
 				wrappers = append(wrappers, tw)
@@ -343,10 +363,15 @@ func (a *app) createIdentity(name string) (members.Identity, error) {
 	}
 	id, err := s.Create(name, wrappers...)
 	if err != nil {
-		return members.Identity{}, failf("could not create your identity: %v", err)
+		return members.Identity{}, nil, failf("could not create your identity: %v", err)
 	}
 	a.infof("Created your identity '%s'. Fingerprint: %s", id.Name, id.Fingerprint)
-	return id, nil
+	un, err := s.Unlock(pw)
+	if err != nil {
+		return members.Identity{}, nil, failf("could not open your new identity: %v", err)
+	}
+	a.identity = un
+	return id, un, nil
 }
 
 // --- unlocking a vault ---
@@ -358,62 +383,53 @@ const (
 	purposeWrite
 )
 
-// authenticate runs the unlock chain for a vault: Touch ID if enrolled on
-// this Mac, then the member identity, then the vault passphrase. It returns
+// authenticate runs the unlock chain for a verified vault: this person's
+// identity (Touch ID first, then the personal passphrase) opening their
+// member unlocker, then the vault passphrase. Touch ID protects the
+// identity, not each vault, so a key rotation never drops it. It returns
 // ErrLocked-style errors (exit 3) when nothing can be asked.
 func (a *app) authenticate(v *vaultRef, vf *format.VaultFile) (*crypto.VaultKey, error) {
-	// 1. Touch ID.
-	if len(vf.UnlockersOf(format.UnlockerTouchID)) > 0 {
-		if w := a.touchWrapper(v.name); w != nil {
-		touch:
-			for _, u := range vf.UnlockersOf(format.UnlockerTouchID) {
-				k, err := w.Unwrap(u)
-				switch {
-				case err == nil:
-					if crypto.CheckKey(vf, k) == nil {
-						return k, nil
-					}
-					k.Destroy()
-				case errors.Is(err, touchid.ErrCancelled), errors.Is(err, touchid.ErrUnsupported):
-					break touch // fall back to the passphrase
-				}
+	if id, ok := a.myIdentity(); ok || a.identityNeedsUpgrade() {
+		member := false
+		for _, u := range vf.UnlockersOf(format.UnlockerMember) {
+			if u.Recipient == id.Recipient {
+				member = true
 			}
 		}
-	}
-	// 2. This person's member key.
-	if id, ok := a.myIdentity(); ok {
-		for _, u := range vf.UnlockersOf(format.UnlockerMember) {
-			if u.Recipient != id.Recipient {
-				continue
-			}
-			if !a.interactive() && a.touchWrapper("") == nil {
-				break
-			}
+		if (member || !ok) && (a.interactive() || a.touchWrapper("") != nil) {
 			un, err := a.unlockIdentity()
 			if err != nil {
 				var ee *exitErr
-				if errors.As(err, &ee) && !a.interactive() {
-					break
+				if !(errors.As(err, &ee) && !a.interactive()) && len(vf.UnlockersOf(format.UnlockerPassphrase)) == 0 {
+					return nil, err
 				}
-				return nil, err
-			}
-			mw, err := un.MemberWrapper()
-			un.Destroy()
-			if err == nil {
-				if k, err := crypto.Unlock(vf, mw); err == nil {
-					return k, nil
+			} else {
+				mw, err := un.MemberWrapper()
+				if err == nil {
+					if k, err := crypto.Unlock(vf, mw); err == nil {
+						return k, nil
+					}
 				}
 			}
-			break
 		}
 	}
-	// 3. The vault passphrase.
 	if len(vf.UnlockersOf(format.UnlockerPassphrase)) > 0 {
 		if k, err := a.promptVaultPassphrase(v, vf); k != nil || err != nil {
 			return k, err
 		}
 	}
 	return nil, a.lockedErr(v.name)
+}
+
+// identityNeedsUpgrade reports whether an identity exists that was made by
+// an older version (it gains a signing key on its next unlock).
+func (a *app) identityNeedsUpgrade() bool {
+	s, err := a.identityStore()
+	if err != nil || !s.Exists() {
+		return false
+	}
+	_, err = s.Public()
+	return errors.Is(err, members.ErrIdentityUpgrade)
 }
 
 // promptVaultPassphrase asks for the vault passphrase. It returns (nil, nil)
@@ -465,69 +481,115 @@ func (a *app) tryPassphrase(vf *format.VaultFile, p []byte) (*crypto.VaultKey, e
 	return k, nil
 }
 
-// checkPin compares the vault's key with the one this Mac pinned. A mismatch
-// outside a rotation this Mac ran is refused unless the user accepts it.
-func (a *app) checkPin(v *vaultRef, vf *format.VaultFile, accept bool) error {
-	if v.entry.KeyID == "" || v.entry.KeyID == vf.KeyID || accept {
-		return nil
-	}
-	return failf("the encryption key of vault '%s' changed since this Mac last used it. "+
-		"That is expected if a member was removed; otherwise someone with access to the folder may have replaced it. "+
-		"If you trust the change, run: %s unlock %s --accept-key-change", v.name, a.prog, v.name)
-}
-
 type openOpts struct {
-	purpose      purpose
-	forceAuth    bool          // ignore a key held by the agent
-	ttl          time.Duration // 0 = per-vault/default
-	acceptKeyChg bool
+	purpose   purpose
+	forceAuth bool          // ignore a key held by the agent
+	ttl       time.Duration // 0 = per-vault/default
 	// requireAgent makes a missing agent an error (the unlock command).
 	requireAgent bool
 }
 
-// openKey returns the vault key, unlocking the vault if needed: agent key,
-// then Touch ID / member / passphrase. A successful unlock is cached in the
-// agent for the vault's TTL. The caller must Destroy the key.
-func (a *app) openKey(v *vaultRef, vf *format.VaultFile, o openOpts) (*crypto.VaultKey, error) {
-	if err := a.checkPin(v, vf, o.acceptKeyChg); err != nil {
+// openKey returns the vault key of a verified vault, unlocking it if
+// needed: agent key, then identity / passphrase. Nothing acts on the vault
+// before it is verified (app.open): the key is checked against the
+// verified key ID before it is used or handed to the agent (M4). For a
+// write it also repairs a lost race, finishes a verified interrupted
+// rotation and runs the write guard (prepareWrite). The caller must
+// Destroy the key. The vf argument is ignored; the verified file is used.
+func (a *app) openKey(v *vaultRef, _ *format.VaultFile, o openOpts) (*crypto.VaultKey, error) {
+	vf, err := a.open(v)
+	if err != nil {
 		return nil, err
+	}
+	if v.v1 != nil {
+		return a.migrate(v, o)
 	}
 	cl := a.client(true)
 	if o.requireAgent && cl == nil {
 		return nil, a.agentUnavailableErr()
 	}
+	var k *crypto.VaultKey
 	touchEvery := o.purpose == purposeRead && a.touchEveryRead(v)
 	if cl != nil && !o.forceAuth && !touchEvery {
-		k, err := cl.Key(vf.ID)
+		ak, err := cl.Key(vf.ID)
 		switch {
 		case err == nil:
-			if crypto.CheckKey(vf, k) == nil {
-				return k, nil
+			if crypto.CheckKey(vf, ak) == nil {
+				k = ak
+			} else {
+				// The vault key was rotated elsewhere: forget the stale key.
+				ak.Destroy()
+				_ = cl.Lock(vf.ID)
 			}
-			// The vault key was rotated elsewhere: forget the stale key.
-			k.Destroy()
-			_ = cl.Lock(vf.ID)
 		case errors.Is(err, agent.ErrLocked):
 		default:
 			// An unreachable agent just means no cache; carry on.
 		}
 	}
-	k, err := a.authenticate(v, vf)
-	if err != nil {
-		return nil, err
+	fresh := k == nil
+	if fresh {
+		if k, err = a.authenticate(v, vf); err != nil {
+			return nil, err
+		}
+		if v.pin == nil && v.class.Outcome == members.FirstUse {
+			// Not a member (a passphrase-only user): pin on the first
+			// successful unlock, showing who the members are.
+			if !a.asJSON {
+				a.infof("Vault '%s' (%s). Members:", v.name, headLine(v.chain))
+				a.printMembers(v.chain)
+			}
+			checked, err := a.checkStateCode(v, false)
+			if err != nil {
+				k.Destroy()
+				return nil, err
+			}
+			a.noteFirstPin(v, checked)
+			if err := a.savePin(v, nil); err != nil {
+				k.Destroy()
+				return nil, err
+			}
+		}
 	}
-	a.pinKey(v, vf.KeyID)
-	if cl != nil {
+	if o.purpose == purposeWrite {
+		if v.class.Outcome == members.LostRace {
+			if k, err = a.repairLostRace(v, k); err != nil {
+				return nil, err
+			}
+			fresh = true
+		}
+		if err := a.prepareWrite(v, k); err != nil {
+			k.Destroy()
+			return nil, err
+		}
+	}
+	if fresh && cl != nil {
 		ttl := o.ttl
 		if ttl == 0 {
 			ttl = a.ttlFor(v)
 		}
 		if dup, err := crypto.VaultKeyFromBytes(k.Bytes()); err == nil {
-			if err := cl.Unlock(vf.ID, dup, ttl); err != nil && o.requireAgent {
+			if err := cl.Unlock(v.chain.File.ID, dup, ttl); err != nil && o.requireAgent {
 				k.Destroy()
 				return nil, failf("could not hand the key to the unlock agent")
 			}
 		}
 	}
 	return k, nil
+}
+
+// signer unlocks this person's identity to sign a membership change, and
+// checks they are a member of the verified vault.
+func (a *app) signer(v *vaultRef) (*members.Unlocked, error) {
+	if _, ok := a.myIdentity(); !ok && !a.identityNeedsUpgrade() {
+		return nil, failf("only a member can change who has access to '%s', and you have no identity on this machine", v.name)
+	}
+	un, err := a.unlockIdentity()
+	if err != nil {
+		return nil, err
+	}
+	m, ok := v.chain.Head().Member(un.Name)
+	if !ok || m.SignKey != un.SignKey || m.Recipient != un.Recipient {
+		return nil, failf("only a member can change who has access to '%s'", v.name)
+	}
+	return un, nil
 }

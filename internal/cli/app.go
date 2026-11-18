@@ -15,6 +15,7 @@ import (
 	"github.com/Arntek/secrets-vault/internal/agent"
 	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
+	"github.com/Arntek/secrets-vault/internal/members"
 	"github.com/Arntek/secrets-vault/internal/touchid"
 )
 
@@ -92,6 +93,17 @@ type app struct {
 
 	asJSON    bool
 	passStdin bool
+	// expectCode is --expect: a state code from another member's machine
+	// (design section 8). signerFP is --signer-fingerprint: the fingerprint
+	// of whoever added this person, for a first use without a terminal.
+	expectCode string
+	signerFP   string
+	// identity is this person's identity once unlocked in this command,
+	// so one command never asks for it twice. close() destroys it.
+	identity *members.Unlocked
+	// firstPin describes a first-use pin made by this command, so --json
+	// output can say whether it was checked (ue1.10).
+	firstPin *firstPinInfo
 
 	cfgPath string
 	cfg     *Config
@@ -138,6 +150,7 @@ func newApp(prog string, stdin io.Reader, stdout, stderr io.Writer) *app {
 }
 
 func (a *app) close() {
+	a.identity.Destroy()
 	if a.agentC != nil {
 		_ = a.agentC.Close()
 		a.agentC = nil
@@ -190,6 +203,11 @@ func (e *exitErr) Error() string { return e.msg }
 
 func failf(format string, args ...any) error {
 	return &exitErr{code: ExitError, msg: fmt.Sprintf(format, args...)}
+}
+
+// verifyErrf is a refusal because a vault failed verification (exit 5).
+func verifyErrf(format string, args ...any) error {
+	return &exitErr{code: ExitUnverified, msg: fmt.Sprintf(format, args...)}
 }
 
 func usageErrf(format string, args ...any) error {

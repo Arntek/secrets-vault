@@ -59,48 +59,51 @@ func cmdInit(a *app, p *parsed) error {
 	if _, err := os.Lstat(format.VaultFilePath(dir)); err == nil {
 		return failf("a vault already exists in that folder. Use '%s attach' to register it", a.prog)
 	}
-	pass, err := a.askNewPassphrase("Choose a passphrase for '" + name + "'")
-	if err != nil {
+	// Every vault has an owner: this person's identity (design section 1).
+	var un *members.Unlocked
+	if _, ok := a.myIdentity(); !ok && !a.identityNeedsUpgrade() {
+		if _, un, err = a.createIdentityOpts(p.str("as"), !p.has("no-touchid"), p.has("touchid")); err != nil {
+			return err
+		}
+	} else if un, err = a.unlockIdentity(); err != nil {
 		return err
 	}
-	pw, err := a.passphraseWrapper(pass)
-	clear(pass)
-	if err != nil {
-		return failf("that passphrase cannot be used")
+	var pw crypto.KeyWrapper
+	if !p.has("no-passphrase") {
+		pass, err := a.askNewPassphrase("Choose a recovery passphrase for '" + name + "' (keep it somewhere safe)")
+		if err != nil {
+			return err
+		}
+		pw, err = a.passphraseWrapper(pass)
+		clear(pass)
+		if err != nil {
+			return failf("that passphrase cannot be used")
+		}
+		defer destroyWrapper(pw)
 	}
-	defer destroyWrapper(pw)
 	key, err := crypto.NewVaultKey()
 	if err != nil {
 		return failf("cannot create a vault key")
 	}
 	defer key.Destroy()
-	wrappers := []crypto.KeyWrapper{pw}
-	touchOn := false
-	if a.touch.available() && !p.has("no-touchid") && (p.has("touchid") || a.confirmDefaultYes("Use Touch ID to unlock '"+name+"' on this Mac?")) {
-		if d, err := a.ensureDevice(); err != nil {
-			a.warnf("%v", err)
-		} else if tw, err := a.touch.wrapper(d, name); err != nil {
-			a.warnf("Touch ID could not be set up: %v", err)
-		} else {
-			wrappers = append(wrappers, tw)
-			touchOn = true
-		}
-	}
-	vf, err := crypto.NewVaultFile(name, key, wrappers)
-	if err != nil {
-		return failf("cannot create the vault: %v", err)
-	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return failf("cannot create the folder: %v", pathless(err))
 	}
-	if err := format.CreateVault(dir, vf); err != nil {
+	c, err := members.NewVault(dir, name, key, un, pw, a.now())
+	if err != nil {
 		return failf("cannot create the vault: %v", vaultErr(err))
 	}
-	cfg.Vaults[name] = &VaultEntry{Path: dir, Description: p.str("desc"), KeyID: vf.KeyID}
+	vf := c.File
+	touchOn := a.identityHasTouchID()
+	cfg.Vaults[name] = &VaultEntry{Path: dir, Description: p.str("desc"), ID: vf.ID}
 	if cfg.DefaultVault == "" {
 		cfg.DefaultVault = name
 	}
 	if err := a.saveConfig(cfg); err != nil {
+		return err
+	}
+	ref := &vaultRef{name: name, entry: cfg.Vaults[name], dir: dir, chain: c, class: members.Classification{Outcome: members.FirstUse}}
+	if err := a.savePin(ref, []format.LogEntry{c.LastEntry()}); err != nil {
 		return err
 	}
 	// Leave the new vault unlocked, as 'unlock' would, so the first 'set'
@@ -117,6 +120,9 @@ func cmdInit(a *app, p *parsed) error {
 		return a.printJSON(map[string]any{"vault": name, "path": dir, "touchid": touchOn, "unlocked": unlocked})
 	}
 	a.printf("Created vault '%s' at %s\n", name, dir)
+	if pw == nil {
+		a.warnf("warning: '%s' has no recovery passphrase; if your identity is lost it cannot be opened. Add a second trusted member, or set one with: %s passwd %s", name, a.prog, name)
+	}
 	if !unlocked {
 		a.infof("The vault is locked: the unlock agent could not be reached. Run: %s unlock %s", a.prog, name)
 	}
@@ -148,7 +154,10 @@ func cmdAttach(a *app, p *parsed) error {
 		return failf("that folder does not hold a vault: %v", vaultErr(err))
 	}
 	for _, e := range cfg.Vaults {
-		if d, err := a.expandEntry(e); err == nil {
+		if e.ID == vf.ID {
+			return failf("that vault is already registered under another name")
+		}
+		if d, err := a.expandEntry(e); err == nil && e.ID == "" {
 			if other, err := format.ReadVaultFile(d); err == nil && other.ID == vf.ID {
 				return failf("that vault is already registered under another name")
 			}
@@ -158,7 +167,7 @@ func cmdAttach(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	cfg.Vaults[name] = &VaultEntry{Path: dir, Description: p.str("desc"), KeyID: vf.KeyID}
+	cfg.Vaults[name] = &VaultEntry{Path: dir, Description: p.str("desc"), ID: vf.ID}
 	if cfg.DefaultVault == "" {
 		cfg.DefaultVault = name
 	}
@@ -167,36 +176,53 @@ func cmdAttach(a *app, p *parsed) error {
 	}
 
 	res := map[string]any{"vault": name, "path": dir, "keys": len(idx.Entries)}
+	ref := &vaultRef{name: name, entry: cfg.Vaults[name], dir: dir}
 	member := false
 	if id, ok := a.myIdentity(); ok {
-		for _, u := range vf.UnlockersOf(format.UnlockerMember) {
-			if u.Recipient == id.Recipient {
+		for _, m := range vf.Members {
+			if m.Recipient == id.Recipient && m.SignKey == id.SignKey {
 				member = true
 			}
 		}
 	}
 	res["member"] = member
 	if member || p.has("no-request") {
+		if vf.Version == format.VaultVersion {
+			// Verify it and pin it now (trust on first use, with the checks
+			// of design section 7).
+			if _, err := a.open(ref); err != nil {
+				return err
+			}
+		}
 		if a.asJSON {
 			return a.printJSON(res)
 		}
 		a.printf("Registered '%s' (%d keys)\n", name, len(idx.Entries))
 		return nil
 	}
+	if vf.Version != format.VaultVersion {
+		return failf("registered '%s', but it was made by a pre-release version: ask its owner to open it once, then attach again", name)
+	}
 
-	// Not a member: file a join request.
+	// Not a member: file a signed join request.
 	id, ok := a.myIdentity()
-	if !ok {
+	if !ok && !a.identityNeedsUpgrade() {
 		if id, err = a.createIdentity(p.str("as")); err != nil {
 			a.warnf("Registered '%s', but no join request was filed: %v", name, err)
 			return err
 		}
 	}
-	werr := members.WriteRequest(dir, id, a.now())
+	un, err := a.unlockIdentity()
+	if err != nil {
+		a.warnf("Registered '%s', but no join request was filed", name)
+		return err
+	}
+	id = un.Identity
+	werr := members.WriteRequest(dir, un, a.now())
 	pending := errors.Is(werr, members.ErrRequestPending)
 	if errors.Is(werr, members.ErrDuplicateName) {
 		// The same person re-attaching finds their own request waiting.
-		if old, rerr := members.ReadRequest(dir, id.Name); rerr == nil && old.Identity.Recipient == id.Recipient {
+		if old, rerr := members.ReadRequest(dir, vf.ID, id.Name); rerr == nil && old.Identity.Recipient == id.Recipient {
 			pending, werr = true, nil
 		} else {
 			return failf("registered '%s', but the name '%s' is already used by another member or request in it", name, id.Name)
@@ -220,6 +246,7 @@ func cmdAttach(a *app, p *parsed) error {
 		a.printf("You're not a member of '%s' yet. Request written to the vault folder.\n", name)
 	}
 	a.printf("Ask a member to approve fingerprint %s.\n", id.Fingerprint)
+	a.printf("When they approve, they will read you their own fingerprint: you'll be asked for it the first time you open '%s'.\n", name)
 	return nil
 }
 
@@ -233,10 +260,19 @@ func cmdDetach(a *app, p *parsed) error {
 		return err
 	}
 	cfg, _ := a.loadConfig()
+	id := v.entry.ID
 	if vf, err := format.ReadVaultFile(v.dir); err == nil {
+		if id == "" {
+			id = vf.ID
+		}
 		if cl := a.client(false); cl != nil {
 			_ = cl.Lock(vf.ID)
 		}
+	}
+	// The trust pin stays (a re-attach is still checked against it); the
+	// keys of unconfirmed rotations go (S3).
+	if ps, err := a.pendingStore(); err == nil && id != "" {
+		_ = ps.DeleteAll(id)
 	}
 	delete(cfg.Vaults, v.name)
 	if cfg.DefaultVault == v.name {
@@ -322,37 +358,38 @@ func cmdVaults(a *app, p *parsed) error {
 	return nil
 }
 
-// cmdPasswd: passwd VAULT
+// cmdPasswd: passwd VAULT [--no-rotate]
+//
+// Sets a new vault passphrase and rotates the vault key (ue1.6): without
+// the rotation, anyone with the old passphrase and an old copy of
+// vault.json would still get every future secret. In a shared vault the
+// rotation is required. It is a signed change, so only a member can make
+// it.
 func cmdPasswd(a *app, p *parsed) error {
-	if err := p.wantArgs(1, 1, a.prog+" passwd VAULT"); err != nil {
+	if err := p.wantArgs(1, 1, a.prog+" passwd VAULT [--no-rotate]"); err != nil {
 		return err
 	}
 	v, err := a.vault(p.args[0])
 	if err != nil {
 		return err
 	}
-	vf, err := v.open()
+	vf, err := a.open(v)
 	if err != nil {
 		return err
 	}
-	if len(vf.UnlockersOf(format.UnlockerPassphrase)) == 0 {
-		return failf("this vault has no passphrase unlocker")
-	}
-	old, err := a.askHidden("Current passphrase for '" + v.name + "': ")
+	key, err := a.openKey(v, vf, openOpts{purpose: purposeWrite})
 	if err != nil {
 		return err
-	}
-	ow, err := a.passphraseWrapper(old)
-	clear(old)
-	if err != nil {
-		return failf("that passphrase cannot be used")
-	}
-	key, err := crypto.Unlock(vf, ow)
-	destroyWrapper(ow)
-	if err != nil {
-		return failf("wrong passphrase")
 	}
 	defer key.Destroy()
+	rotate := !p.has("no-rotate")
+	if !rotate && len(v.chain.Head().Members) > 1 {
+		return usageErrf("--no-rotate is only for a vault with one member: in a shared vault a new passphrase must come with a new key")
+	}
+	un, err := a.signer(v)
+	if err != nil {
+		return err
+	}
 	np, err := a.askNewPassphrase("New passphrase for '" + v.name + "'")
 	if err != nil {
 		return err
@@ -363,154 +400,132 @@ func cmdPasswd(a *app, p *parsed) error {
 		return failf("that passphrase cannot be used")
 	}
 	defer destroyWrapper(nw)
-	u, err := nw.Wrap(key)
+	ps, err := a.pendingStore()
 	if err != nil {
-		return failf("cannot wrap the vault key")
+		return err
 	}
-	vf.RemoveUnlockers(func(u format.Unlocker) bool { return u.Type == format.UnlockerPassphrase })
-	vf.SetUnlocker(u)
-	if err := format.WriteVaultFile(v.dir, vf); err != nil {
-		return failf("cannot write vault.json: %v", vaultErr(err))
+	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now()})
+	if res != nil && res.NewKey != nil {
+		a.switchKey(v, res.NewKey)
 	}
+	if res != nil && res.Chain != nil {
+		if serr := a.afterWrite(v, res.Chain, res.Chain.LastEntry()); serr != nil && err == nil {
+			err = serr
+		}
+	}
+	if err != nil {
+		return failf("could not change the passphrase of '%s': %v", v.name, vaultErr(err))
+	}
+	code := members.StateCode(v.chain, v.chain.Head().Seq)
 	if a.asJSON {
-		return a.printJSON(map[string]any{"vault": v.name, "changed": true})
+		return a.printJSON(map[string]any{"vault": v.name, "changed": true, "rotated": rotate, "state_code": code})
 	}
-	a.printf("Passphrase changed for '%s'.\n", v.name)
+	if rotate {
+		a.printf("Passphrase changed for '%s', and the vault key replaced: the old passphrase opens nothing new.\n", v.name)
+	} else {
+		a.printf("Passphrase changed for '%s'. The vault key was not replaced: anyone who knew the old passphrase can still open old copies of this vault.\n", v.name)
+	}
+	a.printf("State code (give it to the other members): %s\n", code)
 	return nil
 }
 
-// cmdTouchID: touchid on|off|list [VAULT]
+// switchKey hands a rotated key to the agent.
+func (a *app) switchKey(v *vaultRef, k *crypto.VaultKey) {
+	if cl := a.client(true); cl != nil {
+		if dup, err := crypto.VaultKeyFromBytes(k.Bytes()); err == nil {
+			_ = cl.Unlock(v.chain.File.ID, dup, a.ttlFor(v))
+		}
+	}
+}
+
+// cmdTouchID: touchid on|off|status
+//
+// Touch ID protects this person's identity (and so every vault they are a
+// member of) on this Mac, not each vault: a key rotation never drops it.
 func cmdTouchID(a *app, p *parsed) error {
-	usage := a.prog + " touchid on|off|list [VAULT]"
+	usage := a.prog + " touchid on|off|status"
 	if err := p.wantArgs(1, 2, usage); err != nil {
 		return err
 	}
-	sub := p.args[0]
-	arg := ""
-	if len(p.args) == 2 {
-		arg = p.args[1]
+	s, err := a.identityStore()
+	if err != nil {
+		return err
 	}
-	switch sub {
+	switch p.args[0] {
 	case "on":
-		v, err := a.defaultVault(arg)
-		if err != nil {
-			return err
-		}
-		vf, err := v.open()
-		if err != nil {
-			return err
+		if !s.Exists() {
+			return failf("you have no identity yet. Run: %s init NAME --path DIR, or %s attach NAME DIR", a.prog, a.prog)
 		}
 		d, err := a.ensureDevice()
 		if err != nil {
 			return err
 		}
-		tw, err := a.touch.wrapper(d, v.name)
+		tw, err := a.touch.wrapper(d, "")
 		if err != nil {
 			return failf("Touch ID could not be set up: %v", err)
 		}
-		key, err := a.openKey(v, vf, openOpts{purpose: purposeWrite})
+		pass, err := a.askHidden("Your personal passphrase: ")
 		if err != nil {
 			return err
 		}
-		defer key.Destroy()
-		u, err := tw.Wrap(key)
+		pw, err := a.passphraseWrapper(pass)
+		clear(pass)
 		if err != nil {
-			return failf("Touch ID could not wrap the vault key: %v", err)
+			return failf("that passphrase cannot be used")
 		}
-		vf.SetUnlocker(u)
-		if err := format.WriteVaultFile(v.dir, vf); err != nil {
-			return failf("cannot write vault.json: %v", vaultErr(err))
+		defer destroyWrapper(pw)
+		if err := s.AddUnlocker(pw, tw); err != nil {
+			return failf("could not turn on Touch ID: %v", err)
 		}
 		if a.asJSON {
-			return a.printJSON(map[string]any{"vault": v.name, "touchid": true})
+			return a.printJSON(map[string]any{"touchid": true})
 		}
-		a.printf("Touch ID is on for '%s' on this Mac.\n", v.name)
+		a.printf("Touch ID now unlocks your identity on this Mac.\n")
 		return nil
 	case "off":
-		v, err := a.defaultVault(arg)
-		if err != nil {
-			return err
+		if !s.Exists() {
+			return failf("you have no identity on this Mac")
 		}
-		vf, err := v.open()
-		if err != nil {
-			return err
-		}
-		rec := a.thisMacRecipient()
-		if rec == "" {
-			return failf("Touch ID is not set up on this Mac")
-		}
-		n := vf.RemoveUnlockers(func(u format.Unlocker) bool {
-			return u.Type == format.UnlockerTouchID && u.Recipient == rec
-		})
-		if n == 0 {
-			return failf("Touch ID is not on for '%s' on this Mac", v.name)
-		}
-		if len(vf.Unlockers) == 0 {
-			return failf("that would leave the vault with no way to open it")
-		}
-		if err := format.WriteVaultFile(v.dir, vf); err != nil {
-			return failf("cannot write vault.json: %v", vaultErr(err))
+		if err := s.RemoveUnlockers(format.UnlockerTouchID); err != nil {
+			return failf("could not turn off Touch ID: %v", err)
 		}
 		if a.asJSON {
-			return a.printJSON(map[string]any{"vault": v.name, "touchid": false})
+			return a.printJSON(map[string]any{"touchid": false})
 		}
-		a.printf("Touch ID is off for '%s' on this Mac.\n", v.name)
+		a.printf("Touch ID no longer unlocks your identity on this Mac.\n")
 		return nil
-	case "list":
-		var names []string
-		if arg != "" {
-			v, err := a.vault(arg)
-			if err != nil {
-				return err
-			}
-			names = []string{v.name}
-		} else {
-			var err error
-			if names, err = a.vaultNames(); err != nil {
-				return err
-			}
-		}
-		rec := a.thisMacRecipient()
-		type row struct {
-			Vault   string    `json:"vault"`
-			Device  string    `json:"device"`
-			Created time.Time `json:"created"`
-			ThisMac bool      `json:"this_mac"`
-		}
-		rows := []row{}
-		for _, n := range names {
-			v, err := a.vault(n)
-			if err != nil {
-				return err
-			}
-			vf, err := format.ReadVaultFile(v.dir)
-			if err != nil {
-				a.warnf("vault '%s' is unavailable", n)
-				continue
-			}
-			for _, u := range vf.UnlockersOf(format.UnlockerTouchID) {
-				rows = append(rows, row{n, u.Label, u.Created, rec != "" && u.Recipient == rec})
-			}
-		}
+	case "status", "list":
+		on := a.identityHasTouchID()
 		if a.asJSON {
-			return a.printJSON(rows)
+			return a.printJSON(map[string]any{"touchid": on, "available": a.touch.available()})
 		}
-		if len(rows) == 0 {
-			a.printf("No Macs can unlock these vaults with Touch ID yet. Run: %s touchid on VAULT\n", a.prog)
-			return nil
+		if on {
+			a.printf("Touch ID unlocks your identity on this Mac.\n")
+		} else {
+			a.printf("Touch ID is off on this Mac. Turn it on with: %s touchid on\n", a.prog)
 		}
-		t := newTable(a.out, "VAULT", "MAC", "ADDED", "")
-		for _, r := range rows {
-			here := ""
-			if r.ThisMac {
-				here = "(this Mac)"
-			}
-			t.row(r.Vault, r.Device, r.Created.Local().Format("2006-01-02"), here)
-		}
-		t.flush()
 		return nil
 	}
 	return usageErrf("usage: %s", usage)
+}
+
+// identityHasTouchID reports whether this Mac's Touch ID opens the identity.
+func (a *app) identityHasTouchID() bool {
+	s, err := a.identityStore()
+	if err != nil || !s.Exists() {
+		return false
+	}
+	rec := a.thisMacRecipient()
+	if rec == "" {
+		return false
+	}
+	recs, _ := s.UnlockerRecipients(format.UnlockerTouchID)
+	for _, r := range recs {
+		if r == rec {
+			return true
+		}
+	}
+	return false
 }
 
 // cmdConfig: config set KEY VALUE [--vault V] | config list

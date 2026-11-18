@@ -5,7 +5,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"strings"
 
 	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
@@ -14,6 +13,7 @@ import (
 )
 
 func memberErr(err error) error {
+	var held *members.LeaseHeldError
 	switch {
 	case errors.Is(err, members.ErrFingerprintMismatch):
 		return failf("the fingerprint does not match the request. Do not approve")
@@ -23,13 +23,21 @@ func memberErr(err error) error {
 		return failf("that person is not a member of this vault")
 	case errors.Is(err, members.ErrAlreadyMember):
 		return failf("that person is already a member")
+	case errors.Is(err, members.ErrPreviouslyRemoved):
+		return failf("this key was removed from the vault before. If re-adding it is intended, run approve again with --readd and type the fingerprint again")
+	case errors.Is(err, members.ErrLogFull):
+		return failf("%v", members.ErrLogFull)
+	case errors.As(err, &held):
+		return failf("%v", held)
+	case errors.Is(err, format.ErrChanged):
+		return failf("%v", format.ErrChanged)
 	}
-	return failf("%v", err)
+	return failf("%v", vaultErr(err))
 }
 
-// cmdMember: member approve|rm|list|requests VAULT [NAME]
+// cmdMember: member approve|rm|list|requests|log VAULT [NAME]
 func cmdMember(a *app, p *parsed) error {
-	usage := a.prog + " member approve|rm|list|requests VAULT [NAME]"
+	usage := a.prog + " member approve|rm|list|requests|log VAULT [NAME]"
 	if len(p.args) < 2 {
 		return usageErrf("usage: %s", usage)
 	}
@@ -43,7 +51,13 @@ func cmdMember(a *app, p *parsed) error {
 		if err := p.wantArgs(2, 2, usage); err != nil {
 			return err
 		}
-		ov, err := members.Inspect(v.dir)
+		if _, err := a.open(v); err != nil {
+			return err
+		}
+		if v.v1 != nil {
+			return failf("vault '%s' was made by a pre-release version; open it once (%s unlock %s) to upgrade it", v.name, a.prog, v.name)
+		}
+		ov, err := members.Inspect(v.dir, v.chain)
 		if err != nil {
 			return failf("cannot read the members of '%s': %v", v.name, vaultErr(err))
 		}
@@ -56,38 +70,74 @@ func cmdMember(a *app, p *parsed) error {
 		}
 		rows := []row{}
 		for _, m := range ov.Members {
-			rows = append(rows, row{m.Identity.Name, m.Identity.Fingerprint, string(m.Role), m.Added.UTC().Format("2006-01-02"), m.AddedBy})
+			rows = append(rows, row{m.Identity.Name, m.Identity.Fingerprint, m.Role, m.Added.UTC().Format("2006-01-02"), m.AddedBy})
 		}
 		if a.asJSON {
 			warns := []string{}
 			for _, w := range ov.Warnings {
 				warns = append(warns, w.Message)
 			}
-			return a.printJSON(map[string]any{"members": rows, "has_passphrase": ov.HasPassphrase, "warnings": warns})
+			return a.printJSON(map[string]any{"members": rows, "has_passphrase": ov.HasPassphrase, "warnings": warns, "state_code": members.StateCode(v.chain, v.chain.Head().Seq)})
 		}
-		if len(rows) == 0 {
-			a.printf("No members yet; '%s' opens with its passphrase.\n", v.name)
-		} else {
-			t := newTable(a.out, "NAME", "FINGERPRINT", "ROLE", "ADDED")
-			for _, r := range rows {
-				added := r.Added
-				if r.AddedBy != "" {
-					added += " by " + r.AddedBy
-				}
-				t.row(r.Name, r.Fingerprint, r.Role, added)
+		t := newTable(a.out, "NAME", "FINGERPRINT", "ROLE", "ADDED")
+		for _, r := range rows {
+			added := r.Added
+			if r.AddedBy != "" {
+				added += " by " + r.AddedBy
 			}
-			t.flush()
+			t.row(r.Name, r.Fingerprint, r.Role, added)
 		}
+		t.flush()
 		for _, w := range ov.Warnings {
 			a.warnf("warning: %s", w.Message)
 		}
+		return nil
+
+	case "log":
+		if err := p.wantArgs(2, 2, usage); err != nil {
+			return err
+		}
+		if _, err := a.open(v); err != nil {
+			return err
+		}
+		if v.v1 != nil {
+			return failf("vault '%s' was made by a pre-release version; open it once to upgrade it", v.name)
+		}
+		type row struct {
+			Seq        int    `json:"seq"`
+			Time       string `json:"time"`
+			By         string `json:"by"`
+			Op         string `json:"op"`
+			Member     string `json:"member,omitempty"`
+			Passphrase string `json:"passphrase,omitempty"`
+		}
+		rows := []row{}
+		for i, r := range v.chain.Records {
+			m := ""
+			if r.Member != nil {
+				m = r.Member.Name
+			}
+			rows = append(rows, row{i, r.Time.UTC().Format("2006-01-02 15:04"), v.chain.States[i].By, string(r.Op), m, r.Passphrase})
+		}
+		if a.asJSON {
+			return a.printJSON(rows)
+		}
+		t := newTable(a.out, "SEQ", "WHEN (UTC)", "BY", "CHANGE", "MEMBER", "PASSPHRASE")
+		for _, r := range rows {
+			t.row(itoa(r.Seq), r.Time, r.By, r.Op, r.Member, r.Passphrase)
+		}
+		t.flush()
 		return nil
 
 	case "requests":
 		if err := p.wantArgs(2, 2, usage); err != nil {
 			return err
 		}
-		reqs, bad, err := members.ListRequests(v.dir)
+		vf, err := format.ReadVaultFile(v.dir)
+		if err != nil {
+			return failf("cannot open vault '%s': %v", v.name, vaultErr(err))
+		}
+		reqs, bad, err := members.ListRequests(v.dir, vf.ID)
 		if err != nil {
 			return failf("cannot read the join requests of '%s': %v", v.name, vaultErr(err))
 		}
@@ -106,11 +156,12 @@ func cmdMember(a *app, p *parsed) error {
 		if len(rows) == 0 {
 			a.printf("No join requests for '%s'.\n", v.name)
 		} else {
-			t := newTable(a.out, "NAME", "FINGERPRINT", "FILED")
+			t := newTable(a.out, "NAME", "FILED")
 			for _, r := range rows {
-				t.row(r.Name, r.Fingerprint, r.Created)
+				t.row(r.Name, r.Created)
 			}
 			t.flush()
+			a.printf("Approve with: %s member approve %s NAME (you will type their fingerprint as they read it to you)\n", a.prog, v.name)
 		}
 		if len(bad) > 0 {
 			a.warnf("%s could not be read and was ignored", plural(len(bad), "request file"))
@@ -121,74 +172,114 @@ func cmdMember(a *app, p *parsed) error {
 		if err := p.wantArgs(3, 3, usage); err != nil {
 			return err
 		}
-		name := p.args[2]
-		if err := members.ValidateMemberName(name); err != nil {
-			return usageErrf("%v", err)
-		}
-		req, err := members.ReadRequest(v.dir, name)
-		if err != nil {
-			return memberErr(err)
-		}
-		fp := req.Identity.Fingerprint
-		if p.has("fingerprint") {
-			fp = members.NormalizeFingerprint(p.str("fingerprint"))
-		} else {
-			if !a.term.StdinTTY() {
-				return failf("approving needs you to check the fingerprint: run it in a terminal, or pass --fingerprint FP after checking it with the person")
-			}
-			a.printf("Request from %s. Fingerprint %s.\n", name, req.Identity.Fingerprint)
-			ok, _ := a.confirm("Confirm this matches what " + name + " sees?")
-			if !ok {
-				return failf("cancelled")
-			}
-		}
-		vf, err := v.open()
-		if err != nil {
-			return err
-		}
-		key, err := a.openKey(v, vf, openOpts{purpose: purposeWrite})
-		if err != nil {
-			return err
-		}
-		defer key.Destroy()
-		m, err := members.ApproveRequest(v.dir, key, name, fp, a.myName())
-		if err != nil {
-			return memberErr(err)
-		}
-		if a.asJSON {
-			return a.printJSON(map[string]any{"vault": v.name, "approved": name, "fingerprint": m.Identity.Fingerprint})
-		}
-		a.printf("%s added to '%s'.\n", name, v.name)
-		return nil
+		return a.memberApprove(v, p.args[2], p)
 
 	case "rm":
 		if err := p.wantArgs(3, 3, usage); err != nil {
 			return err
 		}
-		return a.memberRemove(v, p.args[2], p.has("yes"))
+		return a.memberRemove(v, p.args[2], p)
 	}
 	return usageErrf("usage: %s", usage)
 }
 
-func (a *app) memberRemove(v *vaultRef, name string, yes bool) error {
+// memberApprove adds a requester after the approver TYPES the requester's
+// fingerprint as the requester reads it out (G4: not a y/N against a value
+// on screen). --fingerprint FP is the non-interactive form.
+func (a *app) memberApprove(v *vaultRef, name string, p *parsed) error {
 	if err := members.ValidateMemberName(name); err != nil {
 		return usageErrf("%v", err)
 	}
-	vf, err := v.open()
+	vf, err := a.open(v)
 	if err != nil {
 		return err
 	}
-	found := false
-	for _, u := range vf.UnlockersOf(format.UnlockerMember) {
-		if u.Label == name {
-			found = true
+	if v.v1 != nil {
+		return failf("vault '%s' was made by a pre-release version; open it once (%s unlock %s) to upgrade it", v.name, a.prog, v.name)
+	}
+	if _, err := members.ReadRequest(v.dir, vf.ID, name); err != nil {
+		return memberErr(err)
+	}
+	fp := p.str("fingerprint")
+	if !p.has("fingerprint") {
+		if !a.term.StdinTTY() {
+			return failf("approving needs you to check the fingerprint: run it in a terminal, or pass --fingerprint FP after %s reads it to you", name)
+		}
+		line, err := a.ask("Ask " + name + " to read out their fingerprint, and type it here: ")
+		if err != nil {
+			return failf("cancelled")
+		}
+		fp = line
+	}
+	key, err := a.openKey(v, vf, openOpts{purpose: purposeWrite})
+	if err != nil {
+		return err
+	}
+	defer key.Destroy()
+	un, err := a.signer(v)
+	if err != nil {
+		return err
+	}
+	c, m, err := members.ApproveRequest(v.dir, v.chain, key, un, name, fp, p.has("readd"), a.now())
+	if c != nil {
+		if serr := a.afterWrite(v, c, c.LastEntry()); serr != nil && err == nil {
+			err = serr
 		}
 	}
-	if !found {
+	if err != nil {
+		return memberErr(err)
+	}
+	if a.asJSON {
+		return a.printJSON(map[string]any{"vault": v.name, "approved": name, "fingerprint": m.Identity.Fingerprint, "your_fingerprint": un.Fingerprint})
+	}
+	a.printf("%s added to '%s'.\n", name, v.name)
+	a.printf("Now read %s your own fingerprint; they will type it the first time they open '%s': %s\n", name, v.name, un.Fingerprint)
+	return nil
+}
+
+// memberRemove removes a member and rotates the vault key. It requires
+// confirming that the person's access to the shared folder is removed
+// (otherwise they can roll the folder back for offline members, ue1.2),
+// and drops the vault passphrase unless told otherwise (ue1.6).
+func (a *app) memberRemove(v *vaultRef, name string, p *parsed) error {
+	if err := members.ValidateMemberName(name); err != nil {
+		return usageErrf("%v", err)
+	}
+	vf, err := a.open(v)
+	if err != nil {
+		return err
+	}
+	if v.v1 != nil {
+		return failf("vault '%s' was made by a pre-release version; open it once (%s unlock %s) to upgrade it", v.name, a.prog, v.name)
+	}
+	if _, ok := v.chain.Head().Member(name); !ok {
 		return failf("that person is not a member of '%s'", v.name)
 	}
-	if !yes {
-		if !a.term.StdinTTY() {
+	policy := format.PassDropped
+	switch {
+	case p.has("keep-passphrase") && (p.has("new-passphrase") || p.has("new-passphrase-stdin")):
+		return usageErrf("choose --keep-passphrase or --new-passphrase, not both")
+	case p.has("keep-passphrase"):
+		policy = format.PassKept
+	case p.has("new-passphrase"), p.has("new-passphrase-stdin"):
+		policy = format.PassReplaced
+	}
+	hasPass := len(vf.UnlockersOf(format.UnlockerPassphrase)) > 0
+	if !hasPass && policy == format.PassKept {
+		return usageErrf("'%s' has no passphrase to keep", v.name)
+	}
+	tty := a.term.StdinTTY()
+	if !p.has("folder-access-removed") {
+		if !tty {
+			return failf("removing a member needs confirmation that their access to the shared folder (Box, Dropbox) is removed: run it in a terminal, or pass --folder-access-removed")
+		}
+		ok, _ := a.confirm("Have you removed " + name + "'s access to the shared folder (Box, Dropbox)? Without that they can restore an old copy of the vault for members who are offline.")
+		if !ok {
+			return failf("cancelled. Remove %s's access to the shared folder first, then run this again", name)
+		}
+	}
+	if !p.has("yes") {
+		if !tty {
 			return failf("removing a member needs confirmation: run it in a terminal, or pass --yes")
 		}
 		ok, _ := a.confirm("Remove " + name + " from '" + v.name + "'? This replaces the vault key and re-encrypts every secret.")
@@ -201,9 +292,18 @@ func (a *app) memberRemove(v *vaultRef, name string, yes bool) error {
 		return err
 	}
 	defer key.Destroy()
-	var rewrap []crypto.KeyWrapper
-	if len(vf.UnlockersOf(format.UnlockerPassphrase)) > 0 {
-		pass, err := a.askHidden("Vault passphrase for '" + v.name + "' (kept as the recovery route): ")
+	un, err := a.signer(v)
+	if err != nil {
+		return err
+	}
+	ps, err := a.pendingStore()
+	if err != nil {
+		return err
+	}
+	opt := members.RotateOptions{Passphrase: policy, Pending: ps, Now: a.now()}
+	switch policy {
+	case format.PassKept:
+		pass, err := a.askHidden("Current vault passphrase for '" + v.name + "' (to keep it): ")
 		if err != nil {
 			return err
 		}
@@ -213,33 +313,36 @@ func (a *app) memberRemove(v *vaultRef, name string, yes bool) error {
 			return failf("that passphrase cannot be used")
 		}
 		defer destroyWrapper(pw)
-		// Prove it is the right passphrase before rotating.
-		if k, err := crypto.Unlock(vf, pw); err != nil {
-			return failf("wrong passphrase")
-		} else {
-			k.Destroy()
+		opt.Keep = pw
+	case format.PassReplaced:
+		if p.has("new-passphrase-stdin") {
+			a.passStdin = true
 		}
-		rewrap = append(rewrap, pw)
-	}
-	if rec := a.thisMacRecipient(); rec != "" {
-		for _, u := range vf.UnlockersOf(format.UnlockerTouchID) {
-			if u.Recipient == rec {
-				if tw := a.touchWrapper(v.name); tw != nil {
-					rewrap = append(rewrap, tw)
-				}
-			}
+		np, err := a.askNewPassphrase("New vault passphrase for '" + v.name + "'")
+		if err != nil {
+			return err
 		}
+		pw, err := a.passphraseWrapper(np)
+		clear(np)
+		if err != nil {
+			return failf("that passphrase cannot be used")
+		}
+		defer destroyWrapper(pw)
+		opt.New = pw
 	}
-	res, err := members.Remove(v.dir, key, name, rewrap...)
+	res, err := members.Remove(v.dir, v.chain, key, un, name, opt)
 	if res != nil && res.NewKey != nil {
-		// The rotation happened (even if finishing the file moves needs a
-		// re-run): switch this Mac to the new key.
-		a.pinKey(v, res.NewKey.ID())
-		if cl := a.client(true); cl != nil {
-			_ = cl.Unlock(vf.ID, res.NewKey, a.ttlFor(v))
+		a.switchKey(v, res.NewKey)
+	}
+	if res != nil && res.Chain != nil {
+		if serr := a.afterWrite(v, res.Chain, res.Chain.LastEntry()); serr != nil && err == nil {
+			err = serr
 		}
 	}
 	if err != nil {
+		if errors.Is(err, crypto.ErrWrongKey) {
+			return failf("wrong passphrase")
+		}
 		return memberErr(err)
 	}
 	a.record(v.name, "", audit.ActionUnlock)
@@ -247,26 +350,30 @@ func (a *app) memberRemove(v *vaultRef, name string, yes bool) error {
 	if exposed == nil {
 		exposed = []string{}
 	}
-	dropped := make([]string, 0, len(res.Dropped))
-	for _, d := range res.Dropped {
-		dropped = append(dropped, d.Label)
-	}
+	code := members.StateCode(v.chain, v.chain.Head().Seq)
 	if a.asJSON {
-		return a.printJSON(map[string]any{"vault": v.name, "removed": name, "rotate_at_provider": exposed, "touchid_reenrol": dropped, "notes": res.Notes})
+		return a.printJSON(map[string]any{"vault": v.name, "removed": name, "rotate_at_provider": exposed,
+			"passphrase": res.Passphrase, "revoke_folder_access": name, "state_code": code})
 	}
 	a.printf("Removed %s from '%s' and replaced the vault key.\n", name, v.name)
+	switch res.Passphrase {
+	case format.PassDropped:
+		if hasPass {
+			a.printf("The vault passphrase no longer opens '%s'. To set a new one: %s passwd %s\n", v.name, a.prog, v.name)
+		}
+	case format.PassKept:
+		a.printf("The vault passphrase was kept: anyone who knows it still has access.\n")
+	case format.PassReplaced:
+		a.printf("The vault passphrase was replaced.\n")
+	}
 	if len(exposed) > 0 {
 		a.printf("%s could have read these keys. Rotate them at their providers:\n", name)
 		for _, k := range exposed {
 			a.printf("  %s\n", k)
 		}
 	}
-	if len(dropped) > 0 {
-		a.printf("Touch ID must be turned on again on: %s\n", strings.Join(dropped, ", "))
-	}
-	for _, n := range res.Notes {
-		a.warnf("%s", n)
-	}
+	a.printf("Make sure %s can no longer write to the shared folder.\n", name)
+	a.printf("State code (give it to the other members; they run '%s trust %s --expect CODE'): %s\n", a.prog, v.name, code)
 	return nil
 }
 

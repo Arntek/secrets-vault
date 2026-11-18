@@ -59,6 +59,9 @@ func ParseTrashName(file string) (TrashedSecret, error) {
 // TrashSecret moves secrets/NAME.age into secrets/.trash, stamped with now.
 // The index entry is the caller's to remove.
 func TrashSecret(vaultDir, name string, now time.Time) (TrashedSecret, error) {
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return TrashedSecret{}, err
+	}
 	src, err := SecretPath(vaultDir, name)
 	if err != nil {
 		return TrashedSecret{}, err
@@ -133,6 +136,9 @@ func ReadTrashedFile(vaultDir string, t TrashedSecret) ([]byte, error) {
 // PurgeTrash permanently removes trashed keys deleted more than
 // TrashRetention before now and returns them.
 func PurgeTrash(vaultDir string, now time.Time) ([]TrashedSecret, error) {
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return nil, err
+	}
 	all, err := ListTrash(vaultDir)
 	if err != nil {
 		return nil, err
@@ -154,6 +160,9 @@ func PurgeTrash(vaultDir string, now time.Time) ([]TrashedSecret, error) {
 // RestoreSecret moves a trashed key back to secrets/NAME.age. It refuses
 // (ErrTrashedExists) if a live key of that name exists.
 func RestoreSecret(vaultDir string, t TrashedSecret) error {
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
 	parsed, err := ParseTrashName(t.File)
 	if err != nil {
 		return err
@@ -171,4 +180,19 @@ func RestoreSecret(vaultDir string, t TrashedSecret) error {
 		return err
 	}
 	return syncDir(filepath.Dir(dst))
+}
+
+// WriteTrashedFile atomically replaces the content of a trashed key (used
+// to upgrade its file format in place).
+func WriteTrashedFile(vaultDir string, t TrashedSecret, ciphertext []byte) error {
+	if _, err := ParseTrashName(t.File); err != nil {
+		return err
+	}
+	if len(ciphertext) > MaxSecretFileSize {
+		return ErrTooLarge
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
+	return WriteFileAtomic(filepath.Join(TrashPath(vaultDir), t.File), ciphertext, FileMode)
 }

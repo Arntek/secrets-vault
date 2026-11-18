@@ -1,11 +1,16 @@
 package members
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
 )
+
+var t0 = time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
 
 // pass returns a cheap passphrase wrapper for tests.
 func pass(t testing.TB, p string) crypto.KeyWrapper {
@@ -49,27 +54,54 @@ func (p *person) wrapper(t testing.TB) crypto.KeyWrapper {
 	return w
 }
 
-// newSharedVault creates a vault in a fresh folder opened by owner, with
-// the given extra unlockers, and returns the folder and vault key.
-func newSharedVault(t testing.TB, owner *person, extra ...crypto.KeyWrapper) (string, *crypto.VaultKey) {
+const vaultPass = "vault recovery passphrase"
+
+// testVault is a vault folder plus its current verified chain and key.
+type testVault struct {
+	dir string
+	c   *Chain
+	key *crypto.VaultKey
+}
+
+// newVault creates a vault owned by owner, with the recovery passphrase.
+func newVault(t testing.TB, owner *person) *testVault {
 	t.Helper()
-	dir := t.TempDir() + "/vault"
+	dir := filepath.Join(t.TempDir(), "vault")
 	key, err := crypto.NewVaultKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	vf, err := crypto.NewVaultFile("shared", key, append([]crypto.KeyWrapper{owner.wrapper(t)}, extra...))
+	c, err := NewVault(dir, "team", key, owner.un, pass(t, vaultPass), t0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := format.CreateVault(dir, vf); err != nil {
+	return &testVault{dir: dir, c: c, key: key}
+}
+
+// join files p's request and has approver approve it with the right
+// fingerprint.
+func (v *testVault) join(t testing.TB, approver, p *person) {
+	t.Helper()
+	if err := WriteRequest(v.dir, p.un, t0); err != nil {
 		t.Fatal(err)
 	}
-	// What `vault init --shared` does: record the creator as owner.
-	if err := upsertMeta(dir, metaEntry{Name: owner.pub.Name, Recipient: owner.pub.Recipient, Role: RoleOwner, Added: vf.Unlockers[0].Created}); err != nil {
+	c, _, err := ApproveRequest(v.dir, v.c, v.key, approver.un, p.pub.Name, p.pub.Fingerprint, false, t0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return dir, key
+	v.c = c
+}
+
+// remove has signer remove name (passphrase dropped) and switches to the
+// new key.
+func (v *testVault) remove(t testing.TB, signer *person, name string) *RotateResult {
+	t.Helper()
+	res, err := Remove(v.dir, v.c, v.key, signer.un, name, RotateOptions{Now: t0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.c, v.key = res.Chain, res.NewKey
+	return res
 }
 
 // openAs unlocks the vault in dir as p and returns the vault key.
@@ -88,3 +120,46 @@ func putSecret(t testing.TB, dir string, key *crypto.VaultKey, name, value strin
 		t.Fatal(err)
 	}
 }
+
+func mustReadFile(t testing.TB, p string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func mustWriteFile(t testing.TB, p string, b []byte) {
+	t.Helper()
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// copyDir copies a vault folder (files only, recursively).
+func copyDir(t testing.TB, src, dst string) {
+	t.Helper()
+	err := filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(src, p)
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o700)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, b, 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// pinOf returns the pin a machine would hold after verifying c, having
+// written own itself.
+func pinOf(c *Chain, own ...format.LogEntry) *Pin { return PinFor(c, own) }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Arntek/secrets-vault/internal/agent"
+	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
 )
 
@@ -133,7 +134,7 @@ func TestInitRefusesInsideGitRepoUnlessForced(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(repo, "vault")); err == nil {
 		t.Fatal("the folder must not be created")
 	}
-	e.mustRunIn(testPass+"\n", "init", "x", "--path", filepath.Join(repo, "vault"), "--passphrase-stdin", "--force")
+	e.mustRunIn(testPass+"\n"+testPass+"\n", "init", "x", "--path", filepath.Join(repo, "vault"), "--passphrase-stdin", "--force", "--as", testUser)
 }
 
 func TestInitValidationAndDuplicates(t *testing.T) {
@@ -153,13 +154,14 @@ func TestInitInteractiveRepeatsPassphrase(t *testing.T) {
 	e := newEnv(t)
 	e.term.stdinTTY = true
 	e.term.queue(testPass, "different passphrase")
-	r := e.runIn("", "init", "main", "--path", e.home+"/v1")
+	r := e.runIn("", "init", "main", "--path", e.home+"/v1", "--as", testUser)
 	expectCode(t, r, ExitError)
 	if !strings.Contains(r.err, "do not match") {
 		t.Fatalf("%s", r)
 	}
-	e.term.queue(testPass, testPass)
-	e.mustRun("init", "main", "--path", e.home+"/v1")
+	e.term.passwords = nil
+	e.term.queue(testPass, testPass, testPass, testPass) // identity twice, then the vault twice
+	e.mustRun("init", "main", "--path", e.home+"/v1", "--as", testUser)
 }
 
 func TestSetRejectsValueArgumentAndEmpty(t *testing.T) {
@@ -226,7 +228,7 @@ func TestExitCodesAndAmbiguousKeys(t *testing.T) {
 	skipWindows(t)
 	e := newEnv(t)
 	e.initVault("one")
-	e.mustRunIn(testPass+"\n", "init", "two", "--path", filepath.Join(e.home, "vaults", "two"), "--passphrase-stdin")
+	e.mustRunIn(testPass+"\n"+testPass+"\n", "init", "two", "--path", filepath.Join(e.home, "vaults", "two"), "--passphrase-stdin")
 	e.unlock("one")
 	e.unlock("two")
 	e.set("EXAMPLE_SHARED", "one", "from-one")
@@ -270,7 +272,7 @@ func TestSetNeedsVaultWhenNoDefault(t *testing.T) {
 	skipWindows(t)
 	e := newEnv(t)
 	e.initVault("one")
-	e.mustRunIn(testPass+"\n", "init", "two", "--path", filepath.Join(e.home, "vaults", "two"), "--passphrase-stdin")
+	e.mustRunIn(testPass+"\n"+testPass+"\n", "init", "two", "--path", filepath.Join(e.home, "vaults", "two"), "--passphrase-stdin")
 	e.mustRun("config", "set", "default-vault", "two")
 	e.unlock("two")
 	e.mustRunIn("v", "set", "EXAMPLE_NEW")
@@ -279,7 +281,7 @@ func TestSetNeedsVaultWhenNoDefault(t *testing.T) {
 	}
 	// With no default and several vaults, a new key needs --vault.
 	e.mustRun("detach", "two")
-	e.mustRunIn(testPass+"\n", "init", "three", "--path", filepath.Join(e.home, "vaults", "three"), "--passphrase-stdin")
+	e.mustRunIn(testPass+"\n"+testPass+"\n", "init", "three", "--path", filepath.Join(e.home, "vaults", "three"), "--passphrase-stdin")
 	cfg, _ := e.cfgText()
 	cfg = strings.Replace(cfg, `default_vault = "three"`, "", 1)
 	_ = os.WriteFile(e.cfg, []byte(cfg), 0o600)
@@ -363,7 +365,7 @@ func TestMvRenameRm(t *testing.T) {
 	skipWindows(t)
 	e := newEnv(t)
 	e.initVault("one")
-	e.mustRunIn(testPass+"\n", "init", "two", "--path", filepath.Join(e.home, "vaults", "two"), "--passphrase-stdin")
+	e.mustRunIn(testPass+"\n"+testPass+"\n", "init", "two", "--path", filepath.Join(e.home, "vaults", "two"), "--passphrase-stdin")
 	e.unlock("one")
 	e.unlock("two")
 	e.set("EXAMPLE_API_KEY", "one", "moved-value")
@@ -563,7 +565,7 @@ func TestTouchEveryReadAsksEachTime(t *testing.T) {
 	e.initVault("main")
 	e.mustRunIn(testPass+"\n", "unlock", "main", "--passphrase-stdin")
 	e.set("EXAMPLE_API_KEY", "", "v")
-	e.mustRun("touchid", "on", "main")
+	e.mustRunIn(testPass+"\n", "touchid", "on", "--passphrase-stdin")
 	e.mustRun("config", "set", "touch-every-read", "true", "--vault", "main")
 	before := e.touch.unwraps
 	e.mustRun("get", "EXAMPLE_API_KEY")
@@ -576,16 +578,27 @@ func TestTouchEveryReadAsksEachTime(t *testing.T) {
 func TestPasswd(t *testing.T) {
 	skipWindows(t)
 	e := newEnv(t)
-	e.initVault("main")
+	dir := e.initVault("main")
 	e.unlock("main")
 	e.set("EXAMPLE_API_KEY", "", "keep-me")
 	e.mustRun("lock", "--all")
-	// Wrong old passphrase changes nothing.
+	old, _ := format.ReadVaultFile(dir)
+	// A member's signed change: the identity unlocks it, then the new passphrase.
 	expectCode(t, e.runIn("not the passphrase\nnew passphrase two\n", "passwd", "main", "--passphrase-stdin"), ExitError)
 	e.mustRunIn(testPass+"\nnew passphrase two\n", "passwd", "main", "--passphrase-stdin")
-	expectCode(t, e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin"), ExitError)
-	e.mustRunIn("new passphrase two\n", "unlock", "main", "--passphrase-stdin")
-	if got := e.mustRun("get", "EXAMPLE_API_KEY").out; got != "keep-me\n" {
+	vf, _ := format.ReadVaultFile(dir)
+	if vf.KeyID == old.KeyID {
+		t.Fatal("passwd must replace the vault key")
+	}
+	newPW, _ := crypto.NewPassphraseWrapperWithWorkFactor([]byte("new passphrase two"), crypto.MinScryptWorkFactor)
+	oldPW, _ := crypto.NewPassphraseWrapperWithWorkFactor([]byte(testPass), crypto.MinScryptWorkFactor)
+	if _, err := crypto.Unlock(vf, newPW); err != nil {
+		t.Fatalf("new passphrase: %v", err)
+	}
+	if _, err := crypto.Unlock(vf, oldPW); err == nil {
+		t.Fatal("old passphrase still opens the vault")
+	}
+	if got := e.mustRunIn(testPass+"\n", "get", "EXAMPLE_API_KEY", "--passphrase-stdin").out; got != "keep-me\n" {
 		t.Fatalf("secrets must survive a passphrase change: %q", got)
 	}
 }
@@ -613,94 +626,6 @@ func TestInteractiveUnlockPromptsOnTerminal(t *testing.T) {
 	e.mustRun("lock", "--all")
 	e.term.queue("bad one one", "bad two two", "bad three three")
 	expectCode(t, e.run("get", "EXAMPLE_API_KEY"), ExitError)
-}
-
-func TestTouchIDFlow(t *testing.T) {
-	skipWindows(t)
-	e := newEnv(t)
-	e.touch.avail = true
-
-	// init offers Touch ID on a terminal; the default answer is yes.
-	e.term.stdinTTY = true
-	e.term.queue(testPass, testPass)
-	e.mustRunIn("\n", "init", "main", "--path", filepath.Join(e.home, "vaults", "main"))
-	e.term.stdinTTY = false
-	list := decodeJSON[[]map[string]any](t, e.mustRun("touchid", "list", "--json").out)
-	if len(list) != 1 || list[0]["this_mac"] != true {
-		t.Fatalf("touchid list: %v", list)
-	}
-	if !strings.Contains(e.mustRun("touchid", "list").out, "(this Mac)") {
-		t.Fatal("touchid list should mark this Mac")
-	}
-
-	// Unlocking uses Touch ID: no passphrase needed even without a terminal.
-	e.mustRun("unlock", "main")
-	e.set("EXAMPLE_API_KEY", "", "touch-value")
-	e.mustRun("lock", "--all")
-	if got := e.mustRun("get", "EXAMPLE_API_KEY").out; got != "touch-value\n" {
-		t.Fatalf("%q", got)
-	}
-	if e.touch.unwraps == 0 {
-		t.Fatal("Touch ID was not used")
-	}
-
-	// Cancelling the sheet falls back to the passphrase.
-	e.mustRun("lock", "--all")
-	e.touch.cancel = true
-	expectCode(t, e.run("get", "EXAMPLE_API_KEY"), ExitLocked) // no terminal, so locked
-	r := e.runIn(testPass+"\n", "get", "EXAMPLE_API_KEY", "--passphrase-stdin")
-	if r.code != 0 || r.out != "touch-value\n" {
-		t.Fatalf("fallback to passphrase: %s", r)
-	}
-	e.touch.cancel = false
-
-	// off removes this Mac's unlocker; the passphrase still works.
-	e.mustRun("touchid", "off", "main")
-	if l := decodeJSON[[]map[string]any](t, e.mustRun("touchid", "list", "--json").out); len(l) != 0 {
-		t.Fatalf("after off: %v", l)
-	}
-	expectCode(t, e.run("touchid", "off", "main"), ExitError)
-	e.mustRun("lock", "--all")
-	expectCode(t, e.run("get", "EXAMPLE_API_KEY"), ExitLocked)
-	e.unlock("main")
-	// on again (the device key is reused).
-	e.mustRun("touchid", "on", "main")
-	if l := decodeJSON[[]map[string]any](t, e.mustRun("touchid", "list", "main", "--json").out); len(l) != 1 {
-		t.Fatalf("after on: %v", l)
-	}
-	// Without Touch ID available, `on` fails cleanly.
-	e.touch.avail = false
-	expectCode(t, e.run("touchid", "on", "main"), ExitError)
-	expectCode(t, e.run("touchid"), ExitUsage)
-	expectCode(t, e.run("touchid", "sideways"), ExitUsage)
-}
-
-func TestKeyPinningRefusesChangedKey(t *testing.T) {
-	skipWindows(t)
-	e := newEnv(t)
-	dir := e.initVault("main")
-	e.unlock("main")
-	e.mustRun("lock", "--all")
-	// Someone with folder access swaps in a different vault.json.
-	other := filepath.Join(e.home, "evil")
-	e2 := newEnv(t)
-	e2.initVault("evil")
-	_ = other
-	evilJSON, err := os.ReadFile(filepath.Join(e2.home, "vaults", "evil", "vault.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.activate()
-	vf, _ := format.ReadVaultFile(dir)
-	if err := os.WriteFile(filepath.Join(dir, "vault.json"), evilJSON, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	r := e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin")
-	expectCode(t, r, ExitError)
-	if !strings.Contains(r.err, "--accept-key-change") {
-		t.Fatalf("expected the accept hint: %s", r)
-	}
-	_ = vf
 }
 
 func TestVaultsDetachAndAttachOwnVault(t *testing.T) {
@@ -848,7 +773,7 @@ func TestInitWithoutAgentStillCreatesVault(t *testing.T) {
 	code := func() int {
 		curEnv = e
 		e.t.Setenv("SECRETS_VAULT_AGENT_DIR", "relative/not/absolute")
-		return Run([]string{"sv", "init", "main", "--path", dir, "--passphrase-stdin"}, strings.NewReader(testPass+"\n"), &out, &errb)
+		return Run([]string{"sv", "init", "main", "--path", dir, "--passphrase-stdin", "--as", testUser}, strings.NewReader(testPass+"\n"+testPass+"\n"), &out, &errb)
 	}()
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())

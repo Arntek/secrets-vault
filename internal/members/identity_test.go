@@ -133,17 +133,28 @@ func TestIdentityTamper(t *testing.T) {
 
 	// Truncated, trailing data, duplicate keys, unknown field, bad version.
 	for name, bad := range map[string][]byte{
-		"truncated": orig[:len(orig)/2],
-		"trailing":  append(bytes.Clone(orig), []byte(`{}`)...),
-		"duplicate": bytes.Replace(orig, []byte(`"version": 1,`), []byte(`"version": 1, "version": 1,`), 1),
-		"unknown":   bytes.Replace(orig, []byte(`"version": 1,`), []byte(`"version": 1, "extra": 1,`), 1),
-		"version":   bytes.Replace(orig, []byte(`"version": 1,`), []byte(`"version": 2,`), 1),
-		"empty":     {},
+		"truncated":           orig[:len(orig)/2],
+		"trailing":            append(bytes.Clone(orig), []byte(`{}`)...),
+		"duplicate":           bytes.Replace(orig, []byte(`"version": 2,`), []byte(`"version": 2, "version": 2,`), 1),
+		"unknown":             bytes.Replace(orig, []byte(`"version": 2,`), []byte(`"version": 2, "extra": 1,`), 1),
+		"version":             bytes.Replace(orig, []byte(`"version": 2,`), []byte(`"version": 3,`), 1),
+		"v1 with signing key": bytes.Replace(orig, []byte(`"version": 2,`), []byte(`"version": 1,`), 1),
+		"empty":               {},
 	} {
 		mustWrite(t, path, bad)
 		if _, err := a.store.Unlock(pass(t, a.pw)); err == nil {
 			t.Errorf("%s: tampered file accepted", name)
 		}
+	}
+
+	// Swap in bob's signing key: the sealed seed no longer matches it.
+	var h map[string]any
+	_ = json.Unmarshal(orig, &h)
+	h["sign_key"] = b.pub.SignKey
+	swappedSign, _ := json.Marshal(h)
+	mustWrite(t, path, swappedSign)
+	if _, err := a.store.Unlock(pass(t, a.pw)); !errors.Is(err, crypto.ErrWrongKey) {
+		t.Fatalf("swapped signing key accepted: %v", err)
 	}
 
 	// Flip a byte of the sealed key.
@@ -266,11 +277,15 @@ func TestIdentityExportImport(t *testing.T) {
 		t.Fatal("transfer passphrase unlocks the imported store")
 	}
 	w2, _ := u2.MemberWrapper()
-	dir, key := newSharedVault(t, a)
-	vf, _ := format.ReadVaultFile(dir)
+	v := newVault(t, a)
+	vf, _ := format.ReadVaultFile(v.dir)
 	k2, err := crypto.Unlock(vf, w2)
-	if err != nil || !bytes.Equal(k2.Bytes(), key.Bytes()) {
+	if err != nil || !bytes.Equal(k2.Bytes(), v.key.Bytes()) {
 		t.Fatalf("imported identity cannot open the vault: %v", err)
+	}
+	// It also signs as the same member.
+	if u2.SignKey != a.pub.SignKey {
+		t.Fatal("signing key not carried by export/import")
 	}
 	// Import refuses to overwrite.
 	if _, err := second.Import(data, pass(t, "transfer phrase"), pass(t, "x")); !errors.Is(err, ErrIdentityExists) {
@@ -321,4 +336,34 @@ func FuzzParseIdentityFile(f *testing.F) {
 			t.Fatal("error echoes input")
 		}
 	})
+}
+
+// A version-1 identity (no signing key) gains one on its first unlock and
+// is saved as version 2; its fingerprint then covers both keys.
+func TestIdentityV1Upgrade(t *testing.T) {
+	a := newPerson(t, "alice")
+	var f identityFile
+	if err := json.Unmarshal(mustReadFile(t, a.store.path()), &f); err != nil {
+		t.Fatal(err)
+	}
+	f.Version, f.SignKey, f.SealedSig = 1, "", nil
+	v1, _ := json.Marshal(f)
+	mustWrite(t, a.store.path(), v1)
+	if _, err := a.store.Public(); !errors.Is(err, ErrIdentityUpgrade) {
+		t.Fatalf("Public on v1 = %v", err)
+	}
+	u, err := a.store.Unlock(pass(t, a.pw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.SignKey == "" || u.SignKey == a.pub.SignKey || u.Recipient != a.pub.Recipient {
+		t.Fatalf("upgrade: %+v", u.Identity)
+	}
+	pub, err := a.store.Public()
+	if err != nil || pub != u.Identity {
+		t.Fatalf("saved upgrade: %+v %v", pub, err)
+	}
+	if _, err := u.Sign(recordDomain, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
 }

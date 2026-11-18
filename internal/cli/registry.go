@@ -16,6 +16,7 @@ import (
 
 	"github.com/Arntek/secrets-vault/internal/agent"
 	"github.com/Arntek/secrets-vault/internal/format"
+	"github.com/Arntek/secrets-vault/internal/members"
 )
 
 // EnvConfig overrides the registry file location (used by tests).
@@ -41,8 +42,14 @@ type VaultEntry struct {
 	TTL            string `toml:"ttl,omitempty"`
 	TouchEveryRead *bool  `toml:"touch_every_read,omitempty"`
 	Dialog         string `toml:"dialog,omitempty"`
-	// KeyID pins the vault key this Mac last saw, so a vault.json swapped
-	// by someone with write access to the folder is noticed.
+	// ID is the vault ID recorded at init or attach. vault.json is only
+	// accepted if it holds this vault (design M1); the trust pin for it is
+	// kept under trust/<ID>.json. It is stored in registry.toml, never in
+	// config.toml: builds from before the membership log rewrite
+	// config.toml and would drop it (ue1.8 A).
+	ID string `toml:"-"`
+	// KeyID is the legacy key pin from before trust pins. It is read once,
+	// by the migration and first-use checks, then dropped.
 	KeyID string `toml:"key_id,omitempty"`
 }
 
@@ -73,8 +80,86 @@ func (a *app) loadConfig() (*Config, error) {
 	if c.Vaults == nil {
 		c.Vaults = map[string]*VaultEntry{}
 	}
+	if err := a.loadRegistry(c); err != nil {
+		return nil, err
+	}
 	a.cfg = c
 	return c, nil
+}
+
+// registryFile is registry.toml: which vault ID is registered under each
+// name and folder. Only builds with the membership log write it, so an
+// older build that rewrites config.toml can't make this machine forget
+// which vault it trusts (ue1.8 A).
+type registryFile struct {
+	Version int                       `toml:"version"`
+	Vaults  map[string]registryRecord `toml:"vaults"`
+}
+
+type registryRecord struct {
+	ID   string `toml:"id"`
+	Path string `toml:"path"`
+}
+
+func (a *app) registryPath() (string, error) {
+	d, err := a.configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "registry.toml"), nil
+}
+
+// loadRegistry fills each entry's ID from registry.toml, when the record
+// is for the same name and folder. A damaged registry file is an error,
+// never a silent reset.
+func (a *app) loadRegistry(c *Config) error {
+	path, err := a.registryPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- the user's own registry path
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil || len(data) > maxConfigSize {
+		return failf("cannot read the vault registry (registry.toml)")
+	}
+	var r registryFile
+	md, err := toml.Decode(string(data), &r)
+	if err != nil || len(md.Undecoded()) > 0 || r.Version != 1 {
+		return failf("the vault registry (registry.toml) is damaged; fix or remove it, then detach and attach your vaults again")
+	}
+	for name, rec := range r.Vaults {
+		if format.ValidateVaultName(name) != nil || format.ValidateVaultID(rec.ID) != nil {
+			return failf("the vault registry (registry.toml) has an invalid entry; fix or remove it")
+		}
+		if e, ok := c.Vaults[name]; ok && e.Path == rec.Path {
+			e.ID = rec.ID
+		}
+	}
+	return nil
+}
+
+// saveRegistry writes registry.toml from the entries that have an ID.
+func (a *app) saveRegistry(c *Config) error {
+	path, err := a.registryPath()
+	if err != nil {
+		return err
+	}
+	r := registryFile{Version: 1, Vaults: map[string]registryRecord{}}
+	for name, e := range c.Vaults {
+		if e.ID != "" {
+			r.Vaults[name] = registryRecord{ID: e.ID, Path: e.Path}
+		}
+	}
+	var sb strings.Builder
+	if err := toml.NewEncoder(&sb).Encode(r); err != nil {
+		return failf("cannot write the vault registry")
+	}
+	if err := format.WriteFileAtomic(path, []byte(sb.String()), 0o600); err != nil {
+		return failf("cannot write the vault registry: %v", pathless(err))
+	}
+	return nil
 }
 
 // parseConfig parses registry bytes. Errors describe the problem and never
@@ -113,6 +198,9 @@ func (a *app) saveConfig(c *Config) error {
 	if err := format.WriteFileAtomic(path, []byte(sb.String()), 0o600); err != nil {
 		return failf("cannot write the vault registry: %v", pathless(err))
 	}
+	if err := a.saveRegistry(c); err != nil {
+		return err
+	}
 	a.cfg = c
 	return nil
 }
@@ -127,11 +215,18 @@ func pathless(err error) error {
 
 // --- vault handles ---
 
-// vaultRef is a registered vault.
+// vaultRef is a registered vault. After app.open, chain is its verified
+// vault.json (or v1 a version-1 file awaiting migration), pin this
+// machine's trust pin and class how the two relate.
 type vaultRef struct {
 	name  string
 	entry *VaultEntry
 	dir   string
+
+	chain *members.Chain
+	v1    *format.VaultFile
+	pin   *members.Pin
+	class members.Classification
 }
 
 func (a *app) expandEntry(e *VaultEntry) (string, error) { return a.expandPath(e.Path) }
@@ -195,40 +290,27 @@ func (a *app) vaultNames() ([]string, error) {
 	return names, nil
 }
 
-// open reads vault.json and finishes any interrupted key rotation, as the
-// format documentation requires whenever a vault is opened.
-func (v *vaultRef) open() (*format.VaultFile, error) {
-	vf, err := format.ReadVaultFile(v.dir)
-	if err != nil {
-		return nil, failf("cannot open vault '%s': %v", v.name, vaultErr(err))
-	}
-	if _, err := format.RecoverRotation(v.dir, vf.KeyID); err != nil {
-		return nil, failf("vault '%s' has an unfinished key rotation that could not be completed: %v", v.name, vaultErr(err))
-	}
-	return vf, nil
-}
-
 func vaultErr(err error) error {
+	if errors.Is(err, format.ErrUnsupportedVersion) {
+		return format.ErrUnsupportedVersion
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return errors.New("the folder or vault.json is missing (not synced yet, or moved?)")
 	}
 	return pathless(err)
 }
 
-// index returns the vault's index, rebuilding it from secrets/ if it is
-// missing, broken or has drifted. A rebuilt index is written back (it holds
-// names only).
+// index returns the vault's index, rebuilt in memory from secrets/ if it
+// is missing, broken or has drifted. Reading never writes to the vault
+// folder (design section 6); the next write stores the rebuilt index.
 func (v *vaultRef) index() (*format.Index, error) {
 	old, rerr := format.ReadIndex(v.dir)
 	if rerr != nil {
 		old = nil
 	}
-	idx, changed, err := format.RebuildIndex(v.dir, old)
+	idx, _, err := format.RebuildIndex(v.dir, old)
 	if err != nil {
 		return nil, failf("cannot read the index of vault '%s': %v", v.name, vaultErr(err))
-	}
-	if changed {
-		_ = format.WriteIndex(v.dir, idx)
 	}
 	return idx, nil
 }
@@ -254,18 +336,6 @@ func (a *app) touchEveryRead(v *vaultRef) bool {
 	}
 	c, _ := a.loadConfig()
 	return c.TouchEveryRead
-}
-
-// pinKey remembers the vault key id this Mac has seen.
-func (a *app) pinKey(v *vaultRef, keyID string) {
-	c, err := a.loadConfig()
-	if err != nil {
-		return
-	}
-	if e, ok := c.Vaults[v.name]; ok && e.KeyID != keyID {
-		e.KeyID = keyID
-		_ = a.saveConfig(c)
-	}
 }
 
 // --- agent status helpers ---
@@ -323,14 +393,17 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 		}
 	}
 	var found []*keyRef
+	var failed []error
 	for _, n := range names {
 		v, err := a.vault(n)
 		if err != nil {
 			return nil, err
 		}
-		vf, err := v.open()
-		if err != nil {
-			a.warnf("%v", err)
+		// Verify (no prompts, no writes): a vault that fails must never look
+		// like "key not found" (ue1.10).
+		_, vf, err := a.loadVault(v)
+		if err != nil && !errors.Is(err, members.ErrOldFormat) {
+			failed = append(failed, err)
 			continue
 		}
 		idx, err := v.index()
@@ -341,6 +414,18 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 		if e, ok := idx.Get(name); ok {
 			found = append(found, &keyRef{v: v, vf: vf, entry: e})
 		}
+	}
+	switch {
+	case len(found) == 0 && len(failed) == 1:
+		return nil, failed[0]
+	case len(found) == 0 && len(failed) > 1:
+		for _, e := range failed {
+			a.warnf("%v", e)
+		}
+		return nil, verifyErrf("that key was not found, and %d vaults failed verification, so it may be in one of them", len(failed))
+	}
+	for _, e := range failed {
+		a.warnf("warning: %v", e)
 	}
 	switch len(found) {
 	case 0:

@@ -17,6 +17,12 @@ func itoa(i int) string { return strconv.Itoa(i) }
 func runtimeIsWindows() bool { return runtime.GOOS == "windows" }
 
 func (a *app) printJSON(v any) error {
+	// A first-use pin made by this command is part of the result, so an
+	// agent parsing stdout can't miss that it was not checked (ue1.10).
+	if m, ok := v.(map[string]any); ok && a.firstPin != nil {
+		m["state_code_checked"] = a.firstPin.Checked
+		m["first_pin"] = a.firstPin
+	}
 	enc := json.NewEncoder(a.out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
