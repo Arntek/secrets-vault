@@ -141,7 +141,7 @@ var commands = []command{
 	{name: "trust", group: "Managing vaults", usage: "trust VAULT [--expect CODE] [--accept-rollback]",
 		summary: "Check a vault's state against a code from another member, or repair a change that raced another.",
 		flags:   []flagSpec{fExpect, fSignFP, {name: "accept-rollback"}}, run: cmdTrust},
-	{name: "doctor", group: "Managing vaults", usage: "doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown]",
+	{name: "doctor", group: "Managing vaults", usage: "doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown --expect CODE]",
 		summary: "Check a vault for sync conflicts, leftover key-rotation folders and index problems; move a foreign folder aside; adopt a file with no signed entry; explain and clear what makes the vault refuse changes.",
 		flags:   []flagSpec{{name: "quarantine-staging"}, {name: "adopt", value: true}, {name: "set-aside-unknown"}, {name: "yes-checked-with-members"}, fYes}, run: cmdDoctor},
 	{name: "upgrade", group: "Managing vaults", usage: "upgrade VAULT [--yes]",

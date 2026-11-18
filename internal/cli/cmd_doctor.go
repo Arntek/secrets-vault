@@ -24,7 +24,7 @@ import (
 // folder. Nothing is deleted (ue1.10). With --adopt NAME it gives a file
 // that has no signed entry one, after showing it and asking.
 func cmdDoctor(a *app, p *parsed) error {
-	if err := p.wantArgs(1, 1, a.prog+" doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown] [--yes]"); err != nil {
+	if err := p.wantArgs(1, 1, a.prog+" doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown --expect CODE] [--yes]"); err != nil {
 		return err
 	}
 	v, err := a.vault(p.args[0])
@@ -326,7 +326,8 @@ func (a *app) explainGuard(v *vaultRef, g *members.FolderReport) {
 	case g.NewerCopy:
 		a.printf("A newer verified vault.json is real evidence and cannot be set aside. Let the folder finish syncing, then run: %s trust %s\n", a.prog, v.name)
 	default:
-		a.printf("If you have checked with the other members that nobody changed this vault's key, set these items aside (moved to quarantine/, never deleted): %s doctor %s --set-aside-unknown\n", a.prog, v.name)
+		a.printf("Was anyone removed from this vault recently, or did anyone change its key? Ask another member for the vault's current state code ('%s status' on their machine). A folder that someone restored from an old copy is behind that code, and then these items may be real.\n", a.prog)
+		a.printf("If the folder matches the code and the items are junk, set them aside (moved to quarantine/, never deleted): %s doctor %s --set-aside-unknown --expect CODE\n", a.prog, v.name)
 	}
 }
 
@@ -344,9 +345,22 @@ func (a *app) setAsideUnknown(v *vaultRef, p *parsed, g *members.FolderReport) e
 	if g.NewerCopy {
 		return verifyErrf("vault '%s' has a newer verified copy of vault.json, which is real evidence of another member's change and is not set aside. Let the folder finish syncing, then run: %s trust %s", v.name, a.prog, v.name)
 	}
+	// The check that makes "I asked the other members" real: the current
+	// state code from another member's machine, which this folder must equal
+	// or extend. A folder rolled back behind a removal is behind the code.
+	if a.expectCode == "" {
+		return usageErrf("setting these aside needs --expect CODE: the vault's current state code from another member (run '%s status' on their machine)", a.prog)
+	}
+	exp, err := a.parseCodeFor(v, v.chain, a.expectCode)
+	if err != nil {
+		return err
+	}
+	if !exp.Met(v.chain) {
+		return verifyErrf("vault '%s' does not match the state code you gave (it is behind it, or its history differs). Nothing was set aside. Someone may have restored an old copy of the folder: check with the member who gave you the code", v.name)
+	}
 	if !p.has("yes-checked-with-members") {
 		if !a.term.StdinTTY() {
-			return usageErrf("setting these aside needs you to confirm that you checked with the other members: run it in a terminal, or pass --yes-checked-with-members")
+			return usageErrf("setting these aside needs a terminal, where you confirm that you checked with the other members")
 		}
 		a.infof("This moves %d item(s) in '%s' to quarantine/ (nothing is deleted). Only do it if nobody else changed this vault's key.", len(g.UnknownFiles)+len(g.UnknownStaging), v.name)
 		line, err := a.ask("Type: " + checkedPhrase + "\n> ")
