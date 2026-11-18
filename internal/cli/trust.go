@@ -47,6 +47,10 @@ func (a *app) loadVault(v *vaultRef) (*members.Chain, *format.VaultFile, error) 
 	case errors.Is(err, format.ErrUnsupportedVersion):
 		return nil, nil, failf("vault '%s' was saved by a newer secrets-vault. Upgrade to open it: brew upgrade secrets-vault (Homebrew) or npm update -g secrets-vault (npm)", v.name)
 	case errors.Is(err, format.ErrUnsafeDir):
+		if format.CheckStructuralDirs(v.dir) == nil {
+			// The trash, requests/ or a staging folder: a key change sets it aside.
+			return nil, nil, verifyErrf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it. Nothing was read or written. A key change (%s passwd %s, or %s member rm) renames it aside; or replace it with a real folder", v.name, a.prog, v.name, a.prog)
+		}
 		return nil, nil, verifyErrf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it. Nothing is read or written (not even by key changes) until it is fixed: replace the link with the real folder, or restore it from the provider's version history", v.name)
 	case errors.Is(err, format.ErrMalformed), errors.Is(err, format.ErrTooLarge):
 		// A vault.json that exists but doesn't parse is as much "the folder
