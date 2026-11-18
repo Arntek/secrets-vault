@@ -170,6 +170,7 @@ func cmdRebuild(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	a.setAsideBadFolders(v)
 	if _, err := a.open(v); err != nil {
 		return err
 	}
@@ -211,6 +212,9 @@ func cmdRebuild(a *app, p *parsed) error {
 	defer destroyWrapper(pw)
 	mw, err := un.MemberWrapper()
 	if err != nil {
+		return err
+	}
+	if err := a.setAsideConflicts(v, key); err != nil {
 		return err
 	}
 	oldID := v.chain.File.ID

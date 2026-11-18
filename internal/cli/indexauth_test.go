@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
 )
 
@@ -926,9 +931,9 @@ func TestTombstoneWrittenBackWithFileResurrected(t *testing.T) {
 	expectCode(t, e.run("get", "B_KEY"), ExitUnverified)
 }
 
-// A symlinked quarantine folder never receives a file, and every command
-// refuses the vault (exit 5) rather than writing through a link.
-func TestQuarantineSymlinkIsRefused(t *testing.T) {
+// A symlinked quarantine folder is never written through, and never blocks
+// a rotation either: it is renamed aside and a real one is made.
+func TestQuarantineSymlinkIsRenamedAside(t *testing.T) {
 	skipWindows(t)
 	e := newEnv(t)
 	dir := e.initVault("main")
@@ -943,11 +948,215 @@ func TestQuarantineSymlinkIsRefused(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(dir, "secrets", "JUNK_FILE.age"), []byte("junk"), 0o600)
 	r := e.runIn(testPass+"\nsecond passphrase\n", "passwd", "main", "--passphrase-stdin")
-	expectCode(t, r, ExitUnverified)
+	if r.code != 0 {
+		t.Fatalf("a planted quarantine link blocked passwd: %s", r)
+	}
 	if m, _ := filepath.Glob(filepath.Join(elsewhere, "*")); len(m) != 0 {
 		t.Fatalf("a file was written through the link: %v", m)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "secrets", "JUNK_FILE.age")); err != nil {
-		t.Fatal("the junk file was moved")
+	if m, _ := filepath.Glob(filepath.Join(dir, "quarantine-bad-*")); len(m) != 1 {
+		t.Fatalf("the link was not renamed aside: %v", m)
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir, "quarantine", "secrets", "JUNK_FILE.*.age")); len(m) != 1 {
+		t.Fatalf("the junk file was not quarantined into a fresh folder: %v", m)
+	}
+}
+
+// Property test (ue1.15, class level): whatever a folder writer plants in
+// the vault folder, passwd completes for the files that verify, nothing
+// outside the vault folder is written, nothing is deleted, and the old key
+// opens nothing written afterwards. member rm calls the same set-aside
+// step (setAsideConflicts) before the same rotation.
+func TestRotationNeverBlockedByPlantedFiles(t *testing.T) {
+	skipWindows(t)
+	seeds := 25
+	if n, err := strconv.Atoi(os.Getenv("SV_PROP_SEEDS")); err == nil && n > 0 {
+		seeds = n // a longer local run
+	}
+	if testing.Short() {
+		seeds = 5
+	}
+	for seed := 0; seed < seeds; seed++ {
+		t.Run("seed"+itoa(seed), func(t *testing.T) {
+			rng := rand.New(rand.NewSource(int64(seed)))
+			e := newEnv(t)
+			dir := e.initVault("main")
+			e.unlock("main")
+			e.set("B_KEY", "", "bee")
+			e.set("C_KEY", "", "sea")
+			sec := func(n string) string { return filepath.Join(dir, "secrets", n) }
+			epoch1B, _ := os.ReadFile(sec("B_KEY.age"))
+			e.mustRunIn(testPass+"\nfirst rotation\n", "passwd", "main", "--passphrase-stdin")
+			b, _ := os.ReadFile(sec("B_KEY.age"))
+			oldIDs := map[string]string{}
+			for _, n := range []string{"B_KEY", "C_KEY"} {
+				ct, _ := os.ReadFile(sec(n + ".age"))
+				oldIDs[n] = keyIDOfFile(t, ct)
+			}
+			outside := t.TempDir()
+			keep := filepath.Join(outside, "keep")
+			_ = os.WriteFile(keep, []byte("outside data"), 0o600)
+			fifo := func(p string) {
+				if err := syscall.Mkfifo(p, 0o600); err != nil {
+					_ = os.WriteFile(p, []byte("fifo stand-in"), 0o600)
+				}
+			}
+			plants := []func(){
+				func() { _ = os.WriteFile(sec("B_KEY (alice's conflicted copy 2026-11-18).age"), []byte("junk"), 0o600) },
+				func() { _ = os.WriteFile(sec("C_KEY (conflicted copy).age"), epoch1B, 0o600) },
+				func() {
+					_ = os.WriteFile(filepath.Join(dir, "vault (bob's conflicted copy).json"), []byte("{}"), 0o600)
+				},
+				func() { _ = os.WriteFile(filepath.Join(dir, "index (conflicted copy).json"), []byte("garbage"), 0o600) },
+				func() { _ = os.Mkdir(sec("EVIL_DIR.age"), 0o700) },
+				func() { _ = os.Symlink(keep, sec("EVIL_LINK.age")) },
+				func() { _ = os.Symlink(outside, sec("EVIL_DIRLINK.age")) },
+				func() { fifo(sec("EVIL_FIFO.age")) },
+				func() { _ = os.WriteFile(sec("TRUNC.age"), b[:len(b)/2], 0o600) },
+				func() { _ = os.WriteFile(sec("RENAMED_COPY.age"), b, 0o600) },
+				func() { _ = os.WriteFile(sec("GARBAGE.age"), []byte("zzz"), 0o600) },
+				func() { _ = os.WriteFile(sec("OLD_EPOCH.age"), epoch1B, 0o600) },
+				func() { _ = os.Symlink(outside, filepath.Join(dir, "quarantine")) },
+				func() {
+					_ = os.MkdirAll(filepath.Join(dir, "quarantine"), 0o700)
+					_ = os.Symlink(outside, filepath.Join(dir, "quarantine", "secrets"))
+				},
+				func() { _ = os.Symlink(outside, sec(".trash")) },
+				func() { _ = os.Symlink(outside, filepath.Join(dir, "requests")) },
+				func() { _ = os.Symlink(outside, sec(".sv-rotate-abababababababababababababababab")) },
+				func() { _ = os.Mkdir(sec("X (conflicted copy).age"), 0o700) },
+				func() {
+					_ = os.MkdirAll(sec(".trash"), 0o700)
+					_ = os.WriteFile(filepath.Join(sec(".trash"), "junk-file.age"), []byte("j"), 0o600)
+				},
+			}
+			rng.Shuffle(len(plants), func(i, j int) { plants[i], plants[j] = plants[j], plants[i] })
+			n := 1 + rng.Intn(len(plants))
+			preexisting := regularHashes(t, dir)
+			for _, p := range plants[:n] {
+				p()
+			}
+			// What the plants added (regular files), which must survive; some
+			// plants write through an earlier plant's link, so note what is
+			// outside now too.
+			before := map[[32]byte]bool{}
+			for h := range regularHashes(t, dir) {
+				if !preexisting[h] {
+					before[h] = true
+				}
+			}
+			outsideBefore := dirNames(t, outside)
+			r := e.runIn(testPass+"\nsecond rotation\n", "passwd", "main", "--passphrase-stdin")
+			if r.code != 0 {
+				t.Fatalf("passwd blocked with %d plants: %s", n, r)
+			}
+			// Nothing outside the vault folder was written.
+			if now := dirNames(t, outside); !reflect.DeepEqual(now, outsideBefore) {
+				t.Fatalf("something was written outside the vault: %v -> %v", outsideBefore, now)
+			}
+			if got, _ := os.ReadFile(keep); string(got) != "outside data" {
+				t.Fatal("a symlink target was modified")
+			}
+			// Nothing deleted: every planted regular file's bytes are still in the vault folder.
+			after := regularHashes(t, dir)
+			for h := range before {
+				if _, ok := after[h]; !ok {
+					t.Fatal("a regular file's content is gone from the vault folder")
+				}
+			}
+			// The keys that verify are rotated and readable; the old key opens none of them.
+			for k, v := range map[string]string{"B_KEY": "bee\n", "C_KEY": "sea\n"} {
+				if got := e.mustRun("get", k).out; got != v {
+					t.Fatalf("%s = %q", k, got)
+				}
+				ct, _ := os.ReadFile(sec(k + ".age"))
+				if keyIDOfFile(t, ct) == oldIDs[k] {
+					t.Fatalf("%s is still sealed under the old key", k)
+				}
+			}
+		})
+	}
+}
+
+func keyIDOfFile(t *testing.T, ct []byte) string {
+	t.Helper()
+	id, err := crypto.KeyIDOf(ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// regularHashes returns the SHA-256 of every regular file under dir (by
+// Lstat; links are not followed).
+func regularHashes(t *testing.T, dir string) map[[32]byte]bool {
+	t.Helper()
+	out := map[[32]byte]bool{}
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil
+		}
+		if b, err := os.ReadFile(p); err == nil {
+			out[sha256.Sum256(b)] = true
+		}
+		return nil
+	})
+	return out
+}
+
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range ents {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+// The same through member rm: a worst-case pile of plants can't stop the
+// removal of a member.
+func TestMemberRemoveNeverBlockedByPlantedFiles(t *testing.T) {
+	skipWindows(t)
+	owner, dan := newEnv(t), newEnv(t)
+	vdir := owner.initVault("team")
+	owner.unlock("team")
+	owner.set("TEAM_KEY", "", "team-value")
+	join(t, owner, dan, "team", vdir, "dan")
+	outside := t.TempDir()
+	keep := filepath.Join(outside, "keep")
+	_ = os.WriteFile(keep, []byte("outside data"), 0o600)
+	b, _ := os.ReadFile(filepath.Join(vdir, "secrets", "TEAM_KEY.age"))
+	sec := func(n string) string { return filepath.Join(vdir, "secrets", n) }
+	_ = os.WriteFile(sec("TEAM_KEY (alice's conflicted copy).age"), []byte("junk"), 0o600)
+	_ = os.WriteFile(filepath.Join(vdir, "vault (bob's conflicted copy).json"), []byte("{}"), 0o600)
+	_ = os.Mkdir(sec("EVIL_DIR.age"), 0o700)
+	_ = os.Symlink(keep, sec("EVIL_LINK.age"))
+	_ = syscall.Mkfifo(sec("EVIL_FIFO.age"), 0o600)
+	_ = os.WriteFile(sec("RENAMED_COPY.age"), b, 0o600)
+	_ = os.WriteFile(sec("TRUNC.age"), b[:len(b)/2], 0o600)
+	_ = os.Symlink(outside, sec(".trash"))
+	_ = os.Symlink(outside, filepath.Join(vdir, "requests"))
+	_ = os.Symlink(outside, filepath.Join(vdir, "quarantine"))
+	before := dirNames(t, outside)
+	r := owner.runIn(testPass+"\n", "member", "rm", "team", "dan", "--yes", "--folder-access-removed", "--passphrase-stdin")
+	if r.code != 0 {
+		t.Fatalf("member rm blocked: %s", r)
+	}
+	if now := dirNames(t, outside); !reflect.DeepEqual(now, before) {
+		t.Fatalf("something was written outside the vault: %v -> %v", before, now)
+	}
+	if got := owner.mustRun("get", "TEAM_KEY").out; got != "team-value\n" {
+		t.Fatalf("%q", got)
+	}
+	if out := owner.mustRun("member", "list", "team").out; strings.Contains(out, "dan") {
+		t.Fatalf("dan is still a member: %s", out)
+	}
+	ct, _ := os.ReadFile(sec("TEAM_KEY.age"))
+	if id, _ := crypto.KeyIDOf(ct); id == keyIDOfFile(t, b) {
+		t.Fatal("TEAM_KEY is still sealed under the old key")
 	}
 }

@@ -245,6 +245,7 @@ func (a *app) memberRemove(v *vaultRef, name string, p *parsed) error {
 	if err := members.ValidateMemberName(name); err != nil {
 		return usageErrf("%v", err)
 	}
+	a.setAsideBadFolders(v)
 	vf, err := a.open(v)
 	if err != nil {
 		return err
@@ -331,6 +332,9 @@ func (a *app) memberRemove(v *vaultRef, name string, p *parsed) error {
 		}
 		defer destroyWrapper(pw)
 		opt.New = pw
+	}
+	if err := a.setAsideConflicts(v, key); err != nil {
+		return err
 	}
 	res, err := members.Remove(v.dir, v.chain, key, un, name, opt)
 	a.noteRotation(v, &skipped, &dropped)

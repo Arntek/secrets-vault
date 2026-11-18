@@ -408,6 +408,9 @@ func (a *app) repairLostRace(v *vaultRef, key *crypto.VaultKey) (*crypto.VaultKe
 		defer clear(p)
 		return a.passphraseWrapper(p)
 	}
+	if err := a.setAsideConflicts(v, key); err != nil {
+		return nil, err
+	}
 	res, err := members.Rebase(v.dir, v.chain, key, un, v.class.Lost, pending, a.trustedEntries(v), ask, ps, a.now())
 	if res != nil && len(res.Written) > 0 {
 		if serr := a.afterWrite(v, res.Chain, res.Written...); serr != nil && err == nil {

@@ -451,3 +451,79 @@ func (a *app) quarantinedList() []string {
 	}
 	return a.quarantined
 }
+
+// setAsideConflicts runs before a key rotation (member rm, passwd, rebuild,
+// lost-race repair). Rotation refuses to run over sync-conflict copies and
+// unexpected files, and anyone who can write the folder can make one, so
+// that must not be a way to block a removal: each is moved to
+// quarantine/conflicts/ (a rename: nothing is read through a link, nothing
+// is deleted), named in a warning, and the rotation goes on. A copy of a
+// secret that opens under the current key as its base name is a real edit
+// by a member and gets a "review" line. A vault.json copy that verifies
+// with a higher seq is evidence of a newer state: that still refuses.
+func (a *app) setAsideConflicts(v *vaultRef, key *crypto.VaultKey) error {
+	a.setAsideBadFolders(v) // normally already done before the vault was opened
+	cs, err := format.FindConflicts(v.dir)
+	if err != nil {
+		return failf("cannot check vault '%s': %v", v.name, vaultErr(err))
+	}
+	for _, rel := range format.UnexpectedTrashEntries(v.dir) {
+		cs = append(cs, format.Conflict{Path: rel, Kind: format.ConflictUnknown})
+	}
+	var moved, review []string
+	for _, c := range cs {
+		if c.Kind == format.ConflictTempFile {
+			continue
+		}
+		if c.Kind == format.ConflictSyncCopy && c.Original == format.VaultFileName && v.chain != nil {
+			if vf, raw, err := format.ReadVaultFileCopy(v.dir, c.Path); err == nil {
+				if cc, err := members.Verify(vf, raw, v.chain.File.ID); err == nil && cc.Head().Seq > v.chain.Head().Seq {
+					return verifyErrf("vault '%s': %v. A copy of vault.json (%s) verifies with a newer state", v.name, members.ErrNewerState, c.Path)
+				}
+			}
+		}
+		if c.Kind == format.ConflictSyncCopy && strings.HasPrefix(c.Original, format.SecretsDir+"/") {
+			base := strings.TrimSuffix(strings.TrimPrefix(c.Original, format.SecretsDir+"/"), format.SecretExt)
+			if ct, err := format.ReadSecretCopy(v.dir, c.Path); err == nil && key != nil {
+				if s, err := crypto.NewSealer(base); err == nil {
+					if pt, err := s.Open(key, ct); err == nil {
+						clear(pt)
+						review = append(review, c.Path)
+					}
+				}
+			}
+		}
+		to, err := format.QuarantineConflict(v.dir, c.Path, a.now())
+		if err != nil {
+			return failf("cannot set aside %s in '%s' before changing the vault key: %v", c.Path, v.name, vaultErr(err))
+		}
+		moved = append(moved, c.Path+" -> "+to)
+		a.quarantined = append(a.quarantined, c.Path)
+	}
+	if len(moved) > 0 {
+		a.warnf("warning: %s in '%s' would have blocked the key change and %s set aside in quarantine/conflicts/ (not deleted): %s",
+			plural(len(moved), "unexpected file"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], strings.Join(moved, "; "))
+	}
+	for _, p := range review {
+		a.warnf("review: %s opens under this vault's key, so a member may have made a real edit in it; compare it with the current key and set the value again if it is newer", p)
+	}
+	return nil
+}
+
+// setAsideBadFolders renames aside the vault's sub-folders that are links or
+// not ours (a symlinked trash, requests/, staging folder, quarantine/): never
+// followed, never deleted. Rotation commands (member rm, passwd, rebuild)
+// call it before they open the vault, because every vault operation refuses
+// such a folder, and a folder writer must not be able to block a removal
+// by planting one (ue1.15).
+func (a *app) setAsideBadFolders(v *vaultRef) {
+	moved, failed := format.SetAsideBadDirs(v.dir, a.now())
+	if len(moved) > 0 {
+		a.warnf("warning: %s in '%s' %s not a real folder of yours (a link, or owned by someone else) and %s renamed to quarantine-bad-... in the vault folder, not followed or deleted: %s",
+			plural(len(moved), "folder"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], map[bool]string{true: "was", false: "were"}[len(moved) == 1], strings.Join(moved, ", "))
+		a.quarantined = append(a.quarantined, moved...)
+	}
+	if len(failed) > 0 {
+		a.warnf("warning: could not move aside %s in '%s'; leaving them: %s", plural(len(failed), "bad folder"), v.name, strings.Join(failed, ", "))
+	}
+}

@@ -167,7 +167,7 @@ func WriteVaultFileCAS(vaultDir string, vf *VaultFile, expect []byte) error {
 }
 
 // CheckVaultDirs refuses a vault folder whose own directory, secrets/,
-// secrets/.trash/, requests/, quarantine/, quarantine/secrets/ or any rotation staging folder is a symlink,
+// secrets/.trash/, requests/ or any rotation staging folder is a symlink,
 // is not a directory or (on Unix) is not owned by the current user.
 // Folders that do not exist are fine (except the vault folder itself).
 // Every function here that writes, renames or deletes under a vault calls
@@ -177,7 +177,7 @@ func CheckVaultDirs(vaultDir string) error {
 	if err := checkDir(vaultDir, false); err != nil {
 		return err
 	}
-	for _, rel := range []string{SecretsDir, filepath.Join(SecretsDir, TrashDir), RequestsDir, QuarantineDir, filepath.Join(QuarantineDir, SecretsDir)} {
+	for _, rel := range []string{SecretsDir, filepath.Join(SecretsDir, TrashDir), RequestsDir} {
 		if err := checkDir(filepath.Join(vaultDir, rel), true); err != nil {
 			return err
 		}

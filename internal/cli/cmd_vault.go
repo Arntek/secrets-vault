@@ -377,6 +377,7 @@ func cmdPasswd(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	a.setAsideBadFolders(v)
 	vf, err := a.open(v)
 	if err != nil {
 		return err
@@ -410,6 +411,9 @@ func cmdPasswd(a *app, p *parsed) error {
 	}
 	var skipped []string
 	dropped := 0
+	if err := a.setAsideConflicts(v, key); err != nil {
+		return err
+	}
 	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now(), TrustedEntries: a.trustedEntries(v), SkippedFiles: &skipped, IndexDropped: &dropped})
 	a.noteRotation(v, &skipped, &dropped)
 	if res != nil && res.NewKey != nil {
