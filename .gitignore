@@ -18,3 +18,13 @@ spikes/**/testvault/
 
 # Private planning docs (personal paths, vault names) - local only
 docs/private/
+
+# Vault data must never be committed (tests generate their own at runtime)
+*.age
+**/vault.json
+**/index.json
+/requests/
+
+# Go
+/coverage.out
+*.test
