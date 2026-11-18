@@ -897,3 +897,81 @@ func FuzzParseLeaseFile(f *testing.F) {
 		_, _, _ = parseLease(data, v.c)
 	})
 }
+
+// ue1.11: an owner who wrote every record (own reaches back to genesis)
+// still gets an honest concurrent removal classified as a lost race and
+// repaired; N1 refusals still refuse.
+func TestClassifyOwnerOnlyHistory(t *testing.T) {
+	alice, bob, carol, dave, mallory := newPerson(t, "alice"), newPerson(t, "bob"), newPerson(t, "carol"), newPerson(t, "dave"), newPerson(t, "mallory")
+	v := newVault(t, alice)
+	own := []format.LogEntry{v.c.LastEntry()}
+	for _, p := range []*person{bob, carol, dave} {
+		v.join(t, alice, p)
+		own = append(own, v.c.LastEntry())
+	}
+	putSecret(t, v.dir, v.key, "A", "a")
+	base, baseKey := v.c, v.key
+	bobDir := filepath.Join(t.TempDir(), "bob")
+	copyDir(t, v.dir, bobDir)
+
+	ar, err := Remove(v.dir, base, baseKey, alice.un, "carol", RotateOptions{Now: t0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alicePin := pinOf(ar.Chain, append(own, ar.Chain.LastEntry())...)
+	if len(alicePin.Own) != 5 {
+		t.Fatalf("own = %d", len(alicePin.Own))
+	}
+	br, err := Remove(bobDir, base, baseKey, bob.un, "dave", RotateOptions{Now: t0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := Classify(br.Chain, alicePin)
+	if cl.Outcome != LostRace || cl.Diverge != base.Head().Seq || len(cl.Lost) != 1 || cl.Lost[0].Member.Name != "carol" {
+		t.Fatalf("classify = %+v", cl)
+	}
+	// Repair: alice's removal applied on top of bob's.
+	mustWriteFile(t, format.VaultFilePath(v.dir), mustReadFile(t, format.VaultFilePath(bobDir)))
+	for _, n := range []string{"A"} {
+		src, _ := format.SecretPath(bobDir, n)
+		dst, _ := format.SecretPath(v.dir, n)
+		mustWriteFile(t, dst, mustReadFile(t, src))
+	}
+	winner, _, err := Load(v.dir, base.File.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wk, err := crypto.Unlock(winner.File, alice.wrapper(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, []*crypto.VaultKey{ar.NewKey}, nil, nil, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, gone := range []string{"carol", "dave"} {
+		if _, ok := rb.Chain.Head().Member(gone); ok {
+			t.Fatalf("%s still a member", gone)
+		}
+	}
+	// N1 still refuses: carol races with an add-member of her own.
+	w, _ := crypto.NewMemberWrapper("mallory", mallory.pub.Recipient)
+	u, _ := w.Wrap(baseKey)
+	m := format.Member{Name: "mallory", Recipient: mallory.pub.Recipient, SignKey: mallory.pub.SignKey, Role: RoleMember}
+	evil, err := base.Append(carol.un, Change{Op: format.OpAddMember, Member: &m, KeyID: baseKey.ID(), Unlockers: append(slices.Clone(base.File.Unlockers), u)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ec, _ := Verify(evil, nil, "")
+	if got := Classify(ec, alicePin); got.Outcome != Rollback {
+		t.Fatalf("N1 with an owner-only history = %v", got.Outcome)
+	}
+	// A rollback of alice's own records (folder at genesis) is not a race.
+	g := *base.File
+	g.Log = g.Log[:1]
+	if gc, err := Verify(&g, nil, ""); err == nil {
+		if got := Classify(gc, alicePin); got.Outcome == Extension || got.Outcome == Same {
+			t.Fatalf("truncated history = %v", got.Outcome)
+		}
+	}
+}

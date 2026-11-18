@@ -238,9 +238,28 @@ func Classify(c *Chain, pin *Pin) Classification {
 		}
 		own = append(own, r)
 	}
-	d := own[0].Seq - 1
-	if d < 0 || d >= n || format.RecordHash(c.File.Log[d].Body) != own[0].Prev {
-		return Classification{Outcome: Rollback, Reason: "the history before this machine's last change is different"}
+	// The divergence point: the newest of this machine's own records the
+	// folder still has (ue1.11: own may reach back to genesis when nobody
+	// else has written), or else the record before the oldest of them.
+	k := -1
+	for i := len(own) - 1; i >= 0; i-- {
+		if own[i].Seq < n && format.RecordHash(c.File.Log[own[i].Seq].Body) == format.RecordHash(pin.Own[i].Body) {
+			k = i
+			break
+		}
+	}
+	var d int
+	if k >= 0 {
+		d = own[k].Seq
+	} else {
+		d = own[0].Seq - 1
+		if d < 0 || d >= n || format.RecordHash(c.File.Log[d].Body) != own[0].Prev {
+			return Classification{Outcome: Rollback, Reason: "the history before this machine's last change is different"}
+		}
+	}
+	own = own[k+1:]
+	if len(own) == 0 {
+		return Classification{Outcome: Rollback, Reason: "the pinned state is missing"}
 	}
 	// N1: the winning branch must not be able to weaken our ops. Every
 	// winning record must be signed by someone our ops don't remove, add
