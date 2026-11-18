@@ -8,7 +8,7 @@
 //     identity key that is itself wrapped once per unlocker (today the
 //     personal passphrase; Touch ID later) exactly like vault.json wraps a
 //     vault key. Export/import moves it between Macs.
-//   - Fingerprints: two words and a number (e.g. MAPLE-RIVER-4417) derived
+//   - Fingerprints: three words and a number (e.g. MAPLE-RIVER-OTTER-4417) derived
 //     from the public key, easy to read aloud for out-of-band checks.
 //   - Join requests written to <vault>/requests/ by non-members.
 //   - Approve: add a format.Unlocker of type "member" wrapping the vault key
@@ -95,7 +95,7 @@ const (
 type Identity struct {
 	Name        string
 	Recipient   string // age X25519 recipient (public key)
-	Fingerprint string // e.g. MAPLE-RIVER-4417
+	Fingerprint string // e.g. MAPLE-RIVER-OTTER-4417
 }
 
 // JoinRequest is a request file written by a non-member.

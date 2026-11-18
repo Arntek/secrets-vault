@@ -53,7 +53,7 @@ func TestTwoIdentitySharing(t *testing.T) {
 
 	// A wrong fingerprint (mistyped, or someone else's) is refused and changes nothing.
 	vfBefore, _ := os.ReadFile(format.VaultFilePath(dir))
-	for _, wrong := range []string{"", "MAPLE-RIVER-4417", alice.pub.Fingerprint, bob.pub.Fingerprint + " ", bob.pub.Fingerprint[:len(bob.pub.Fingerprint)-1]} {
+	for _, wrong := range []string{"", "MAPLE-RIVER-OTTER-4417", "MAPLE-RIVER-4417", alice.pub.Fingerprint, bob.pub.Fingerprint + " ", bob.pub.Fingerprint[:len(bob.pub.Fingerprint)-1]} {
 		if _, err := ApproveRequest(dir, aliceKey, "bob", wrong, "alice"); !errors.Is(err, ErrFingerprintMismatch) {
 			t.Fatalf("fingerprint %q: err = %v", wrong, err)
 		}
