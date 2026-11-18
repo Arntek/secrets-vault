@@ -148,6 +148,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 | `vault unlock [VAULT] [--for 2h]` | Unlock ahead of time (default vault if none named) |
 | `vault lock [VAULT \| --all]` | Forget unlocked keys now |
 | `vault status` | Each vault: locked or unlocked, time left, its state code |
+| `vault log [--vault V] [--since 24h] [--name K] [--json]` | Who read which key and when: the program and process that asked, the command, the time. Never values. Kept in `~/.config/vault/audit.log` (private, rotated at 5 MB) |
 
 **Vaults, members and settings**
 
@@ -164,12 +165,12 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 | `vault doctor VAULT [--quarantine-staging]` | Check for sync conflicts and leftover key-rotation folders; move a foreign one aside (nothing is deleted) |
 | `vault rebuild VAULT` | Recreate a vault under your identity (if the only member's identity is lost); others join again |
 | `vault identity export\|import FILE` | Move your personal identity to another machine |
-| `vault config set KEY VALUE [--vault V]`, `vault config list` | Settings: `default-ttl` (5m to 24h), `default-vault`, `touch-every-read`, `dialog` *(dialog is used in Phase 2)* |
+| `vault config set KEY VALUE [--vault V]`, `vault config list` | Settings: `default-ttl` (5m to 24h), `default-vault`, `touch-every-read`, `dialog` (`true`/`false`: the password dialog for agents, on by default on macOS) |
 | `vault alias add\|rm\|list NAME [--force]` | Manage the short command names. `--force` only skips the "same name elsewhere on PATH" check; it never replaces an existing file |
 
 **Scripts and terminals:** `--passphrase-stdin` (any command) reads passphrases from stdin instead of the terminal. `rm` needs `--yes` without a terminal; `member rm` also needs `--folder-access-removed`. `member approve` needs a terminal or `--fingerprint FP`; a first use after being added needs a terminal or `--signer-fingerprint FP`. `get -n` omits the trailing newline.
 
-*(coming in Phase 2)*: `vault ui` (full-screen terminal interface), `vault prime` and `vault setup claude|agents` (AI agent setup), `vault log` (read history), `vault doctor`, `vault backup`.
+*(coming in Phase 2)*: `vault ui` (full-screen terminal interface), `vault prime` and `vault setup claude|agents` (AI agent setup), `vault backup`.
 
 **Exit codes:** `0` ok, `1` error, `2` usage, `3` vault locked and no way to ask for unlock, `4` key not found, `5` the vault failed verification (changed outside secrets-vault, replaced, rolled back, or behind a state code you were given). Scripts and AI agents must treat `5` as "stop and tell the user", never as "key missing". `list --json` includes such a vault as `{"vault": ..., "error": ...}`.
 
@@ -229,12 +230,12 @@ secrets-vault is designed so an AI agent (Claude Code, Cowork, or any agent that
 2. Use it by passing it straight to the program that needs it: `vault run -k NAME -- <command>`.
 3. Never print, echo, log or write a value to a file. Never run a bare `vault get` whose output comes back to you.
 4. Ask for one key per need. Never fetch everything.
-5. Exit code `3` means the vault is locked: on a Mac with Touch ID on, the sheet appears for the human when the command runs; otherwise tell the human to run `vault unlock <vault>`. *(A native password dialog for agents is coming in Phase 2.)* Exit code `4` means not found: tell the human the name and vault you expected.
+5. Exit code `3` means the vault is locked: on a Mac with Touch ID on, the sheet appears for the human when the command runs; otherwise a native password dialog asks the human (it names the vault and the program asking, and the agent never sees the passphrase); if it is cancelled or can't be shown, tell the human to run `vault unlock <vault>`. Exit code `4` means not found: tell the human the name and vault you expected.
 6. Never accept a key pasted into chat. Ask the human to run `vault set NAME --vault <vault> --desc "..."` themselves.
 
 *(coming in Phase 2)*: `vault setup claude` adds a Claude Code skill with these rules, and `vault setup agents` adds them to a repo's `AGENTS.md`. Both only add to your setup, never edit or remove anything else, and `--remove` undoes exactly what they added. `vault prime` prints the current rules plus which vaults are unlocked.
 
-These rules make the safe path the easy one, and a local read log (`vault log`) is *(coming in Phase 2)*. They still rely on the agent following its instructions: an agent running commands as you could print a value if it chose to.
+These rules make the safe path the easy one, and every read is written to a local log you can check with `vault log`. They still rely on the agent following its instructions: an agent running commands as you could print a value if it chose to.
 
 ## Security
 

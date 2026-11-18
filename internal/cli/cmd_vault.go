@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Arntek/secrets-vault/internal/agent"
+	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
 	"github.com/Arntek/secrets-vault/internal/members"
@@ -416,6 +417,7 @@ func cmdPasswd(a *app, p *parsed) error {
 	if err != nil {
 		return failf("could not change the passphrase of '%s': %v", v.name, vaultErr(err))
 	}
+	a.record(v.name, "", audit.ActionPasswd)
 	code := members.StateCode(v.chain, v.chain.Head().Seq)
 	if a.asJSON {
 		return a.printJSON(map[string]any{"vault": v.name, "changed": true, "rotated": rotate, "state_code": code})
@@ -547,7 +549,7 @@ func cmdConfig(a *app, p *parsed) error {
 			"default_ttl":      orDefault(cfg.DefaultTTL, agent.DefaultTTL.String()),
 			"default_vault":    cfg.DefaultVault,
 			"touch_every_read": cfg.TouchEveryRead,
-			"dialog":           orDefault(cfg.Dialog, "auto"),
+			"dialog":           cfg.Dialog == nil || bool(*cfg.Dialog),
 		}
 		if a.asJSON {
 			return a.printJSON(out)
@@ -631,13 +633,14 @@ func setConfig(cfg *Config, e *VaultEntry, key, val string) error {
 			cfg.TouchEveryRead = b
 		}
 	case "dialog":
-		if val != "auto" && val != "off" {
-			return usageErrf("dialog must be 'auto' or 'off'")
+		b, ok := parseDialogWord(val)
+		if !ok {
+			return usageErrf("dialog must be true or false")
 		}
 		if e != nil {
-			e.Dialog = val
+			e.Dialog = ptrDialog(b)
 		} else {
-			cfg.Dialog = val
+			cfg.Dialog = ptrDialog(b)
 		}
 	case "default-vault":
 		if e != nil {

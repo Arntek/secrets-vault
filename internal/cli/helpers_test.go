@@ -127,6 +127,24 @@ func (w *fakeWrapper) Unwrap(u format.Unlocker) (*crypto.VaultKey, error) {
 	return w.inner.Unwrap(u)
 }
 
+// fakeDialog stands in for the macOS password dialog: no test may open a
+// real one. It hands out scripted answers; with none left it behaves like
+// Cancel.
+type fakeDialog struct {
+	answers []string
+	msgs    []string
+}
+
+func (d *fakeDialog) run(msg string) ([]byte, error) {
+	d.msgs = append(d.msgs, msg)
+	if len(d.answers) == 0 {
+		return nil, errDialogCancelled
+	}
+	a := d.answers[0]
+	d.answers = d.answers[1:]
+	return []byte(a), nil
+}
+
 type fakeClip struct {
 	value     []byte
 	scheduled []time.Duration
@@ -158,6 +176,7 @@ type testEnv struct {
 	term     *fakeTerm
 	touch    *fakeTouch
 	clip     *fakeClip
+	dialog   *fakeDialog
 	environ  []string
 	path     string
 	exe      string
@@ -183,7 +202,7 @@ func newEnvAt(t *testing.T, home string) *testEnv {
 	}
 	e := &testEnv{
 		t: t, home: home, cfg: filepath.Join(home, "config", "config.toml"), agentDir: ad,
-		term: &fakeTerm{}, touch: &fakeTouch{}, clip: &fakeClip{},
+		term: &fakeTerm{}, touch: &fakeTouch{}, clip: &fakeClip{}, dialog: &fakeDialog{},
 		environ: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "SV_UNRELATED=visible"},
 	}
 	e.exe = filepath.Join(home, "bin", "secrets-vault")
@@ -197,6 +216,9 @@ func newEnvAt(t *testing.T, home string) *testEnv {
 		a.term = c.term
 		a.touch = c.touch.backend()
 		a.clip = c.clip
+		a.dialog = c.dialog.run
+		a.goos = "darwin"
+		a.caller = func() (string, int) { return "testprog", 4242 }
 		a.environ = func() []string { return c.environ }
 		a.exePath = func() (string, error) { return c.exe, nil }
 		if c.path != "" {

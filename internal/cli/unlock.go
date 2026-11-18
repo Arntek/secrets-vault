@@ -436,16 +436,8 @@ func (a *app) identityNeedsUpgrade() bool {
 // when there is no way to ask (the caller reports "locked").
 func (a *app) promptVaultPassphrase(v *vaultRef, vf *format.VaultFile) (*crypto.VaultKey, error) {
 	if !a.interactive() {
-		if a.dialogPassphrase != nil {
-			// Phase 2: native password dialog for agents.
-			p, err := a.dialogPassphrase(v.name)
-			if err != nil {
-				return nil, nil
-			}
-			defer clear(p)
-			return a.tryPassphrase(vf, p)
-		}
-		return nil, nil
+		// No terminal: the native dialog for agents (macOS), or "locked".
+		return a.dialogUnlockVault(v, vf)
 	}
 	for try := 0; try < maxPassphraseTry; try++ {
 		p, err := a.askHidden("Passphrase for '" + v.name + "': ")

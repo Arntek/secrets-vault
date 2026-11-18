@@ -10,7 +10,7 @@ How `internal/cli` turns the packages into commands. The command list and one-li
 default_ttl = "4h"
 default_vault = "personal"
 touch_every_read = false     # ask for Touch ID on every read
-dialog = "auto"              # Phase 2: native password dialog for agents
+dialog = true                # native password dialog for agents (macOS; default true)
 aliases = ["sv"]             # short names added by `alias add`
 
 [vaults.personal]
@@ -28,7 +28,18 @@ Before anything else the vault is verified (`app.open`, see Trust): nothing is r
 1. A key held by the agent (it must match the verified `key_id`, otherwise it is dropped).
 2. This person's member key: the identity, opened with Touch ID (when this Mac's Touch ID protects it) or the personal passphrase.
 3. The vault passphrase, on a terminal (or `--passphrase-stdin`).
-4. Otherwise exit 3: `Vault 'NAME' is locked. Run: <short name> unlock NAME`. The macOS password dialog for agents is Phase 2: `app.dialogPassphrase` is the hook.
+4. No terminal (stdin is not a TTY and no `--passphrase-stdin`), on macOS, and the dialog is on: a native password dialog (`dialog.go`) names the vault and the calling program (the parent process: name and pid) and asks for the vault passphrase. Wrong passphrase: asked again, up to 3 times. Never shown when stdin is a terminal or `--passphrase-stdin` is given, and never off macOS.
+5. Otherwise (cancelled, timed out after 120 s, no GUI session such as SSH, `--no-dialog`, or `dialog = false`) exit 3: `Vault 'NAME' is locked. Run: <short name> unlock NAME`.
+
+The dialog is `/usr/bin/osascript` with a constant AppleScript (`display dialog ... with hidden answer`). The message, which holds the vault and program names, is passed as an argument after `--`, never spliced into the script, so no name can inject AppleScript. The passphrase is read from osascript's stdout into memory, cleared after use, and never logged. `dialog` is set per vault (`--vault`) or globally; a vault's own setting wins; `true`/`false` (older `"auto"`/`"off"` are still read). The program name is informative, not proof: any program can pick its own name.
+
+## Read log (`vault log`)
+
+`internal/audit` writes one JSON line per event to `audit.log` in the config folder (`~/.config/vault/audit.log`; mode 0600, folder 0700), rotated at 5 MB to `audit.log.1` and `.2` (three files kept). Fields: `time`, `vault`, `key`, `action`, `program`, `pid`, `command`, plus `member` (member changes) and `via` (`dialog` when the dialog unlocked the vault). There is no field for a value or a passphrase.
+
+Recorded: every read of a value (`get`, each key of `run`, `copy`; the terminal UI's reveal uses the same `app.record`), `set`, `rename`, `mv`, `rm`, `unlock`, `lock`, `passwd`, and members added or removed (`member-add`, `member-remove`). A failure to write the log never blocks the command: it prints one warning (`could not write the read log`) and carries on.
+
+`vault log` flags: `--vault V`, `--since 90m|24h|7d`, `--name KEY`, `--json` (an array of events, oldest first). It reads the live file and the rotated ones; lines that don't parse are skipped.
 
 A successful unlock is handed to the agent with the vault's TTL. `init` does the same with the new key, so the first `set` needs no passphrase; if the agent can't be reached, `init` still creates the vault, prints `The vault is locked: the unlock agent could not be reached. Run: <short name> unlock NAME` and exits 0 (`--json` adds `"unlocked": true|false`).
 

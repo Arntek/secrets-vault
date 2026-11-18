@@ -551,7 +551,7 @@ func TestUnlockForStatusAndConfig(t *testing.T) {
 	e.mustRun("config", "set", "touch-every-read", "true", "--vault", "main")
 	e.mustRun("config", "set", "dialog", "off")
 	cfg := decodeJSON[map[string]any](t, e.mustRun("config", "list", "--json").out)
-	if cfg["default_ttl"] != "6h" || cfg["dialog"] != "off" {
+	if cfg["default_ttl"] != "6h" || cfg["dialog"] != false {
 		t.Fatalf("config list: %v", cfg)
 	}
 	expectCode(t, e.run("config", "set", "default-vault", "nosuch"), ExitError)

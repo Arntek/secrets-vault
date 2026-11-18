@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -259,8 +260,46 @@ func (a *app) decrypt(k *keyRef, key *crypto.VaultKey) ([]byte, error) {
 	return nil, failf("cannot decrypt that key; the file may be damaged")
 }
 
+// record writes one event to the read log (names only, never a value),
+// with the command and the calling program. It never fails the command: a
+// log that cannot be written produces one warning and the read goes on.
 func (a *app) record(vault, key string, act audit.Action) {
-	_ = a.audit.Record(audit.Event{Time: a.now(), Vault: vault, Key: key, Action: act})
+	a.recordEvent(audit.Event{Vault: vault, Key: key, Action: act})
+}
+
+func (a *app) recordVia(vault string, act audit.Action, via string) {
+	a.recordEvent(audit.Event{Vault: vault, Action: act, Via: via})
+}
+
+func (a *app) recordEvent(e audit.Event) {
+	if a.audit == nil {
+		d, err := a.configDir()
+		if err != nil {
+			a.auditFailed(err)
+			return
+		}
+		a.audit = audit.NewFile(filepath.Join(d, "audit.log"))
+	}
+	e.Time = a.now()
+	e.Command = a.cmdName
+	e.Program, e.PID = a.callerInfo()
+	if err := a.audit.Record(e); err != nil {
+		a.auditFailed(err)
+	}
+}
+
+// auditFailed warns once per command. The error is the file system's own
+// (no path, no event contents).
+func (a *app) auditFailed(err error) {
+	if a.auditWarned {
+		return
+	}
+	a.auditWarned = true
+	var ee *exitErr
+	if errors.As(err, &ee) {
+		err = errors.New(ee.msg)
+	}
+	a.warnf("warning: could not write the read log (%v); carrying on", err)
 }
 
 func cmdGet(a *app, p *parsed) error {
