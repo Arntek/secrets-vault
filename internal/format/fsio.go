@@ -478,3 +478,13 @@ func ReadRegularFile(path string, max int64) ([]byte, error) { return readRegula
 // this package (no duplicate or unknown keys, bounded depth, no trailing
 // data), for other packages' file formats.
 func DecodeStrict(data []byte, maxSize int, v any) error { return decodeStrictMax(data, maxSize, v) }
+
+// CheckStructuralDirs checks only the vault folder and secrets/: the two
+// that nothing can work around. The other sub-folders (trash, requests/,
+// staging folders) are set aside by key rotations when they are bad.
+func CheckStructuralDirs(vaultDir string) error {
+	if err := checkDir(vaultDir, false); err != nil {
+		return err
+	}
+	return checkDir(SecretsPath(vaultDir), true)
+}
