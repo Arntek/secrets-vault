@@ -303,7 +303,6 @@ func (a *app) memberRemove(v *vaultRef, name string, p *parsed) error {
 	var skipped []string
 	dropped := 0
 	opt := members.RotateOptions{Passphrase: policy, Pending: ps, Now: a.now(), TrustedEntries: a.trustedEntries(v), SkippedFiles: &skipped, IndexDropped: &dropped}
-	defer a.noteRotation(v, &skipped, &dropped)
 	switch policy {
 	case format.PassKept:
 		pass, err := a.askHidden("Current vault passphrase for '" + v.name + "' (to keep it): ")
@@ -334,6 +333,7 @@ func (a *app) memberRemove(v *vaultRef, name string, p *parsed) error {
 		opt.New = pw
 	}
 	res, err := members.Remove(v.dir, v.chain, key, un, name, opt)
+	a.noteRotation(v, &skipped, &dropped)
 	if res != nil && res.NewKey != nil {
 		a.switchKey(v, res.NewKey)
 	}
@@ -356,7 +356,7 @@ func (a *app) memberRemove(v *vaultRef, name string, p *parsed) error {
 	code := members.StateCode(v.chain, v.chain.Head().Seq)
 	if a.asJSON {
 		return a.printJSON(map[string]any{"vault": v.name, "removed": name, "rotate_at_provider": exposed,
-			"passphrase": res.Passphrase, "revoke_folder_access": name, "state_code": code})
+			"passphrase": res.Passphrase, "revoke_folder_access": name, "state_code": code, "quarantined": a.quarantinedList()})
 	}
 	a.printf("Removed %s from '%s' and replaced the vault key.\n", name, v.name)
 	switch res.Passphrase {

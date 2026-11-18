@@ -833,7 +833,7 @@ func TestStaleOldKeyFileDoesNotBlockRotation(t *testing.T) {
 	if r.code != 0 {
 		t.Fatalf("a stale file blocked the rotation: %s", r)
 	}
-	if !strings.Contains(r.err, "STALE_OLDKEY") || !strings.Contains(r.err, "older vault key") || !strings.Contains(r.err, "quarantine/") {
+	if !strings.Contains(r.err, "STALE_OLDKEY") || !strings.Contains(r.err, "quarantine/") {
 		t.Fatalf("the stale file was not reported: %s", r)
 	}
 	// Set aside, byte for byte, not deleted.
@@ -850,4 +850,78 @@ func TestStaleOldKeyFileDoesNotBlockRotation(t *testing.T) {
 	if got := e.mustRun("get", "API_KEY").out; got != "v\n" {
 		t.Fatalf("%q", got)
 	}
+}
+
+// ue1.15 bypass: no file content a folder writer can make may block a
+// rotation: a current-key file copied under another name, a truncated file,
+// garbage. Each is set aside byte for byte, named, and the rest rotates.
+func TestUnopenableFilesNeverBlockRotation(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("B_KEY", "", "bee")
+	e.set("C_KEY", "", "sea")
+	e.set("D_KEY", "", "dee")
+	sec := func(n string) string { return filepath.Join(dir, "secrets", n+".age") }
+	b, _ := os.ReadFile(sec("B_KEY"))
+	c, _ := os.ReadFile(sec("C_KEY"))
+	_ = os.WriteFile(sec("ZZZ_PLANT"), b, 0o600)        // current key, wrong name
+	_ = os.WriteFile(sec("C_KEY"), c[:len(c)/2], 0o600) // truncated
+	_ = os.WriteFile(sec("GARBAGE_FILE"), []byte("zzz"), 0o600)
+	r := e.runIn(testPass+"\nsecond passphrase\n", "passwd", "main", "--passphrase-stdin", "--json")
+	if r.code != 0 {
+		t.Fatalf("passwd blocked: %s", r)
+	}
+	q := decodeJSON[map[string]any](t, r.out)["quarantined"].([]any)
+	if len(q) != 3 {
+		t.Fatalf("--json quarantined = %v", q)
+	}
+	for _, n := range []string{"ZZZ_PLANT", "C_KEY", "GARBAGE_FILE"} {
+		if !strings.Contains(r.err, n) {
+			t.Errorf("%s not named in the warning: %s", n, r.err)
+		}
+		if _, err := os.Stat(sec(n)); err == nil {
+			t.Errorf("%s still in secrets/", n)
+		}
+		if m, _ := filepath.Glob(filepath.Join(dir, "quarantine", "secrets", n+".*.age")); len(m) != 1 {
+			t.Errorf("%s not quarantined: %v", n, m)
+		}
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir, "quarantine", "secrets", "C_KEY.*.age")); len(m) == 1 {
+		if got, _ := os.ReadFile(m[0]); !bytes.Equal(got, c[:len(c)/2]) {
+			t.Error("the quarantined file changed")
+		}
+	}
+	// The rest rotated; the damaged live key is exit 5, never 4.
+	for k, v := range map[string]string{"B_KEY": "bee\n", "D_KEY": "dee\n"} {
+		if got := e.mustRun("get", k).out; got != v {
+			t.Fatalf("%s = %q", k, got)
+		}
+	}
+	expectCode(t, e.run("get", "C_KEY"), ExitUnverified)
+	if out := e.mustRun("doctor", "main").out; !strings.Contains(out, "Key C_KEY: listed, but the file is missing") {
+		t.Fatalf("doctor: %s", out)
+	}
+}
+
+// ue1.14: a tombstone the writer stripped is written back even when the
+// trashed file was copied back into secrets/.
+func TestTombstoneWrittenBackWithFileResurrected(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("B_KEY", "", "b")
+	file, _ := os.ReadFile(filepath.Join(dir, "secrets", "B_KEY.age"))
+	e.mustRun("rm", "B_KEY", "--yes")
+	dropIndexEntry(t, dir, "B_KEY")
+	_ = os.WriteFile(filepath.Join(dir, "secrets", "B_KEY.age"), file, 0o600)
+	e.mustRunIn("o", "set", "OTHERW")
+	b, _ := os.ReadFile(filepath.Join(dir, "index.json"))
+	if !strings.Contains(string(b), `"B_KEY"`) || !strings.Contains(string(b), `"deleted": true`) {
+		t.Fatalf("tombstone not written back: %s", b)
+	}
+	forgetSnapshots(t, e)
+	expectCode(t, e.run("get", "B_KEY"), ExitUnverified)
 }

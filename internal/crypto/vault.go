@@ -172,9 +172,10 @@ type RotateOptions struct {
 	// carried into the new index next to the folder's entries that verify
 	// under the current key. Never pass entries read from the folder.
 	TrustedEntries []format.IndexEntry
-	// SkippedFiles, if set, receives the names of secret files that are not
-	// sealed under any key Rotate knows (a stale copy from an earlier key,
-	// ue1.15). They are left in place unopened instead of aborting the
+	// SkippedFiles, if set, receives the names of secret files that don't
+	// open under any key Rotate knows: a stale copy from an earlier key, a
+	// copy under another name, a truncated file (ue1.15). Anyone who can write
+	// the folder can make such a file, so none may block a rotation. They are left in place unopened instead of aborting the
 	// rotation; they are unreadable under the new key anyway.
 	SkippedFiles *[]string
 	// IndexDropped, if set, receives how many index entries failed
@@ -266,7 +267,7 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 			return fail(err)
 		}
 		nct, err := reseal(s.Name, keys, newKey, ct, target3)
-		if errors.Is(err, ErrOtherKey) {
+		if errors.Is(err, ErrDecrypt) { // not sealed under a known key, or damaged, or sealed for another name
 			if opt.SkippedFiles != nil {
 				*opt.SkippedFiles = append(*opt.SkippedFiles, s.Name)
 			}
@@ -285,7 +286,7 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 			return fail(err)
 		}
 		nct, err := reseal(t.Name, keys, newKey, ct, target3)
-		if errors.Is(err, ErrOtherKey) {
+		if errors.Is(err, ErrDecrypt) {
 			if opt.SkippedFiles != nil {
 				*opt.SkippedFiles = append(*opt.SkippedFiles, t.Name+" (in the trash)")
 			}

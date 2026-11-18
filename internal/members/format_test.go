@@ -124,3 +124,29 @@ func TestFormat2VaultStillVerifies(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// ue1.15: nothing a folder writer can put in secrets/ blocks member rm.
+func TestRemoveSkipsUnopenableFiles(t *testing.T) {
+	alice, bob := newPerson(t, "alice"), newPerson(t, "bob")
+	v := newVault(t, alice)
+	v.join(t, alice, bob)
+	putSecret(t, v.dir, v.key, "REAL", "value")
+	real := mustReadFile(t, filepath.Join(v.dir, "secrets", "REAL.age"))
+	mustWriteFile(t, filepath.Join(v.dir, "secrets", "RENAMED_COPY.age"), real) // current key, wrong name
+	mustWriteFile(t, filepath.Join(v.dir, "secrets", "TRUNCATED.age"), real[:len(real)/2])
+	mustWriteFile(t, filepath.Join(v.dir, "secrets", "GARBAGE.age"), []byte("junk"))
+	var skipped []string
+	res, err := Remove(v.dir, v.c, v.key, alice.un, "bob", RotateOptions{Now: t0, SkippedFiles: &skipped})
+	if err != nil {
+		t.Fatalf("member rm blocked: %v", err)
+	}
+	if len(skipped) != 3 {
+		t.Fatalf("skipped = %v", skipped)
+	}
+	if got, err := crypto.ReadSecret(v.dir, "REAL", res.NewKey); err != nil || string(got) != "value" {
+		t.Fatalf("REAL after the removal: %q %v", got, err)
+	}
+	if _, ok := res.Chain.Head().Member("bob"); ok {
+		t.Fatal("bob is still a member")
+	}
+}

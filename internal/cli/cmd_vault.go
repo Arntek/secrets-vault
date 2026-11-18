@@ -410,8 +410,8 @@ func cmdPasswd(a *app, p *parsed) error {
 	}
 	var skipped []string
 	dropped := 0
-	defer a.noteRotation(v, &skipped, &dropped)
 	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now(), TrustedEntries: a.trustedEntries(v), SkippedFiles: &skipped, IndexDropped: &dropped})
+	a.noteRotation(v, &skipped, &dropped)
 	if res != nil && res.NewKey != nil {
 		a.switchKey(v, res.NewKey)
 	}
@@ -425,7 +425,7 @@ func cmdPasswd(a *app, p *parsed) error {
 	}
 	code := members.StateCode(v.chain, v.chain.Head().Seq)
 	if a.asJSON {
-		return a.printJSON(map[string]any{"vault": v.name, "changed": true, "rotated": rotate, "state_code": code})
+		return a.printJSON(map[string]any{"vault": v.name, "changed": true, "rotated": rotate, "state_code": code, "quarantined": a.quarantinedList()})
 	}
 	if rotate {
 		a.printf("Passphrase changed for '%s', and the vault key replaced: the old passphrase opens nothing new.\n", v.name)

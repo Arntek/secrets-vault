@@ -97,7 +97,7 @@ func (s *Session) commitOnce(v *View, edits []Edit) (*Result, error) {
 	// Heal entries that the folder's index holds at an older rev than this
 	// machine verified, if their file is not older than the snapshot.
 	for _, n := range v.older {
-		if sn, ok := s.Snap.Get(n, s.Key); ok && sn.Deleted && !v.present[n] {
+		if sn, ok := s.Snap.Get(n, s.Key); ok && sn.Deleted {
 			e := sn.entry()
 			e.Name = n
 			if e.Updated.IsZero() {
@@ -124,7 +124,7 @@ func (s *Session) commitOnce(v *View, edits []Edit) (*Result, error) {
 	// written back, not dropped (a deleted key stays deleted).
 	if s.Snap != nil && !s.Snap.Private {
 		for _, sn := range s.Snap.Entries {
-			if _, ok := entries[sn.Name]; ok || !sn.Deleted || v.present[sn.Name] {
+			if _, ok := entries[sn.Name]; ok || !sn.Deleted {
 				continue
 			}
 			e := sn.entry()

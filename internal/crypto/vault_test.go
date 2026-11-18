@@ -246,16 +246,17 @@ func TestRotateFailureChangesNothing(t *testing.T) {
 	v := newVault(t)
 	_ = WriteSecret(v.dir, "A", v.key, []byte("a"))
 	_ = WriteSecret(v.dir, "B", v.key, []byte("b"))
-	// Corrupt B so it cannot be re-encrypted.
+	// Content a folder writer can make (a corrupt file) is skipped, never a
+	// reason to abort (ue1.15). What does abort is an error that puts honest
+	// data at risk: here B is not a regular file, so it can't be read.
 	pb, _ := format.SecretPath(v.dir, "B")
-	data, _ := os.ReadFile(pb)
-	data[len(data)-1] ^= 1
-	if err := os.WriteFile(pb, data, 0o600); err != nil {
+	_ = os.Remove(pb)
+	if err := os.Symlink(pb+".elsewhere", pb); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(format.VaultFilePath(v.dir))
-	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); !errors.Is(err, ErrDecrypt) {
-		t.Fatalf("rotate over a corrupt file = %v", err)
+	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); err == nil {
+		t.Fatal("rotate over an unreadable file succeeded")
 	}
 	after, _ := os.ReadFile(format.VaultFilePath(v.dir))
 	if !bytes.Equal(before, after) {

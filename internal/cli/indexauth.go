@@ -426,13 +426,14 @@ func (a *app) noteRotation(v *vaultRef, skipped *[]string, dropped *int) {
 				continue
 			}
 			moved = append(moved, n)
+			a.quarantined = append(a.quarantined, n)
 		}
 		if len(moved) > 0 {
-			a.warnf("warning: %s in '%s' could not be re-sealed (sealed under an older vault key: stale copies, perhaps restored from version history) and %s set aside in quarantine/ in the vault folder, not deleted: %s",
+			a.warnf("warning: %s in '%s' could not be re-sealed (they did not open under the vault key: stale copies from an older key, copies under another name, or damaged files) and %s set aside in quarantine/ in the vault folder, not deleted: %s",
 				plural(len(moved), "file"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], strings.Join(moved, ", "))
 		}
 		if len(left) > 0 {
-			a.warnf("warning: %s in '%s' %s sealed under an older vault key and left as %s (they can't be read): %s",
+			a.warnf("warning: %s in '%s' could not be opened and %s left as %s (they can't be read): %s",
 				plural(len(left), "file"), v.name, map[bool]string{true: "is", false: "are"}[len(left) == 1],
 				map[bool]string{true: "it was", false: "they were"}[len(left) == 1], strings.Join(left, ", "))
 		}
@@ -441,4 +442,12 @@ func (a *app) noteRotation(v *vaultRef, skipped *[]string, dropped *int) {
 		a.warnf("warning: %s in the index of '%s' failed verification and %s left out of the new index; keys this machine had verified were put back from its own record",
 			plural(*dropped, "entry"), v.name, map[bool]string{true: "was", false: "were"}[*dropped == 1])
 	}
+}
+
+// quarantinedList is the names a rotation set aside, never nil (--json).
+func (a *app) quarantinedList() []string {
+	if a.quarantined == nil {
+		return []string{}
+	}
+	return a.quarantined
 }
