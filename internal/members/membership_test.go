@@ -695,7 +695,7 @@ func TestRebaseLostRemoval(t *testing.T) {
 	if err != nil || len(keys) != 1 || keys[0].ID() != k3.ID() {
 		t.Fatalf("pending keys: %v %v", keys, err)
 	}
-	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, keys, nil, pending, t0)
+	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, keys, nil, nil, pending, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -945,7 +945,7 @@ func TestClassifyOwnerOnlyHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, []*crypto.VaultKey{ar.NewKey}, nil, nil, t0)
+	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, []*crypto.VaultKey{ar.NewKey}, nil, nil, nil, t0)
 	if err != nil {
 		t.Fatal(err)
 	}

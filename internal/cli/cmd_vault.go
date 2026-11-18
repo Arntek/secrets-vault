@@ -274,6 +274,10 @@ func cmdDetach(a *app, p *parsed) error {
 	if ps, err := a.pendingStore(); err == nil && id != "" {
 		_ = ps.DeleteAll(id)
 	}
+	// What this machine verified of the index goes with the registration.
+	if st, err := a.indexStore(); err == nil && id != "" {
+		_ = st.Delete(id)
+	}
 	delete(cfg.Vaults, v.name)
 	if cfg.DefaultVault == v.name {
 		cfg.DefaultVault = ""
@@ -431,6 +435,9 @@ func cmdPasswd(a *app, p *parsed) error {
 
 // switchKey hands a rotated key to the agent.
 func (a *app) switchKey(v *vaultRef, k *crypto.VaultKey) {
+	// The rotation re-sealed the index under the new key: verify it and
+	// refresh this machine's record of it.
+	_, _ = a.openIndex(v, k)
 	if cl := a.client(true); cl != nil {
 		if dup, err := crypto.VaultKeyFromBytes(k.Bytes()); err == nil {
 			_ = cl.Unlock(v.chain.File.ID, dup, a.ttlFor(v))

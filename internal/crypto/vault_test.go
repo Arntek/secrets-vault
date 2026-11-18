@@ -312,6 +312,9 @@ func TestVaultLeak(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		for i := range idx.Entries {
+			idx.Entries[i].Version, idx.Entries[i].Rev, idx.Entries[i].MAC = 1, 1, strings.Repeat("a", 64)
+		}
 		if err := format.WriteIndex(dir, idx); err != nil {
 			t.Fatal(err)
 		}

@@ -240,6 +240,10 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 		return nil, err
 	}
 	keys := append([]*VaultKey{oldKey}, opt.ExtraKeys...)
+	// A rotation into a format-3 vault also stamps unversioned files with
+	// version 1 and stages a re-MAC'd index (a format-2 vault rebuilt into
+	// format 3 gets both from its legacy index).
+	target3 := next.Version == format.VaultVersion
 
 	staging, err := format.BeginStaging(vaultDir, next.KeyID)
 	if err != nil {
@@ -256,7 +260,7 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 		if err != nil {
 			return fail(err)
 		}
-		nct, err := reseal(s.Name, keys, newKey, ct)
+		nct, err := reseal(s.Name, keys, newKey, ct, target3)
 		if err != nil {
 			return fail(fmt.Errorf("crypto: re-encrypting a secret: %w", err))
 		}
@@ -269,7 +273,7 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 		if err != nil {
 			return fail(err)
 		}
-		nct, err := reseal(t.Name, keys, newKey, ct)
+		nct, err := reseal(t.Name, keys, newKey, ct, target3)
 		if err != nil {
 			return fail(fmt.Errorf("crypto: re-encrypting a trashed secret: %w", err))
 		}
@@ -277,15 +281,15 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 			return fail(err)
 		}
 	}
-	if vf.Version == format.VaultVersion {
-		present := map[string]bool{}
+	if target3 {
+		present, live := map[string]bool{}, map[string]bool{}
 		for _, s := range secrets {
-			present[s.Name] = true
+			present[s.Name], live[s.Name] = true, true
 		}
 		for _, t := range trash {
 			present[t.Name] = true
 		}
-		data, dropped, err := stageIndex(vaultDir, vf.ID, oldKey, newKey, opt.TrustedEntries, present)
+		data, dropped, err := stageIndex(vaultDir, vf.ID, next.ID, vf.Version != format.VaultVersion, oldKey, newKey, opt.TrustedEntries, live, present)
 		if err != nil {
 			return fail(err)
 		}
@@ -333,41 +337,8 @@ func RecoverRotation(vaultDir string, key *VaultKey) (bool, error) {
 		if id != key.ID() {
 			continue
 		}
-		files, err := format.StagedFiles(vaultDir, id)
-		if err != nil {
+		if err := VerifyStaged(vaultDir, key); err != nil {
 			return false, err
-		}
-		vf, verr := format.ReadVaultFile(vaultDir)
-		for _, f := range files {
-			ct, err := format.ReadStagedFile(vaultDir, id, f.Rel)
-			if err != nil {
-				return false, err
-			}
-			if f.Rel == format.IndexFileName {
-				// A staged index must verify entirely under the new key.
-				if verr != nil {
-					return false, verr
-				}
-				idx, bad, perr := format.ParseIndexTolerant(ct)
-				if perr != nil || bad != 0 || idx.Version != format.IndexVersion {
-					return false, errors.New("crypto: the staged index is damaged")
-				}
-				for i := range idx.Entries {
-					if !VerifyEntry(key, vf.ID, &idx.Entries[i]) {
-						return false, errors.New("crypto: a staged index entry does not verify under the vault key")
-					}
-				}
-				continue
-			}
-			s, err := NewSealer(f.Name)
-			if err != nil {
-				return false, err
-			}
-			pt, err := s.Open(key, ct)
-			clear(pt)
-			if err != nil {
-				return false, fmt.Errorf("crypto: a staged file does not open under the vault key: %w", err)
-			}
 		}
 		if err := format.CommitStaged(vaultDir, id); err != nil {
 			return false, err
@@ -375,6 +346,52 @@ func RecoverRotation(vaultDir string, key *VaultKey) (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+// VerifyStaged checks, without moving anything, that every file staged for
+// key's rotation opens under key with its own name and that the staged
+// index (if any) verifies entirely under key. It is what makes an interrupted
+// rotation safe to finish, and what `doctor` uses to say whether a staging
+// folder can be finished at all.
+func VerifyStaged(vaultDir string, key *VaultKey) error {
+	id := key.ID()
+	files, err := format.StagedFiles(vaultDir, id)
+	if err != nil {
+		return err
+	}
+	vf, verr := format.ReadVaultFile(vaultDir)
+	for _, f := range files {
+		ct, err := format.ReadStagedFile(vaultDir, id, f.Rel)
+		if err != nil {
+			return err
+		}
+		if f.Rel == format.IndexFileName {
+			// A staged index must verify entirely under the new key.
+			if verr != nil {
+				return verr
+			}
+			idx, bad, perr := format.ParseIndexTolerant(ct)
+			if perr != nil || bad != 0 || idx.Version != format.IndexVersion {
+				return errors.New("crypto: the staged index is damaged")
+			}
+			for i := range idx.Entries {
+				if !VerifyEntry(key, vf.ID, &idx.Entries[i]) {
+					return errors.New("crypto: a staged index entry does not verify under the vault key")
+				}
+			}
+			continue
+		}
+		s, err := NewSealer(f.Name)
+		if err != nil {
+			return err
+		}
+		pt, err := s.Open(key, ct)
+		clear(pt)
+		if err != nil {
+			return fmt.Errorf("crypto: a staged file does not open under the vault key: %w", err)
+		}
+	}
+	return nil
 }
 
 // KeyIDOf returns the vault key ID a secret file is sealed under, read from
@@ -435,8 +452,9 @@ func HeaderOf(ciphertext []byte) (keyID string, version uint32, err error) {
 }
 
 // reseal opens ct with whichever of keys it is sealed under and seals the
-// plaintext with newKey, zeroing the plaintext before returning.
-func reseal(name string, keys []*VaultKey, newKey *VaultKey, ct []byte) ([]byte, error) {
+// plaintext with newKey (keeping its version; an unversioned file becomes
+// version 1 if stamp), zeroing the plaintext before returning.
+func reseal(name string, keys []*VaultKey, newKey *VaultKey, ct []byte, stamp bool) ([]byte, error) {
 	s, err := NewSealer(name)
 	if err != nil {
 		return nil, err
@@ -460,6 +478,9 @@ func reseal(name string, keys []*VaultKey, newKey *VaultKey, ct []byte) ([]byte,
 	}
 	defer clear(pt)
 	if version == 0 {
+		if stamp {
+			return s.SealVersion(newKey, pt, 1)
+		}
 		return s.Seal(newKey, pt)
 	}
 	return s.SealVersion(newKey, pt, version)
@@ -488,7 +509,7 @@ func UpgradeSecrets(vaultDir string, key *VaultKey) (int, error) {
 		if !isV1(ct) {
 			continue
 		}
-		nct, err := reseal(s.Name, []*VaultKey{key}, key, ct)
+		nct, err := reseal(s.Name, []*VaultKey{key}, key, ct, false)
 		if err != nil {
 			return n, err
 		}
@@ -509,7 +530,7 @@ func UpgradeSecrets(vaultDir string, key *VaultKey) (int, error) {
 		if !isV1(ct) {
 			continue
 		}
-		nct, err := reseal(t.Name, []*VaultKey{key}, key, ct)
+		nct, err := reseal(t.Name, []*VaultKey{key}, key, ct, false)
 		if err != nil {
 			return n, err
 		}

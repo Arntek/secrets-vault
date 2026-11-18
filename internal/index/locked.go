@@ -90,6 +90,18 @@ func Locked(dir string, legacy bool, snap *Snapshot) (*LockedView, error) {
 		return lv, nil
 	}
 	lv.Damaged = damaged
+	if damaged && snap != nil {
+		// The folder's index is gone or unreadable: what this machine last
+		// verified is still the best answer, flagged as changed.
+		for _, e := range snap.Entries {
+			if !e.Deleted {
+				lv.Rows = append(lv.Rows, LockedRow{Entry: fromSnap(e.Name, e), Verified: true, Pending: true})
+			}
+		}
+		slices.SortFunc(lv.Rows, func(a, b LockedRow) int { return strings.Compare(a.Entry.Name, b.Entry.Name) })
+		lv.State = StatePending
+		return lv, nil
+	}
 	// Group the folder's entries by name; a name that appears twice is
 	// resolved to the copy the snapshot knows, if any.
 	byName := map[string][]format.IndexEntry{}

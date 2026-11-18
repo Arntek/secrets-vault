@@ -724,7 +724,7 @@ func TestNewerVaultMessage(t *testing.T) {
 	e := newEnv(t)
 	dir := e.initVault("main")
 	data, _ := os.ReadFile(filepath.Join(dir, "vault.json"))
-	data = []byte(strings.Replace(string(data), `"version": 2`, `"version": 3`, 1))
+	data = []byte(strings.Replace(string(data), `"version": 3`, `"version": 4`, 1))
 	_ = os.WriteFile(filepath.Join(dir, "vault.json"), data, 0o600)
 	r := e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin")
 	expectCode(t, r, ExitError)

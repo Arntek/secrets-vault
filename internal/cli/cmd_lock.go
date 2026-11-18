@@ -43,6 +43,11 @@ func cmdUnlock(a *app, p *parsed) error {
 		return err
 	}
 	defer key.Destroy()
+	// Unlocking is when a vault's index gets verified, and what a locked
+	// `list` shows afterwards is exactly what was verified here.
+	if _, err := a.openIndex(v, key); err != nil {
+		return err
+	}
 	vf := v.chain.File
 	if ttl != 0 {
 		// Re-store with the requested window.

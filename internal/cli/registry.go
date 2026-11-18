@@ -16,6 +16,7 @@ import (
 
 	"github.com/Arntek/secrets-vault/internal/agent"
 	"github.com/Arntek/secrets-vault/internal/format"
+	"github.com/Arntek/secrets-vault/internal/index"
 	"github.com/Arntek/secrets-vault/internal/members"
 )
 
@@ -224,9 +225,12 @@ type vaultRef struct {
 	dir   string
 
 	chain *members.Chain
-	v1    *format.VaultFile
-	pin   *members.Pin
-	class members.Classification
+	// allowLegacy lets a write command run on a format-2 vault (upgrade only).
+	allowLegacy bool
+	legacyNoted bool
+	v1          *format.VaultFile
+	pin         *members.Pin
+	class       members.Classification
 }
 
 func (a *app) expandEntry(e *VaultEntry) (string, error) { return a.expandPath(e.Path) }
@@ -371,6 +375,9 @@ type keyRef struct {
 	v     *vaultRef
 	vf    *format.VaultFile
 	entry format.IndexEntry
+	// verified: the entry is what this machine verified with the vault key
+	// (locked listings can't check an entry that is new in the folder).
+	verified bool
 }
 
 // findKey locates a key by name. With vaultName empty every registered vault
@@ -399,20 +406,24 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Verify (no prompts, no writes): a vault that fails must never look
-		// like "key not found" (ue1.10).
-		_, vf, err := a.loadVault(v)
+		// Verify and classify (no prompts, no writes): a vault that fails
+		// must never look like "key not found" (ue1.10), and a quarantined
+		// one must not answer (ue1.12).
+		c, vf, err := a.openQuiet(v)
 		if err != nil && !errors.Is(err, members.ErrOldFormat) {
 			failed = append(failed, err)
 			continue
 		}
-		idx, err := v.index()
+		lv, err := a.lockedView(v, c)
 		if err != nil {
-			a.warnf("%v", err)
+			failed = append(failed, err)
 			continue
 		}
-		if e, ok := idx.Get(name); ok {
-			found = append(found, &keyRef{v: v, vf: vf, entry: e})
+		a.noteIndexState(v, lv)
+		for _, r := range lv.Rows {
+			if r.Entry.Name == name {
+				found = append(found, &keyRef{v: v, vf: vf, entry: r.Entry, verified: r.Verified || lv.State == index.StateLegacy})
+			}
 		}
 	}
 	switch {
@@ -433,10 +444,23 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 	case 1:
 		return found[0], nil
 	}
+	// Verified entries beat ones the folder merely claims (a planted entry
+	// can't make another vault answer, ue1.7); ambiguity is declared only
+	// among candidates of the same class. Nothing here ever unlocks a vault
+	// the person didn't name.
+	if ver := slices.DeleteFunc(slices.Clone(found), func(k *keyRef) bool { return !k.verified }); len(ver) == 1 {
+		return ver[0], nil
+	} else if len(ver) > 1 {
+		found = ver
+	}
 	vs := make([]string, len(found))
 	for i, k := range found {
 		vs[i] = k.v.name
 	}
 	slices.Sort(vs)
-	return nil, usageErrf("that key exists in more than one vault (%s). Use --vault", strings.Join(vs, ", "))
+	hint := ""
+	if !found[0].verified {
+		hint = ". The entries are unverified (this machine has not checked them with the vault key yet)"
+	}
+	return nil, usageErrf("that key exists in more than one vault (%s)%s. Use --vault", strings.Join(vs, ", "), hint)
 }

@@ -113,6 +113,7 @@ func (a *app) acceptRollback(v *vaultRef) error {
 				a.infof("  (%s was removed at %s@%d by %s)", r.Member.Name, c.File.Name, i, c.States[i].By)
 			}
 		}
+		a.infof("This also forgets what this machine verified of the index; keys are checked afresh from the folder's state.")
 		a.infof("Accept this only if every member agrees it is the right state.")
 	}
 	typed := a.signerFP
@@ -135,6 +136,11 @@ func (a *app) acceptRollback(v *vaultRef) error {
 	}
 	if ps, err := a.pendingStore(); err == nil {
 		_ = ps.DeleteAll(c.File.ID)
+	}
+	// What this machine verified of the index belonged to the state it just
+	// gave up: every key reads as first use from here (IS3).
+	if st, err := a.indexStore(); err == nil {
+		_ = st.Delete(c.File.ID)
 	}
 	if rep, err := members.CheckFolder(v.dir, c); err == nil {
 		for _, n := range rep.Unknown {

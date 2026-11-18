@@ -78,13 +78,18 @@ func (a *app) migrate(v *vaultRef, o openOpts) (*crypto.VaultKey, error) {
 	if err := members.Genesis(next, un, a.now()); err != nil {
 		return fail(err)
 	}
+	// Files and index first, vault.json (the commit) last: a half-done
+	// upgrade is finished by running the command again. Secrets are stamped
+	// with versions and the index gets its entry MACs, so no file is left
+	// that an older build could open or rotate (ue1.8, ue1.7).
+	if _, err := crypto.UpgradeToV3(v.dir, key); err != nil {
+		return fail(failf("could not upgrade '%s': re-sealing its secrets failed (run the command again to finish): %v", v.name, vaultErr(err)))
+	}
+	if err := writeUpgradedIndex(v.dir, old.ID, key); err != nil {
+		return fail(failf("could not upgrade '%s': writing its index failed (run the command again to finish): %v", v.name, vaultErr(err)))
+	}
 	if err := format.WriteVaultFileCAS(v.dir, next, raw); err != nil {
 		return fail(failf("could not upgrade vault '%s': %v", v.name, vaultErr(err)))
-	}
-	// Re-seal the secrets in the current file format, so no file is left
-	// that an older build could open or rotate (ue1.8).
-	if _, err := crypto.UpgradeSecrets(v.dir, key); err != nil {
-		return fail(failf("upgraded '%s', but re-sealing its secrets failed (run the command again to finish): %v", v.name, vaultErr(err)))
 	}
 	v.v1 = nil
 	c, _, err := a.loadVault(v)

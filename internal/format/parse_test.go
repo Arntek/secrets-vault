@@ -55,9 +55,22 @@ func validVaultFileV1() *VaultFile {
 
 func validIndex() *Index {
 	return &Index{Version: IndexVersion, Entries: []IndexEntry{
-		{Name: "B_KEY", Description: "Second key · ünïcode ok", Tags: []string{"xero", "reporting"}, Updated: testTime, UpdatedBy: "arnold"},
-		{Name: "A_KEY", Updated: testTime},
+		{Name: "B_KEY", Description: "Second key · ünïcode ok", Tags: []string{"xero", "reporting"}, Updated: testTime, UpdatedBy: "arnold", Version: 3, Rev: 4, MAC: fakeMAC},
+		{Name: "A_KEY", Updated: testTime, Version: 1, Rev: 1, MAC: fakeMAC},
 	}}
+}
+
+// fakeMAC is a well-formed entry MAC; this package never checks one.
+const fakeMAC = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// asV2 gives every entry of idx the version-2 fields (RebuildIndex makes
+// bare entries).
+func asV2(idx *Index) *Index {
+	for i := range idx.Entries {
+		e := &idx.Entries[i]
+		e.Version, e.Rev, e.MAC = 1, 1, fakeMAC
+	}
+	return idx
 }
 
 func TestVaultFileRoundTrip(t *testing.T) {
@@ -153,7 +166,7 @@ func TestParseVaultFileRejects(t *testing.T) {
 }
 
 func TestParseVaultFileNewerVersion(t *testing.T) {
-	data := []byte(`{"version": 3, "id": "x", "new_field": {"a": 1}}`)
+	data := []byte(`{"version": 4, "id": "x", "new_field": {"a": 1}}`)
 	if _, err := ParseVaultFile(data); !errors.Is(err, ErrUnsupportedVersion) {
 		t.Fatalf("want ErrUnsupportedVersion, got %v", err)
 	}
@@ -388,6 +401,7 @@ func FuzzParseIndex(f *testing.F) {
 	}
 	f.Add(good)
 	f.Add([]byte(`{"version":1,"entries":null}`))
+	f.Add([]byte(`{"version":2,"vault_id":"` + strings.Repeat("a", 32) + `","entries":[{"name":"A","updated":"2026-01-01T00:00:00Z","version":1,"rev":1,"mac":"` + fakeMAC + `"}]}`))
 	f.Add([]byte(`{"version":1,"private":true,"entries":[{"name":"A","updated":"2026-01-01T00:00:00Z"}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		idx, err := ParseIndex(data)
@@ -399,12 +413,42 @@ func FuzzParseIndex(f *testing.F) {
 				t.Fatal("accepted invalid key name")
 			}
 		}
+		// The tolerant parser agrees on every file the strict one accepts.
+		if tol, dropped, terr := ParseIndexTolerant(data); terr != nil || dropped != 0 || len(tol.Entries) != len(idx.Entries) {
+			t.Fatalf("tolerant parse disagrees: %v %d", terr, dropped)
+		}
+		if idx.Version != IndexVersion {
+			return // version 1 is read, never written
+		}
 		out, err := MarshalIndex(idx)
 		if err != nil {
 			t.Fatalf("accepted index fails to marshal: %v", err)
 		}
 		if _, err := ParseIndex(out); err != nil {
 			t.Fatalf("re-marshalled index rejected: %v", err)
+		}
+	})
+}
+
+func FuzzParseIndexTolerant(f *testing.F) {
+	good, _ := MarshalIndex(validIndex())
+	f.Add(good)
+	f.Add([]byte(`{"version":2,"entries":[{"name":"A"},{"name":"a"},7,null]}`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		idx, dropped, err := ParseIndexTolerant(data)
+		if err != nil {
+			if idx != nil {
+				t.Fatal("partly filled index with an error")
+			}
+			return
+		}
+		if dropped < 0 {
+			t.Fatal("negative dropped")
+		}
+		for _, e := range idx.Entries {
+			if ValidateKeyName(e.Name) != nil {
+				t.Fatal("kept an invalid key name")
+			}
 		}
 	})
 }

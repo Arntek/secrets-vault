@@ -55,19 +55,19 @@ const (
 // previous state plus hashes of the state after it. Package members signs,
 // replays and verifies records; this package only parses them.
 type Record struct {
-	Seq           int       `json:"seq"`
-	Prev          string    `json:"prev"`
-	VaultID       string    `json:"vault_id"`
-	Time          time.Time `json:"time"`
-	Op            RecordOp  `json:"op"`
-	Member        *Member   `json:"member,omitempty"`
-	Passphrase    string    `json:"passphrase,omitempty"`
+	Seq        int       `json:"seq"`
+	Prev       string    `json:"prev"`
+	VaultID    string    `json:"vault_id"`
+	Time       time.Time `json:"time"`
+	Op         RecordOp  `json:"op"`
+	Member     *Member   `json:"member,omitempty"`
+	Passphrase string    `json:"passphrase,omitempty"`
 	// Format is present on the genesis of a format-3 vault and on
 	// upgrade-format records: the vault format from this record on.
-	Format        int       `json:"format,omitempty"`
-	KeyID         string    `json:"key_id"`
-	MembersHash   string    `json:"members_hash"`
-	UnlockersHash string    `json:"unlockers_hash"`
+	Format        int    `json:"format,omitempty"`
+	KeyID         string `json:"key_id"`
+	MembersHash   string `json:"members_hash"`
+	UnlockersHash string `json:"unlockers_hash"`
 }
 
 // ParseRecordBody strictly parses and validates a record body.

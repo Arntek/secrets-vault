@@ -328,9 +328,9 @@ func (v *View) Verdict(name string, fileVersion uint32, hasFile bool) KeyInfo {
 	return out
 }
 
-// NextVersion returns the version a new write of name should carry: one
-// above everything known about it.
-func (v *View) NextVersion(name string) (uint32, error) {
+// Floor returns the highest version known for name: its file, its entry
+// and this machine's snapshot.
+func (v *View) Floor(name string) uint32 {
 	n := v.fileVersion(name)
 	if k, ok := v.Keys[name]; ok {
 		n = max(n, k.Entry.Version)
@@ -338,6 +338,13 @@ func (v *View) NextVersion(name string) (uint32, error) {
 	if sn, ok := v.s.Snap.Get(name, v.s.Key); ok {
 		n = max(n, sn.Version)
 	}
+	return n
+}
+
+// NextVersion returns the version a new write of name should carry: one
+// above everything known about it.
+func (v *View) NextVersion(name string) (uint32, error) {
+	n := v.Floor(name)
 	if n >= format.MaxCounter {
 		return 0, ErrCounterLimit
 	}

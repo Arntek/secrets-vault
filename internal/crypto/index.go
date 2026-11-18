@@ -131,8 +131,12 @@ func VerifiedEntries(data []byte, vaultID string, key *VaultKey) (idx *format.In
 // that verify under oldKey (the verified head's current key, IM2) plus the
 // caller's trusted entries, re-sealed under newKey. Tombstones are kept
 // unless no file under any key, live or trashed, exists for the name (IS1).
-func stageIndex(vaultDir, vaultID string, oldKey, newKey *VaultKey, trusted []format.IndexEntry, present map[string]bool) ([]byte, int, error) {
-	out := &format.Index{Version: format.IndexVersion, VaultID: vaultID, Entries: []format.IndexEntry{}}
+//
+// oldID and newID differ for a rebuild (a new vault ID); legacy is true for
+// a format-2 vault being rotated into format 3, whose unauthenticated index
+// is trusted once, like `vault upgrade` does.
+func stageIndex(vaultDir, oldID, newID string, legacy bool, oldKey, newKey *VaultKey, trusted []format.IndexEntry, live, present map[string]bool) ([]byte, int, error) {
+	out := &format.Index{Version: format.IndexVersion, VaultID: newID, Entries: []format.IndexEntry{}}
 	dropped := 0
 	raw, err := format.ReadIndexRaw(vaultDir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -140,8 +144,18 @@ func stageIndex(vaultDir, vaultID string, oldKey, newKey *VaultKey, trusted []fo
 		raw = nil
 	}
 	byName := map[string]format.IndexEntry{}
-	if raw != nil {
-		if idx, entries, d, ok := VerifiedEntries(raw, vaultID, oldKey); ok {
+	if legacy {
+		if old, err := format.ReadIndex(vaultDir); err == nil {
+			out.Private = old.Private
+			for _, e := range old.Entries {
+				if live[e.Name] {
+					e.Version, e.Rev, e.Deleted = 1, 1, false
+					byName[e.Name] = e
+				}
+			}
+		}
+	} else if raw != nil {
+		if idx, entries, d, ok := VerifiedEntries(raw, oldID, oldKey); ok {
 			out.Private = idx.Private
 			dropped = d
 			for _, e := range entries {
@@ -158,7 +172,7 @@ func stageIndex(vaultDir, vaultID string, oldKey, newKey *VaultKey, trusted []fo
 		if e.Deleted && !present[e.Name] {
 			continue
 		}
-		SealEntry(newKey, vaultID, &e)
+		SealEntry(newKey, newID, &e)
 		out.Entries = append(out.Entries, e)
 	}
 	data, err := format.MarshalIndex(out)
