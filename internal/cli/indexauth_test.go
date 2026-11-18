@@ -1160,3 +1160,102 @@ func TestMemberRemoveNeverBlockedByPlantedFiles(t *testing.T) {
 		t.Fatal("TEAM_KEY is still sealed under the old key")
 	}
 }
+
+// Read-only commands never rename anything: a bad folder is reported (exit
+// 5 or an error entry), and only the rotation commands set it aside.
+func TestReadOnlyCommandsDoNotSetFoldersAside(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("API_KEY", "", "v")
+	outside := t.TempDir()
+	trash := filepath.Join(dir, "secrets", ".trash")
+	if err := os.Symlink(outside, trash); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	for _, args := range [][]string{{"get", "API_KEY"}, {"info", "API_KEY"}, {"list"}, {"list", "--json"}, {"search", "api"}, {"status"}, {"member", "list", "main"}, {"member", "log", "main"}} {
+		r := e.run(args...)
+		if args[0] == "get" || args[0] == "info" || (args[0] == "member") {
+			if r.code != ExitUnverified {
+				t.Errorf("%v: exit %d, want %d: %s", args, r.code, ExitUnverified, r)
+			}
+		}
+		if fi, err := os.Lstat(trash); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%v renamed the bad folder", args)
+		}
+		if m, _ := filepath.Glob(filepath.Join(dir, "quarantine-bad-*")); len(m) != 0 {
+			t.Fatalf("%v set a folder aside", args)
+		}
+	}
+	// Writes that aren't rotations refuse too, and don't rename either.
+	for _, args := range [][]string{{"describe", "API_KEY", "x"}, {"tag", "API_KEY", "t"}, {"rm", "API_KEY", "--yes"}} {
+		expectCode(t, e.run(args...), ExitUnverified)
+	}
+	expectCode(t, e.runIn("n", "set", "NEW_KEY"), ExitUnverified)
+	if m, _ := filepath.Glob(filepath.Join(dir, "quarantine-bad-*")); len(m) != 0 {
+		t.Fatal("a non-rotation write set a folder aside")
+	}
+}
+
+// Where a rotation still refuses, every write refuses with it (exit 5), so
+// nobody can add secrets that a member pending removal could read.
+func TestRefusedRotationMeansRefusedWrites(t *testing.T) {
+	skipWindows(t)
+	writes := func(t *testing.T, e *testEnv) {
+		t.Helper()
+		for _, args := range [][]string{{"describe", "API_KEY", "x"}, {"tag", "API_KEY", "t"}, {"rm", "API_KEY", "--yes"}, {"rename", "API_KEY", "OTHER_NAME"}} {
+			if r := e.runIn(testPass+"\n", append(args, "--passphrase-stdin")...); r.code != ExitUnverified {
+				t.Errorf("%v: exit %d, want %d: %s", args, r.code, ExitUnverified, r)
+			}
+		}
+		if r := e.runIn(testPass+"\nn", "set", "NEW_KEY", "--passphrase-stdin"); r.code != ExitUnverified {
+			t.Errorf("set: exit %d, want %d: %s", r.code, ExitUnverified, r)
+		}
+		if r := e.runIn(testPass+"\nnew passphrase\n", "passwd", "main", "--passphrase-stdin"); r.code != ExitUnverified {
+			t.Errorf("passwd: exit %d, want %d: %s", r.code, ExitUnverified, r)
+		}
+	}
+	setup := func(t *testing.T) (*testEnv, string) {
+		e := newEnv(t)
+		dir := e.initVault("main")
+		e.unlock("main")
+		e.set("API_KEY", "", "v")
+		return e, dir
+	}
+	t.Run("secrets is a link", func(t *testing.T) {
+		e, dir := setup(t)
+		elsewhere := t.TempDir()
+		_ = os.Rename(filepath.Join(dir, "secrets"), filepath.Join(elsewhere, "real"))
+		if err := os.Symlink(filepath.Join(elsewhere, "real"), filepath.Join(dir, "secrets")); err != nil {
+			t.Skip("symlinks unavailable")
+		}
+		writes(t, e)
+	})
+	t.Run("the vault folder is a link", func(t *testing.T) {
+		e, dir := setup(t)
+		elsewhere := filepath.Join(t.TempDir(), "moved")
+		if err := os.Rename(dir, elsewhere); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(elsewhere, dir); err != nil {
+			t.Skip("symlinks unavailable")
+		}
+		writes(t, e)
+	})
+	t.Run("a verified newer vault.json copy", func(t *testing.T) {
+		e, dir := setup(t)
+		vf, _ := format.ReadVaultFile(dir)
+		pinPath := filepath.Join(filepath.Dir(e.cfg), "trust", vf.ID+".json")
+		e.mustRunIn(testPass+"\nsecond passphrase\n", "passwd", "main", "--passphrase-stdin")
+		v1, _ := os.ReadFile(filepath.Join(dir, "vault.json"))
+		pin1, _ := os.ReadFile(pinPath)
+		e.mustRunIn(testPass+"\nthird passphrase\n", "passwd", "main", "--passphrase-stdin")
+		v2, _ := os.ReadFile(filepath.Join(dir, "vault.json"))
+		// The folder is at seq 1 with a conflict copy at seq 2.
+		_ = os.WriteFile(filepath.Join(dir, "vault.json"), v1, 0o600)
+		_ = os.WriteFile(pinPath, pin1, 0o600)
+		_ = os.WriteFile(filepath.Join(dir, "vault (Dan's conflicted copy).json"), v2, 0o600)
+		writes(t, e)
+	})
+}
