@@ -239,6 +239,7 @@ func newEnvAt(t *testing.T, home string) *testEnv {
 	prevHook := testHook
 	testHook = func(a *app) {
 		c := curEnv
+		a.dialog = nil // never the real macOS dialog; tests that need one inject a fake
 		a.term = c.term
 		a.touch = c.touch.backend()
 		a.clip = c.clip

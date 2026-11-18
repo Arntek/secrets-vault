@@ -16,6 +16,7 @@ secrets-vault is one Go binary (`cmd/secrets-vault`) installed as `secrets-vault
 | `internal/index` | The authenticated index: per-entry MAC verification, cross-checks against the secret files' versions, the local snapshot, the locked view and the compare-and-swap write loop (docs/design/index-auth.md). | ue1.7 |
 | `internal/cli` | Commands, flags, prompts, `--json`, masking, exit codes, registry (`~/.config/vault/config.toml`), aliases. Orchestrates; holds no business rules. | rn5 |
 | `internal/tui` | Full-screen terminal interface for `vault ui` (Bubble Tea). Imports no other vault package (only `tui/quiet`); talks to the vault only through its `Backend` interface, which `cli` implements with the same operations the commands use. Masking, timed reveal, alternate screen, control-character stripping. | r1q.3 |
+| `internal/testguard` | `Forbid(what)`: panics under `go test`. Called by the code that shows the real macOS password dialog, the Touch ID sheet or touches the system clipboard, so a test that forgets to inject a fake fails loudly instead of popping a dialog on someone's screen. | r1q.2 |
 | `internal/leaktest` | Test-only harness: runs code with canary secrets and fails if one appears in stdout, stderr, logs, temp files or HOME. | ii6 |
 | `internal/arch` | Test-only: enforces the dependency rules below. | ii6 |
 
@@ -27,7 +28,7 @@ Arrows point from importer to imported. Nothing may import "upwards".
 layer 0  cmd/secrets-vault
 layer 1  internal/cli
 layer 2  internal/members   internal/agent   internal/touchid   internal/index   internal/tui
-layer 3  internal/crypto    internal/audit    internal/agentsetup
+layer 3  internal/crypto    internal/audit    internal/agentsetup   internal/testguard
 layer 4  internal/format
 ```
 
@@ -37,10 +38,10 @@ Allowed internal imports (non-test code), enforced by `internal/arch/arch_test.g
 
 | Package | May import |
 |---|---|
-| `format`, `audit`, `agentsetup`, `leaktest` | standard library only |
+| `format`, `audit`, `agentsetup`, `testguard`, `leaktest` | standard library only |
 | `crypto` | `format` |
 | `agent` | `crypto`, `format` |
-| `touchid` | `crypto`, `format` |
+| `touchid` | `crypto`, `format`, `testguard` |
 | `members` | `crypto`, `format`, `audit` |
 | `index` | `crypto`, `format` |
 | `tui` | `tui/quiet`, plus Bubble Tea / lipgloss and the standard library |

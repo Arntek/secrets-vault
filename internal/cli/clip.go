@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/Arntek/secrets-vault/internal/testguard"
 	"io"
 	"os"
 	"os/exec"
@@ -52,6 +53,7 @@ func clipTools() (write, read []string, err error) {
 }
 
 func (sysClipboard) Write(value []byte) error {
+	testguard.Forbid("clipboard")
 	w, _, err := clipTools()
 	if err != nil {
 		return err
@@ -65,6 +67,7 @@ func (sysClipboard) Write(value []byte) error {
 }
 
 func (sysClipboard) Read() ([]byte, error) {
+	testguard.Forbid("clipboard")
 	_, r, err := clipTools()
 	if err != nil {
 		return nil, err
@@ -80,6 +83,7 @@ func (sysClipboard) Read() ([]byte, error) {
 // clears the clipboard if it still holds the copied value. The digest goes
 // over stdin, not the command line, so it never shows in a process list.
 func (sysClipboard) ScheduleClear(digest [32]byte, delay time.Duration) error {
+	testguard.Forbid("clipboard")
 	exe, err := osExecutable()
 	if err != nil {
 		return err

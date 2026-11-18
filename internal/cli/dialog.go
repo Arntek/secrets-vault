@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"github.com/Arntek/secrets-vault/internal/testguard"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -51,6 +52,7 @@ func osascriptArgs(msg string) []string {
 }
 
 func runOsascript(msg string) ([]byte, error) {
+	testguard.Forbid("password dialog (osascript)")
 	ctx, cancel := context.WithTimeout(context.Background(), dialogKillAfter)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, osascriptPath, osascriptArgs(msg)...) // #nosec G204 -- absolute path, message passed as an argument
