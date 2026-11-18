@@ -32,6 +32,9 @@ type Pin struct {
 	Seq     int    `json:"seq"`
 	Head    string `json:"head"`
 	KeyID   string `json:"key_id"`
+	// Expect is a state code this machine was given and the folder has not
+	// reached yet: every open is refused until it has (ue1.9).
+	Expect *Expectation `json:"expect,omitempty"`
 	// Path is the vault folder this machine registered, so a registry that
 	// lost its vault ID can be noticed (ue1.8). Informational otherwise.
 	Path string `json:"path,omitempty"`
@@ -52,6 +55,9 @@ func ParsePin(data []byte) (*Pin, error) {
 		return nil, fmt.Errorf("%w: bad trust pin", ErrMalformed)
 	}
 	if _, err := hex.DecodeString(p.Head); err != nil || strings.ToLower(p.Head) != p.Head {
+		return nil, fmt.Errorf("%w: bad trust pin", ErrMalformed)
+	}
+	if p.Expect != nil && !p.Expect.valid() {
 		return nil, fmt.Errorf("%w: bad trust pin", ErrMalformed)
 	}
 	if len(p.Path) > 4096 || strings.ContainsFunc(p.Path, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
@@ -287,35 +293,92 @@ func hashWords(hexHash string) string {
 // ErrBadCode means a state code can't be parsed.
 var ErrBadCode = errors.New("members: a state code looks like team@5 CANDLE-ORBIT-SWIFT-MAPLE-RIVER-OTTER, or the 64-character head hash")
 
-// MatchStateCode checks code (a StateCode, or "SEQ HEXHASH"/"HEXHASH@SEQ"
-// forms are not needed: the full form is "NAME@SEQ <64 hex>") against c. It
-// returns nil if the state named by the code is in c's history, so the
-// folder is that state or extends it, and ErrRollback if the folder is
-// behind it or doesn't contain it.
-func MatchStateCode(c *Chain, code string) error {
+// ErrBehindCode means the folder is behind, or doesn't contain, a state
+// code this person was given out of band (ue1.9).
+var ErrBehindCode = errors.New("this folder is behind the state code you were given. Someone may have restored an old copy of the folder. Nothing was read or written; check with the member who gave you the code")
+
+// Expectation is a state code this machine was given and the folder has
+// not reached yet. It is kept in the trust pin, and every open refuses
+// the vault until the folder reaches the expected state (ue1.9).
+type Expectation struct {
+	Seq int `json:"seq"`
+	// Hash is the full head hash when the code gave one; otherwise Words
+	// are the six words from it.
+	Hash  string `json:"hash,omitempty"`
+	Words string `json:"words,omitempty"`
+}
+
+// String shows the expectation as a state code (without the vault name).
+func (e *Expectation) String() string {
+	if e.Hash != "" {
+		return "@" + strconv.Itoa(e.Seq) + " " + e.Hash
+	}
+	return "@" + strconv.Itoa(e.Seq) + " " + e.Words
+}
+
+func (e *Expectation) valid() bool {
+	if e.Seq < 0 || e.Seq >= format.MaxLogEntries || (e.Hash == "") == (e.Words == "") {
+		return false
+	}
+	if e.Hash != "" {
+		b, err := hex.DecodeString(e.Hash)
+		return err == nil && len(b) == 32 && strings.ToLower(e.Hash) == e.Hash
+	}
+	return len(e.Words) <= 64 && NormalizeFingerprint(e.Words) == e.Words
+}
+
+// ParseStateCode parses "NAME@SEQ WORD-WORD-WORD-WORD-WORD-WORD" or
+// "NAME@SEQ <64-hex head hash>".
+func ParseStateCode(code string) (*Expectation, error) {
 	code = strings.TrimSpace(code)
 	at := strings.IndexByte(code, '@')
 	sp := strings.IndexAny(code, " \t")
 	if at < 0 || sp < at {
-		return ErrBadCode
+		return nil, ErrBadCode
 	}
 	seq, err := strconv.Atoi(code[at+1 : sp])
 	if err != nil || seq < 0 || seq >= format.MaxLogEntries {
-		return ErrBadCode
+		return nil, ErrBadCode
 	}
 	rest := strings.TrimSpace(code[sp+1:])
-	if seq >= len(c.File.Log) {
-		return ErrRollback
-	}
-	h := format.RecordHash(c.File.Log[seq].Body)
+	e := &Expectation{Seq: seq}
 	if len(rest) == 64 {
-		if strings.ToLower(rest) != h {
-			return ErrRollback
+		e.Hash = strings.ToLower(rest)
+	} else {
+		e.Words = NormalizeFingerprint(rest)
+		if len(strings.Split(e.Words, "-")) != 6 {
+			return nil, ErrBadCode
 		}
-		return nil
 	}
-	if NormalizeFingerprint(rest) != hashWords(h) {
-		return ErrRollback
+	if !e.valid() {
+		return nil, ErrBadCode
+	}
+	return e, nil
+}
+
+// Met reports whether c's history contains the expected state, so the
+// folder is that state or extends it.
+func (e *Expectation) Met(c *Chain) bool {
+	if e.Seq >= len(c.File.Log) {
+		return false
+	}
+	h := format.RecordHash(c.File.Log[e.Seq].Body)
+	if e.Hash != "" {
+		return e.Hash == h
+	}
+	return e.Words == hashWords(h)
+}
+
+// MatchStateCode checks code against c. It returns nil if the state named
+// by the code is in c's history (the folder is that state or extends it),
+// ErrBehindCode if not, and ErrBadCode if the code can't be parsed.
+func MatchStateCode(c *Chain, code string) error {
+	e, err := ParseStateCode(code)
+	if err != nil {
+		return err
+	}
+	if !e.Met(c) {
+		return ErrBehindCode
 	}
 	return nil
 }

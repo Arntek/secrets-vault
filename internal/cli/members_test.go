@@ -202,7 +202,7 @@ func TestUE11RegressionCLI(t *testing.T) {
 	}
 
 	r := alice.runIn(testPass+"\n", "member", "rm", "team", "carol", "--yes", "--folder-access-removed", "--passphrase-stdin")
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
 	if !strings.Contains(r.err, "changed outside secrets-vault") {
 		t.Fatalf("alice should be told vault.json was tampered with: %s", r)
 	}
@@ -237,6 +237,8 @@ func TestRollbackRefusedCLI(t *testing.T) {
 	alice.set("API_KEY", "", "new-value")
 	alice.set("AFTER", "", "x")
 
+	honest := filepath.Join(t.TempDir(), "honest")
+	copyTree(t, vdir, honest)
 	// carol restores vault.json and API_KEY from her snapshot.
 	copyFile(t, filepath.Join(snap, "vault.json"), filepath.Join(vdir, "vault.json"))
 	copyFile(t, filepath.Join(snap, "secrets", "API_KEY.age"), filepath.Join(vdir, "secrets", "API_KEY.age"))
@@ -244,7 +246,7 @@ func TestRollbackRefusedCLI(t *testing.T) {
 	// alice saw the removal: hard refusal, no prompt, no flag.
 	alice.mustRun("lock", "--all")
 	r = alice.runIn(testPass+"\n", "get", "API_KEY", "--passphrase-stdin")
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
 	if !strings.Contains(r.err, "older than, or different from") || strings.Contains(r.err, "expected") {
 		t.Fatalf("rollback message: %s", r)
 	}
@@ -255,16 +257,30 @@ func TestRollbackRefusedCLI(t *testing.T) {
 	}
 	// ...but the write guard sees AFTER under a newer key and refuses.
 	r = bob.runIn("bob-new", "set", "BOB_NEW", "--vault", "team")
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
 	if !strings.Contains(r.err, "newer state") {
 		t.Fatalf("write guard: %s", r)
 	}
 	if _, err := os.Stat(filepath.Join(vdir, "secrets", "BOB_NEW.age")); err == nil {
 		t.Fatal("bob's write went through")
 	}
-	// And alice's state code makes bob's machine refuse carol's state.
+	// And alice's state code makes bob's machine refuse carol's state, and
+	// keep refusing it afterwards (ue1.9), reads included.
 	r = bob.runIn("", "trust", "team", "--expect", code)
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
+	if !strings.Contains(r.err, "behind the state code you were given") {
+		t.Fatalf("%s", r)
+	}
+	r = bob.runIn(personalPass+"\n", "get", "API_KEY", "--passphrase-stdin")
+	expectCode(t, r, ExitUnverified)
+	notContains(t, "bob's output after the refused code", r.out+r.err, "old-value")
+	expectCode(t, bob.runIn("bob-new", "set", "BOB_NEW", "--vault", "team"), ExitUnverified)
+	// When the honest folder returns, the expectation is met and cleared.
+	copyFile(t, filepath.Join(honest, "vault.json"), filepath.Join(vdir, "vault.json"))
+	copyFile(t, filepath.Join(honest, "secrets", "API_KEY.age"), filepath.Join(vdir, "secrets", "API_KEY.age"))
+	if got := bob.mustRunIn(personalPass+"\n", "get", "API_KEY", "--passphrase-stdin").out; got != "new-value\n" {
+		t.Fatalf("after the honest state returned: %q", got)
+	}
 }
 
 // M1 through the CLI: a vault.json for another vault ID is refused.
@@ -285,7 +301,7 @@ func TestSubstitutedVaultRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin")
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
 	if !strings.Contains(r.err, "different vault") {
 		t.Fatalf("expected the different-vault refusal: %s", r)
 	}
@@ -420,8 +436,22 @@ func TestTrustAndRebuild(t *testing.T) {
 	j := decodeJSON[map[string]any](t, r.out)
 	code := j["state_code"].(string)
 	e.mustRun("trust", "main", "--expect", code)
-	expectCode(t, e.run("trust", "main", "--expect", "main@0 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE"), ExitError)
 	expectCode(t, e.run("trust", "main", "--accept-rollback"), ExitError) // nothing to accept
+	myFP := e.fingerprintOf("main", testUser)
+	// ue1.9: a code the folder doesn't meet is remembered; every command
+	// refuses the vault until it is met, or the rollback is accepted.
+	r = e.run("trust", "main", "--expect", "main@0 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE")
+	expectCode(t, r, ExitUnverified)
+	if !strings.Contains(r.err, "behind the state code you were given") {
+		t.Fatalf("%s", r)
+	}
+	expectCode(t, e.run("get", "K"), ExitUnverified)
+	expectCode(t, e.runIn("x", "set", "K2"), ExitUnverified)
+	expectCode(t, e.run("trust", "main", "--accept-rollback", "--signer-fingerprint", "ACID-ACID-ACID-0000"), ExitError)
+	e.mustRun("trust", "main", "--accept-rollback", "--signer-fingerprint", myFP)
+	if got := e.mustRun("get", "K").out; got != "v\n" {
+		t.Fatalf("after accepting: %q", got)
+	}
 	// Rebuild: new vault ID, same secrets, only member is me.
 	oldVF, _ := format.ReadVaultFile(dir)
 	e.mustRunIn(testPass+"\nrebuilt passphrase\n", "rebuild", "main", "--yes", "--passphrase-stdin")
@@ -596,7 +626,7 @@ func TestPlantedStagingNeverOverwrites(t *testing.T) {
 	_ = os.RemoveAll(stage)
 	_ = os.MkdirAll(filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab"), 0o700)
 	r := e.runIn("new", "set", "OTHER")
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
 	if !strings.Contains(r.err, "newer state") {
 		t.Fatalf("%s", r)
 	}
@@ -608,7 +638,7 @@ func TestPlantedStagingNeverOverwrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = e.runIn("new", "set", "OTHER")
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
 	if !strings.Contains(r.err, "symlink") {
 		t.Fatalf("%s", r)
 	}
@@ -644,7 +674,7 @@ func TestRegistryIDSurvivesOldBuilds(t *testing.T) {
 	good, _ := os.ReadFile(filepath.Join(dir, "vault.json"))
 	_ = os.WriteFile(filepath.Join(dir, "vault.json"), evil, 0o600)
 	r := e.runIn(testPass+"\n", "get", "K", "--passphrase-stdin")
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
 	if !strings.Contains(r.err, "different vault") {
 		t.Fatalf("%s", r)
 	}
@@ -653,12 +683,12 @@ func TestRegistryIDSurvivesOldBuilds(t *testing.T) {
 	_ = os.Remove(filepath.Join(filepath.Dir(e.cfg), "registry.toml"))
 	_ = os.WriteFile(filepath.Join(dir, "vault.json"), evil, 0o600)
 	r = e.runIn(testPass+"\n", "get", "K", "--passphrase-stdin")
-	expectCode(t, r, ExitError)
+	expectCode(t, r, ExitUnverified)
 	if !strings.Contains(r.err, "lost its record") {
 		t.Fatalf("%s", r)
 	}
 	_ = os.WriteFile(filepath.Join(dir, "vault.json"), good, 0o600)
-	expectCode(t, e.runIn(testPass+"\n", "get", "K", "--passphrase-stdin"), ExitError) // even for the genuine file
+	expectCode(t, e.runIn(testPass+"\n", "get", "K", "--passphrase-stdin"), ExitUnverified) // even for the genuine file
 	// detach + attach registers it again (and finds the existing pin).
 	e.mustRun("detach", "main")
 	e.mustRun("attach", "main", dir)

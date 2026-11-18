@@ -40,14 +40,14 @@ func (a *app) loadVault(v *vaultRef) (*members.Chain, *format.VaultFile, error) 
 	case err == nil, errors.Is(err, members.ErrOldFormat):
 		return c, vf, err
 	case errors.Is(err, members.ErrOtherVault):
-		return nil, nil, failf("the folder of '%s' now holds a different vault than the one registered here. "+
+		return nil, nil, verifyErrf("the folder of '%s' now holds a different vault than the one registered here. "+
 			"If you rebuilt it on purpose, run: %s detach %s, then %s attach %s DIR", v.name, a.prog, v.name, a.prog, v.name)
 	case errors.Is(err, members.ErrTampered):
-		return nil, nil, failf("vault '%s': %v", v.name, members.ErrTampered)
+		return nil, nil, verifyErrf("vault '%s': %v", v.name, members.ErrTampered)
 	case errors.Is(err, format.ErrUnsupportedVersion):
 		return nil, nil, failf("vault '%s' was saved by a newer secrets-vault. Upgrade to open it: brew upgrade secrets-vault (Homebrew) or npm update -g secrets-vault (npm)", v.name)
 	case errors.Is(err, format.ErrUnsafeDir):
-		return nil, nil, failf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it", v.name)
+		return nil, nil, verifyErrf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it", v.name)
 	}
 	return nil, nil, failf("cannot open vault '%s': %v", v.name, vaultErr(err))
 }
@@ -82,7 +82,7 @@ func (a *app) open(v *vaultRef) (*format.VaultFile, error) {
 		// registry, ue1.8 A). If this machine already trusts a vault in this
 		// folder, never fall back to first-use trust.
 		if old, err := ts.FindByPath(v.dir); err != nil || old != nil {
-			return nil, failf("this machine has lost its record of which vault '%s' is (an older secrets-vault may have rewritten its settings). "+
+			return nil, verifyErrf("this machine has lost its record of which vault '%s' is (an older secrets-vault may have rewritten its settings). "+
 				"Nothing was read or written. To register it again, run: %s detach %s, then %s attach %s DIR", v.name, a.prog, v.name, a.prog, v.name)
 		}
 	}
@@ -93,7 +93,16 @@ func (a *app) open(v *vaultRef) (*format.VaultFile, error) {
 	// A registry entry from before trust pins: its key must be in the
 	// chain, or the folder was replaced (M3's twin for version-2 files).
 	if pin == nil && v.entry.KeyID != "" && !c.KnowsKey(v.entry.KeyID) {
-		return nil, failf("vault '%s': %v", v.name, members.ErrRollback)
+		return nil, verifyErrf("vault '%s': %v", v.name, members.ErrRollback)
+	}
+	// A state code this machine was given and the folder hasn't reached:
+	// refuse until it has (ue1.9).
+	expectMet := false
+	if pin != nil && pin.Expect != nil {
+		if !pin.Expect.Met(c) {
+			return nil, verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, pin.Expect, members.ErrBehindCode)
+		}
+		expectMet = true
 	}
 	cl := members.Classify(c, pin)
 	v.chain, v.pin, v.class = c, pin, cl
@@ -118,12 +127,79 @@ func (a *app) open(v *vaultRef) (*format.VaultFile, error) {
 			"It will be applied again on your next change, or run: %s trust %s", v.name, a.prog, v.name)
 	default:
 		v.chain = nil
-		return nil, failf("vault '%s': %v", v.name, members.ErrRollback)
+		return nil, verifyErrf("vault '%s': %v", v.name, members.ErrRollback)
+	}
+	if expectMet && v.pin != nil && v.pin.Expect != nil {
+		cleared := *v.pin
+		cleared.Expect = nil
+		if err := ts.Save(&cleared); err != nil {
+			return nil, err
+		}
+		v.pin = &cleared
+	}
+	// --expect on any command (TOFU checks it itself).
+	if a.expectCode != "" && cl.Outcome != members.FirstUse && v.pin != nil {
+		if _, err := a.applyExpect(v, a.expectCode); err != nil {
+			v.chain = nil
+			return nil, err
+		}
 	}
 	if err := a.registerID(v, c.File.ID); err != nil {
 		return nil, err
 	}
 	return c.File, nil
+}
+
+// applyExpect checks a state code against v's verified chain. If the folder
+// is behind it, the expectation is saved in the pin, so every later
+// command refuses the vault until the folder reaches it (ue1.9).
+func (a *app) applyExpect(v *vaultRef, code string) (bool, error) {
+	c := v.chain
+	if !strings.Contains(code, "@") {
+		code = c.File.Name + "@" + code
+	}
+	exp, err := members.ParseStateCode(code)
+	if err != nil {
+		return false, usageErrf("%v", err)
+	}
+	if exp.Met(c) {
+		return true, nil
+	}
+	if v.pin != nil {
+		pending := *v.pin
+		pending.Expect = exp
+		if ts, err := a.trustStore(); err == nil {
+			if err := ts.Save(&pending); err != nil {
+				return false, err
+			}
+		}
+		v.pin = &pending
+	}
+	return false, verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, exp, members.ErrBehindCode)
+}
+
+// firstPinInfo is the --json record of a first-use pin.
+type firstPinInfo struct {
+	Vault    string       `json:"vault"`
+	State    string       `json:"state"`
+	SignedBy string       `json:"signed_by"`
+	Checked  bool         `json:"state_code_checked"`
+	Members  []memberInfo `json:"members"`
+}
+
+type memberInfo struct {
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+func (a *app) noteFirstPin(v *vaultRef, checked bool) {
+	c := v.chain
+	info := &firstPinInfo{Vault: v.name, State: members.StateCode(c, c.Head().Seq), SignedBy: c.Head().By, Checked: checked, Members: []memberInfo{}}
+	for _, m := range c.Head().Members {
+		fp, _ := members.Fingerprint(m.Recipient, m.SignKey)
+		info.Members = append(info.Members, memberInfo{m.Name, fp})
+	}
+	a.firstPin = info
 }
 
 // registerID records the vault ID in the registry entry (M1) and drops the
@@ -217,9 +293,11 @@ func (a *app) trustOnFirstUse(v *vaultRef) error {
 		// Nobody else holds my signing key, but a removed member could show
 		// me a chain cut off before their removal: show the head and ask
 		// for the state code from another machine (S2).
-		if err := a.checkStateCode(v, true); err != nil {
+		checked, err := a.checkStateCode(v, true)
+		if err != nil {
 			return err
 		}
+		a.noteFirstPin(v, checked)
 		return a.savePin(v, nil)
 	}
 	adder, ok := adderOf(c, me)
@@ -245,11 +323,14 @@ func (a *app) trustOnFirstUse(v *vaultRef) error {
 	if !members.FingerprintsEqual(members.NormalizeFingerprint(typed), fp) {
 		return failf("that is not %s's fingerprint. Do not use '%s' until you have checked with %s; someone may have replaced the vault", by, v.name, by)
 	}
+	checked := false
 	if a.expectCode != "" {
-		if err := members.MatchStateCode(c, a.expectCode); err != nil {
-			return failf("vault '%s': %v", v.name, err)
+		if ok, err := a.applyExpect(v, a.expectCode); err != nil || !ok {
+			return err
 		}
+		checked = true
 	}
+	a.noteFirstPin(v, checked)
 	return a.savePin(v, nil)
 }
 
@@ -268,7 +349,7 @@ func adderOf(c *members.Chain, me members.Identity) (format.Member, bool) {
 // checkStateCode shows the head and checks the state code: --expect if
 // given, otherwise (when ask and on a terminal) one typed by the person;
 // Enter skips.
-func (a *app) checkStateCode(v *vaultRef, ask bool) error {
+func (a *app) checkStateCode(v *vaultRef, ask bool) (bool, error) {
 	c := v.chain
 	code := a.expectCode
 	if code == "" && ask && a.term.StdinTTY() && !a.asJSON {
@@ -281,18 +362,13 @@ func (a *app) checkStateCode(v *vaultRef, ask bool) error {
 	} else if code == "" {
 		// Always on stderr, --json included, so a script or AI agent can't
 		// hide from the user that a vault was pinned unchecked.
-		a.infof("Trusting vault '%s' at %s without a state code (state_code_checked: false). Compare with '%s status' on another member's machine.", v.name, headLine(c), a.prog)
+		a.infof("Trusting vault '%s' at %s without a state code (state_code_checked: false). Compare with '%s status' on another member's machine. Members:", v.name, headLine(c), a.prog)
+		a.printMembers(c)
 	}
 	if code == "" {
-		return nil
+		return false, nil
 	}
-	if !strings.Contains(code, "@") {
-		code = c.File.Name + "@" + code
-	}
-	if err := members.MatchStateCode(c, code); err != nil {
-		return failf("vault '%s': %v", v.name, err)
-	}
-	return nil
+	return a.applyExpect(v, code)
 }
 
 // repairLostRace re-applies this machine's lost records on top of the
@@ -356,7 +432,8 @@ func (a *app) prepareWrite(v *vaultRef, key *crypto.VaultKey) error {
 	c := v.chain
 	if _, rotation, ok := c.KeyIntroducedAt(c.Head().KeyID); ok && rotation {
 		if _, err := crypto.RecoverRotation(v.dir, key); err != nil {
-			return failf("vault '%s' has an unfinished key rotation that could not be completed: %v", v.name, vaultErr(err))
+			return failf("vault '%s' has an unfinished key rotation that could not be completed: %v. "+
+				"If no member is changing the vault key right now, move the leftover folder aside with: %s doctor %s --quarantine-staging", v.name, vaultErr(err), a.prog, v.name)
 		}
 	}
 	// Files a migration left in the version-1 format (if it was
@@ -369,7 +446,10 @@ func (a *app) prepareWrite(v *vaultRef, key *crypto.VaultKey) error {
 		return failf("cannot check vault '%s': %v", v.name, vaultErr(err))
 	}
 	if rep.Blocking() {
-		return failf("vault '%s': %v", v.name, members.ErrNewerState)
+		if len(rep.Unknown) == 0 && !rep.NewerCopy {
+			return verifyErrf("vault '%s': %v. If no member is changing the vault key right now, move the leftover folder aside with: %s doctor %s --quarantine-staging", v.name, members.ErrNewerState, a.prog, v.name)
+		}
+		return verifyErrf("vault '%s': %v", v.name, members.ErrNewerState)
 	}
 	a.warnExposed(v, rep)
 	return nil

@@ -342,7 +342,7 @@ func TestAttacker4Rollback(t *testing.T) {
 		t.Fatalf("write guard: %+v", rep)
 	}
 	// And the state code from alice refuses carol's state.
-	if err := MatchStateCode(rolled, code); !errors.Is(err, ErrRollback) {
+	if err := MatchStateCode(rolled, code); !errors.Is(err, ErrBehindCode) {
 		t.Fatalf("state code on rolled-back folder = %v", err)
 	}
 	if err := MatchStateCode(v.c, code); err != nil {

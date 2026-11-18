@@ -30,13 +30,16 @@ import (
 	"github.com/Arntek/secrets-vault/internal/agent"
 )
 
-// Exit codes. 3 and 4 are part of the agent contract printed by `vault prime`.
+// Exit codes. 3, 4 and 5 are part of the agent contract printed by `vault
+// prime`. 5 means the vault failed verification (tampered, substituted,
+// rolled back, behind a state code): never treat it as "key not found".
 const (
-	ExitOK       = 0
-	ExitError    = 1
-	ExitUsage    = 2
-	ExitLocked   = 3
-	ExitNotFound = 4
+	ExitOK         = 0
+	ExitError      = 1
+	ExitUsage      = 2
+	ExitLocked     = 3
+	ExitNotFound   = 4
+	ExitUnverified = 5
 )
 
 // Version is set at build time with -ldflags "-X ...cli.Version=v1.2.3".
@@ -255,7 +258,7 @@ func usage(w io.Writer, prog string) {
 		}
 		fmt.Fprintf(w, "  %-46s %s\n", c.usage, c.summary)
 	}
-	fmt.Fprintf(w, "\nEvery command accepts --json. Exit codes: 0 ok, 1 error, 2 usage, 3 vault locked, 4 key not found.\n")
+	fmt.Fprintf(w, "\nEvery command accepts --json. Exit codes: 0 ok, 1 error, 2 usage, 3 vault locked, 4 key not found, 5 vault failed verification.\n")
 	fmt.Fprintf(w, "More: '%s help COMMAND', '%s version'.\n", prog, prog)
 }
 

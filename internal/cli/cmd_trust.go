@@ -41,8 +41,12 @@ func cmdTrust(a *app, p *parsed) error {
 		key.Destroy()
 	}
 	if a.expectCode != "" {
-		if err := a.checkStateCode(v, false); err != nil {
-			return err
+		// open() has already checked the code (and remembered it if the
+		// folder is behind). Here it is met: pin the head.
+		if v.pin == nil {
+			if _, err := a.applyExpect(v, a.expectCode); err != nil {
+				return err
+			}
 		}
 		if v.pin == nil || v.pin.Head != v.chain.Head().Head {
 			if err := a.savePin(v, nil); err != nil {
@@ -82,8 +86,12 @@ func (a *app) acceptRollback(v *vaultRef) error {
 	if err != nil {
 		return err
 	}
-	if cl := members.Classify(c, pin); cl.Outcome != members.Rollback {
+	behind := pin != nil && pin.Expect != nil && !pin.Expect.Met(c)
+	if cl := members.Classify(c, pin); cl.Outcome != members.Rollback && !behind {
 		return failf("'%s' is not refused on this machine; there is nothing to accept", v.name)
+	}
+	if behind {
+		a.infof("You were given the state code %s%s for '%s', and the folder is behind it.", c.File.Name, pin.Expect, v.name)
 	}
 	h := c.Head()
 	var signer format.Member

@@ -538,10 +538,12 @@ func (a *app) openKey(v *vaultRef, _ *format.VaultFile, o openOpts) (*crypto.Vau
 				a.infof("Vault '%s' (%s). Members:", v.name, headLine(v.chain))
 				a.printMembers(v.chain)
 			}
-			if err := a.checkStateCode(v, false); err != nil {
+			checked, err := a.checkStateCode(v, false)
+			if err != nil {
 				k.Destroy()
 				return nil, err
 			}
+			a.noteFirstPin(v, checked)
 			if err := a.savePin(v, nil); err != nil {
 				k.Destroy()
 				return nil, err
