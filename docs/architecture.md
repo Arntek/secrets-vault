@@ -48,10 +48,13 @@ Production code never imports `leaktest`; tests in any package may. When you add
 
 These are fixed by the scaffold so sessions can work in parallel. Change them only by agreement with the coordinator.
 
+File layout, parsing rules and the call sequences for these two packages are in [vault-format.md](vault-format.md).
+
+- **`format.VaultFile.KeyID`**: public fingerprint of the current vault key (`crypto.VaultKey.ID()`); changes on rotation.
 - **`format.Unlocker`**: one wrapped copy of the vault key in `vault.json` (`type`, `label`, `recipient`, `wrapped_key`, `created`). `WrappedKey` is opaque to `format`.
 - **`crypto.VaultKey`**: always passed by pointer; `Destroy()` zeroes it; `String`, `GoString` and `LogValue` print a placeholder so a key that reaches a log or `fmt` call never shows its bytes.
 - **`crypto.KeyWrapper`**: `Type()`, `Wrap(*VaultKey) (format.Unlocker, error)`, `Unwrap(format.Unlocker) (*VaultKey, error)`. Implemented by the passphrase and member wrappers (crypto) and Touch ID (touchid). Any unwrap failure returns `crypto.ErrWrongKey`, so callers can't distinguish a wrong passphrase from tampered data.
-- **`crypto.Sealer`**: `Seal` / `Open` a secret value with a `VaultKey`.
+- **`crypto.Sealer`**: `Seal` / `Open` a secret value with a `VaultKey`. Get one from `crypto.NewSealer(name)`: the key name is bound into the encryption. Open failures return `crypto.ErrDecrypt`.
 - **`agent.Client`**: `Unlock(vaultID, key, ttl)`, `Key(vaultID)`, `Lock`, `LockAll`, `Status`, `Close`. Unlocking (Touch ID or passphrase prompt) happens in the CLI process; only the unwrapped key goes to the agent. `agent.ErrLocked` maps to exit code 3.
 - **`audit.Logger`**: `Record(audit.Event) error`. Use `audit.Nop{}` until Phase 2.
 - **`cli.Run(args, stdin, stdout, stderr) int`**: the whole program, testable in-process. Exit codes: 0 ok, 1 error, 2 usage, 3 locked, 4 key not found.

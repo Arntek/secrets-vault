@@ -6,8 +6,12 @@
 //     and stored in vault.json as a format.Unlocker. Adding or removing an
 //     unlocker rewrites vault.json only; secret files are never re-encrypted,
 //     except when a member is removed (key rotation, package members).
-//   - Secrets are age-encrypted files (filippo.io/age, added by issue 6j5).
-//     The passphrase unlocker uses age's scrypt recipient.
+//   - Secrets are age-encrypted files (filippo.io/age). The file key of each
+//     is wrapped in a custom "sv-vaultkey" stanza by a key derived with HKDF
+//     from the VaultKey, a random salt and the key name, so a file only opens
+//     under its own name (swapping two files is detected).
+//   - The passphrase unlocker is an age file encrypted with age's scrypt
+//     recipient; the member unlocker one encrypted to an age X25519 recipient.
 //
 // Responsibilities:
 //   - Generating, holding and zeroing VaultKeys.
@@ -24,8 +28,12 @@
 package crypto
 
 import (
+	"crypto/hkdf"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/Arntek/secrets-vault/internal/format"
@@ -34,8 +42,21 @@ import (
 // KeySize is the length of a VaultKey in bytes.
 const KeySize = 32
 
-// ErrNotImplemented is returned by stubs that later issues fill in.
-var ErrNotImplemented = errors.New("crypto: not implemented")
+// ErrDecrypt is returned when a secret file cannot be opened: wrong vault
+// key, a file sealed for a different key name (swapped files), or
+// corrupted or truncated data.
+var ErrDecrypt = errors.New("crypto: unable to decrypt secret")
+
+// ErrOtherKey wraps ErrDecrypt when a secret file was sealed with a
+// different vault key (for example during or after a key rotation that has
+// not fully synced).
+var ErrOtherKey = fmt.Errorf("%w: sealed with a different vault key", ErrDecrypt)
+
+// ErrTooLarge is returned for a secret value over MaxSecretSize.
+var ErrTooLarge = errors.New("crypto: secret value too large")
+
+// MaxSecretSize is the largest secret value Seal accepts.
+const MaxSecretSize = 1 << 20 // 1 MiB
 
 // ErrWrongKey is returned when an unlocker cannot open a wrapped key
 // (wrong passphrase, wrong identity, tampered data). Callers must not be
@@ -70,6 +91,17 @@ func VaultKeyFromBytes(b []byte) (*VaultKey, error) {
 // Bytes exposes the key material for wrapping. Do not retain the slice.
 func (k *VaultKey) Bytes() []byte { return k.b[:] }
 
+// ID returns a public fingerprint of the key: 16 bytes of HKDF-SHA256 output
+// as lower-case hex. It reveals nothing about the key and is stored in
+// vault.json (format.VaultFile.KeyID) and in every secret file.
+func (k *VaultKey) ID() string {
+	b, err := hkdf.Key(sha256.New, k.b[:], nil, infoKeyID, 16)
+	if err != nil {
+		panic("crypto: hkdf: " + err.Error()) // only fails for absurd lengths
+	}
+	return hex.EncodeToString(b)
+}
+
 // Destroy zeroes the key. Safe to call more than once.
 func (k *VaultKey) Destroy() {
 	if k == nil {
@@ -100,16 +132,9 @@ type KeyWrapper interface {
 	Unwrap(u format.Unlocker) (*VaultKey, error)
 }
 
-// Sealer encrypts and decrypts secret values with a vault key. Owned by
-// issue 6j5.
+// Sealer encrypts and decrypts secret values with a vault key. Get one
+// with NewSealer, which binds it to a key name.
 type Sealer interface {
 	Seal(key *VaultKey, plaintext []byte) ([]byte, error)
 	Open(key *VaultKey, ciphertext []byte) ([]byte, error)
-}
-
-// NewPassphraseWrapper returns the scrypt passphrase KeyWrapper. Owned by
-// issue 6j5.
-func NewPassphraseWrapper(passphrase []byte) (KeyWrapper, error) {
-	_ = passphrase
-	return nil, ErrNotImplemented
 }
