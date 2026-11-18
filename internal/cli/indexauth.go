@@ -412,9 +412,30 @@ func (a *app) noteIndexState(v *vaultRef, lv *index.LockedView) {
 // noteRotation tells the person what a rotation left alone or dropped.
 func (a *app) noteRotation(v *vaultRef, skipped *[]string, dropped *int) {
 	if skipped != nil && len(*skipped) > 0 {
-		a.warnf("warning: %s in '%s' %s sealed under an older vault key and %s left as they were (stale copies, perhaps restored from version history); they can't be read: %s",
-			plural(len(*skipped), "file"), v.name, map[bool]string{true: "is", false: "are"}[len(*skipped) == 1],
-			map[bool]string{true: "was", false: "were"}[len(*skipped) == 1], strings.Join(*skipped, ", "))
+		// Stale copies sealed under a retired key (perhaps restored from
+		// version history, or planted): move the live ones aside, never
+		// delete, so they stop turning up and can't block anything.
+		var moved, left []string
+		for _, n := range *skipped {
+			if strings.HasSuffix(n, " (in the trash)") {
+				left = append(left, n)
+				continue
+			}
+			if _, err := format.QuarantineSecret(v.dir, n, a.now()); err != nil {
+				left = append(left, n)
+				continue
+			}
+			moved = append(moved, n)
+		}
+		if len(moved) > 0 {
+			a.warnf("warning: %s in '%s' could not be re-sealed (sealed under an older vault key: stale copies, perhaps restored from version history) and %s set aside in quarantine/ in the vault folder, not deleted: %s",
+				plural(len(moved), "file"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], strings.Join(moved, ", "))
+		}
+		if len(left) > 0 {
+			a.warnf("warning: %s in '%s' %s sealed under an older vault key and left as %s (they can't be read): %s",
+				plural(len(left), "file"), v.name, map[bool]string{true: "is", false: "are"}[len(left) == 1],
+				map[bool]string{true: "it was", false: "they were"}[len(left) == 1], strings.Join(left, ", "))
+		}
 	}
 	if dropped != nil && *dropped > 0 {
 		a.warnf("warning: %s in the index of '%s' failed verification and %s left out of the new index; keys this machine had verified were put back from its own record",

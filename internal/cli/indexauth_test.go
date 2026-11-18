@@ -833,11 +833,19 @@ func TestStaleOldKeyFileDoesNotBlockRotation(t *testing.T) {
 	if r.code != 0 {
 		t.Fatalf("a stale file blocked the rotation: %s", r)
 	}
-	if !strings.Contains(r.err, "STALE_OLDKEY") || !strings.Contains(r.err, "older vault key") {
+	if !strings.Contains(r.err, "STALE_OLDKEY") || !strings.Contains(r.err, "older vault key") || !strings.Contains(r.err, "quarantine/") {
 		t.Fatalf("the stale file was not reported: %s", r)
 	}
-	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "STALE_OLDKEY.age")); !bytes.Equal(after, old) {
-		t.Fatal("the stale file was changed")
+	// Set aside, byte for byte, not deleted.
+	moved, _ := filepath.Glob(filepath.Join(dir, "quarantine", "secrets", "STALE_OLDKEY.*.age"))
+	if len(moved) != 1 {
+		t.Fatalf("quarantined: %v", moved)
+	}
+	if after, _ := os.ReadFile(moved[0]); !bytes.Equal(after, old) {
+		t.Fatal("the quarantined file was changed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets", "STALE_OLDKEY.age")); err == nil {
+		t.Fatal("the stale file is still in secrets/")
 	}
 	if got := e.mustRun("get", "API_KEY").out; got != "v\n" {
 		t.Fatalf("%q", got)

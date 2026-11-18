@@ -308,3 +308,29 @@ func TestRecordFormatField(t *testing.T) {
 		t.Fatal("format written when unset")
 	}
 }
+
+func TestQuarantineSecretMovesNeverDeletes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSecretFile(dir, "STALE", []byte("old bytes")); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := QuarantineSecret(dir, "STALE", testTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel))); err != nil || string(got) != "old bytes" {
+		t.Fatalf("quarantined file: %q %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets", "STALE.age")); err == nil {
+		t.Fatal("still in secrets/")
+	}
+	if _, err := QuarantineSecret(dir, "STALE", testTime); err == nil {
+		t.Fatal("quarantined a file that is gone")
+	}
+	if _, err := QuarantineSecret(dir, "../x", testTime); err == nil {
+		t.Fatal("accepted a bad name")
+	}
+}

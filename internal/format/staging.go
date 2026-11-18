@@ -378,3 +378,42 @@ func QuarantineStaging(vaultDir, keyID string, now time.Time) (string, error) {
 	}
 	return path.Join(QuarantineDir, name), nil
 }
+
+// QuarantineSecret moves secrets/NAME.age to
+// quarantine/secrets/NAME.<UTC time>.age and returns the new path relative
+// to the vault folder. Nothing is deleted. A rotation uses it for files it
+// cannot re-seal (sealed under a retired key), so they stop being reported
+// on every write.
+func QuarantineSecret(vaultDir, name string, now time.Time) (string, error) {
+	src, err := SecretPath(vaultDir, name)
+	if err != nil {
+		return "", err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return "", err
+	}
+	if fi, err := os.Lstat(src); err != nil {
+		return "", err
+	} else if !fi.Mode().IsRegular() {
+		return "", ErrNotRegular
+	}
+	q := filepath.Join(vaultDir, QuarantineDir)
+	if err := checkDir(q, true); err != nil {
+		return "", err
+	}
+	qs := filepath.Join(q, SecretsDir)
+	if err := os.MkdirAll(qs, DirMode); err != nil {
+		return "", err
+	}
+	if err := checkDir(q, false); err != nil {
+		return "", err
+	}
+	file := name + "." + now.UTC().Format("20060102T150405.000000000Z") + SecretExt
+	if err := os.Rename(src, filepath.Join(qs, file)); err != nil {
+		return "", err
+	}
+	if err := syncDir(SecretsPath(vaultDir)); err != nil {
+		return "", err
+	}
+	return path.Join(QuarantineDir, SecretsDir, file), nil
+}
