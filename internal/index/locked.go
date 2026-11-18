@@ -145,11 +145,23 @@ func Locked(dir, vaultID string, legacy bool, snap *Snapshot) (*LockedView, erro
 		}
 		// Several unverified entries for one name: none is shown.
 	}
+	// A name this machine verified that the folder's index no longer lists
+	// (a lost update, an older index, a deleted entry) is still a key if its
+	// file is there: shown from the snapshot, flagged as changed (ue1.13).
+	// Unlock to read it; the next write repairs the index.
+	files := map[string]bool{}
+	if fs, err := format.ListSecrets(dir); err == nil {
+		for _, f := range fs {
+			files[f.Name] = true
+		}
+	}
 	for name, sn := range snapBy {
-		if _, ok := byName[name]; !ok && !sn.Deleted {
-			lv.PendingChanges++
-			// Not shown: the folder no longer lists it.
-			_ = name
+		if _, ok := byName[name]; ok || sn.Deleted {
+			continue
+		}
+		lv.PendingChanges++
+		if files[name] {
+			lv.Rows = append(lv.Rows, LockedRow{Entry: fromSnap(name, sn), Verified: true, Pending: true})
 		}
 	}
 	slices.SortFunc(lv.Rows, func(a, b LockedRow) int { return strings.Compare(a.Entry.Name, b.Entry.Name) })

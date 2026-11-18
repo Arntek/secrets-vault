@@ -408,7 +408,10 @@ func cmdPasswd(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now()})
+	var skipped []string
+	dropped := 0
+	defer a.noteRotation(v, &skipped, &dropped)
+	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now(), TrustedEntries: a.trustedEntries(v), SkippedFiles: &skipped, IndexDropped: &dropped})
 	if res != nil && res.NewKey != nil {
 		a.switchKey(v, res.NewKey)
 	}

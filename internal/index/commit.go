@@ -97,6 +97,16 @@ func (s *Session) commitOnce(v *View, edits []Edit) (*Result, error) {
 	// Heal entries that the folder's index holds at an older rev than this
 	// machine verified, if their file is not older than the snapshot.
 	for _, n := range v.older {
+		if sn, ok := s.Snap.Get(n, s.Key); ok && sn.Deleted && !v.present[n] {
+			e := sn.entry()
+			e.Name = n
+			if e.Updated.IsZero() {
+				e.Updated = s.Snap.Verified
+			}
+			entries[n] = e
+			resealed[n] = true
+			continue
+		}
 		if sn, ok := s.Snap.Get(n, s.Key); ok && !sn.Deleted && v.present[n] {
 			if fv := v.fileVersion(n); fv >= sn.Version {
 				e := sn.entry()
@@ -108,6 +118,21 @@ func (s *Session) commitOnce(v *View, edits []Edit) (*Result, error) {
 				resealed[n] = true
 				res.Healed = append(res.Healed, n)
 			}
+		}
+	}
+	// A tombstone this machine verified but the folder's index lost is
+	// written back, not dropped (a deleted key stays deleted).
+	if s.Snap != nil && !s.Snap.Private {
+		for _, sn := range s.Snap.Entries {
+			if _, ok := entries[sn.Name]; ok || !sn.Deleted || v.present[sn.Name] {
+				continue
+			}
+			e := sn.entry()
+			if e.Updated.IsZero() {
+				e.Updated = s.Snap.Verified
+			}
+			entries[sn.Name] = e
+			resealed[sn.Name] = true
 		}
 	}
 	res.Merged = s.mergeConflicts(v, entries, resealed)

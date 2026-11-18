@@ -515,3 +515,49 @@ func TestUpgradeToV3(t *testing.T) {
 		t.Fatal("upgraded a file sealed under another key")
 	}
 }
+
+// ue1.14: when the folder's index doesn't verify, the caller's trusted
+// entries (its anchored snapshot) rebuild it: live ones whose file is there
+// and not older than the entry, tombstones as tombstones.
+func TestRotateRebuildsFromTrustedEntries(t *testing.T) {
+	v := newVault(t)
+	vf, _ := format.ReadVaultFile(v.dir)
+	_ = WriteSecretVersion(v.dir, "GOOD", v.key, []byte("g"), 3)
+	_ = WriteSecretVersion(v.dir, "STALEFILE", v.key, []byte("s"), 1)
+	_ = WriteSecretVersion(v.dir, "TRASHED", v.key, []byte("t"), 2)
+	if _, err := format.TrashSecret(v.dir, "TRASHED", tIdx); err != nil {
+		t.Fatal(err)
+	}
+	// The folder's index is an old one under a retired key: nothing verifies.
+	old := mustKey(t)
+	writeIdx(t, v, putEntry(old, vf.ID, "GOOD", 1, 1, false))
+	opt := v.rotateTo(t, v.pw)
+	opt.TrustedEntries = []format.IndexEntry{
+		{Name: "GOOD", Description: "label", Updated: tIdx, Version: 3, Rev: 7},
+		{Name: "STALEFILE", Updated: tIdx, Version: 5, Rev: 2}, // file is version 1: not vouched
+		{Name: "MISSING", Updated: tIdx, Version: 1, Rev: 2},   // no file
+		{Name: "TRASHED", Updated: tIdx, Version: 2, Rev: 4, Deleted: true},
+	}
+	dropped := 0
+	opt.IndexDropped = &dropped
+	nk, err := Rotate(v.dir, v.key, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := readIdx(t, v, nk)
+	if got["GOOD"].Description != "label" || got["GOOD"].Rev != 7 {
+		t.Fatalf("GOOD not rebuilt: %+v", got)
+	}
+	if _, ok := got["STALEFILE"]; ok {
+		t.Fatal("an entry newer than its file was rebuilt")
+	}
+	if _, ok := got["MISSING"]; ok {
+		t.Fatal("an entry with no file was rebuilt")
+	}
+	if !got["TRASHED"].Deleted {
+		t.Fatalf("tombstone not kept: %+v", got["TRASHED"])
+	}
+	if dropped != 1 {
+		t.Fatalf("dropped = %d", dropped)
+	}
+}

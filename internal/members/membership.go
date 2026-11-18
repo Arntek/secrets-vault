@@ -173,7 +173,10 @@ type RotateOptions struct {
 	// entries failed verification.
 	TrustedEntries []format.IndexEntry
 	IndexDropped   *int
-	Now            time.Time
+	// SkippedFiles receives secret files left alone because they are
+	// sealed under a retired key (crypto.RotateOptions.SkippedFiles).
+	SkippedFiles *[]string
+	Now          time.Time
 }
 
 // RotateResult describes a completed rotation.
@@ -313,6 +316,7 @@ func rotate(vaultDir string, c *Chain, key *crypto.VaultKey, signer *Unlocked, o
 		ExtraKeys:      opt.ExtraKeys,
 		TrustedEntries: opt.TrustedEntries,
 		IndexDropped:   opt.IndexDropped,
+		SkippedFiles:   opt.SkippedFiles,
 		Next: func(nk *crypto.VaultKey) (*format.VaultFile, error) {
 			ws := make([]crypto.KeyWrapper, 0, len(stay)+1)
 			for _, m := range stay {

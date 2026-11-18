@@ -207,7 +207,7 @@ func TestIndexAuthResurrectedFile(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "secrets", "API_KEY.age"), file, 0o600)
 	// A deleted name is not a key: the file coming back is never read...
 	r := e.run("get", "API_KEY")
-	expectCode(t, r, ExitNotFound)
+	expectCode(t, r, ExitUnverified)
 	notContains(t, "output", r.out+r.err, "\nv\n")
 	// ...and doctor says what it is.
 	if out := e.mustRun("doctor", "main").out; !strings.Contains(out, "deleted, but its file is back") {
@@ -263,7 +263,7 @@ func TestIndexAuthDoctorAdopt(t *testing.T) {
 		b, _ := json.Marshal(doc)
 		return string(b)
 	})
-	expectCode(t, e.run("get", "LOST_ENTRY"), ExitNotFound) // not a listed key
+	expectCode(t, e.run("get", "LOST_ENTRY"), ExitUnverified) // a file with no signed entry: never "not found" (ue1.13)
 	r := e.mustRun("doctor", "main")
 	if !strings.Contains(r.out, "File LOST_ENTRY has no signed entry") || !strings.Contains(r.out, "--adopt LOST_ENTRY") {
 		t.Fatalf("doctor: %s", r)
@@ -696,5 +696,150 @@ func TestHeadLineNamesLegacyFormat(t *testing.T) {
 	r := f.runIn(testPass+"\n"+testPass+"\n", "unlock", "main", "--passphrase-stdin")
 	if !strings.Contains(r.out+r.err, "format 2 (not upgraded)") {
 		t.Fatalf("%s", r)
+	}
+}
+
+func dropIndexEntry(t *testing.T, dir, name string) {
+	t.Helper()
+	editIndex(t, dir, func(s string) string {
+		var doc struct {
+			Version int              `json:"version"`
+			VaultID string           `json:"vault_id"`
+			Entries []map[string]any `json:"entries"`
+		}
+		if err := json.Unmarshal([]byte(s), &doc); err != nil {
+			t.Fatal(err)
+		}
+		kept := doc.Entries[:0]
+		for _, en := range doc.Entries {
+			if en["name"] != name {
+				kept = append(kept, en)
+			}
+		}
+		doc.Entries = kept
+		b, _ := json.Marshal(doc)
+		return string(b)
+	})
+}
+
+// ue1.13: a name missing from an otherwise valid index is never "not
+// found": with this machine's record it is a key (readable once unlocked,
+// repaired by the next write); without, it is exit 5.
+func TestMissingEntryIsNotNotFound(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("A_KEY", "", "a1")
+	e.set("A_KEY", "", "a2")
+	e.set("B_KEY", "", "b")
+	dropIndexEntry(t, dir, "A_KEY")
+	// Locked: still listed from the snapshot, flagged as changed.
+	e.mustRun("lock", "--all")
+	var found bool
+	for _, r := range listRows(t, e) {
+		if r.Name == "A_KEY" {
+			found = r.Verified && r.PendingChange
+		}
+	}
+	if !found {
+		t.Fatalf("A_KEY not listed from the snapshot: %s", e.mustRun("list", "--json").out)
+	}
+	if got := e.mustRunIn(testPass+"\n", "get", "A_KEY", "--passphrase-stdin").out; got != "a2\n" {
+		t.Fatalf("get with the snapshot: %q", got)
+	}
+	e.mustRun("info", "A_KEY")
+	if out := e.mustRun("doctor", "main").out; !strings.Contains(out, "A_KEY: missing from the index") {
+		t.Fatalf("doctor: %s", out)
+	}
+	// Without the snapshot (a fresh Mac): exit 5 and doctor says so.
+	forgetSnapshots(t, e)
+	r := e.run("get", "A_KEY")
+	expectCode(t, r, ExitUnverified)
+	if !strings.Contains(r.err, "no signed entry") {
+		t.Fatalf("%s", r)
+	}
+	if out := e.mustRun("doctor", "main").out; !strings.Contains(out, "File A_KEY has no signed entry") {
+		t.Fatalf("doctor: %s", out)
+	}
+}
+
+// ue1.14: a rotation while the folder's index doesn't verify rebuilds it
+// from this machine's own record instead of writing an empty one.
+func TestRotationRebuildsIndexFromSnapshot(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("A_KEY", "", "a")
+	e.set("B_KEY", "", "b")
+	e.mustRun("rm", "B_KEY", "--yes")
+	// A folder writer breaks the index just before a rotation.
+	_ = os.WriteFile(filepath.Join(dir, "index.json"), []byte(`{"version":2,"vault_id":"`+mustVaultID(t, dir)+`","entries":[]}`), 0o600)
+	e.mustRunIn(testPass+"\nsecond passphrase\n", "passwd", "main", "--passphrase-stdin")
+	e.mustRun("lock", "--all")
+	rows := listRows(t, e)
+	if len(rows) != 1 || rows[0].Name != "A_KEY" || rows[0].Description != "test key a_key" || !rows[0].Verified {
+		t.Fatalf("after a rotation over a broken index: %+v", rows)
+	}
+	if got := e.mustRunIn(testPass+"\n", "get", "A_KEY", "--passphrase-stdin").out; got != "a\n" {
+		t.Fatalf("%q", got)
+	}
+	// The tombstone came through (B_KEY stays deleted).
+	b, _ := os.ReadFile(filepath.Join(dir, "index.json"))
+	if !strings.Contains(string(b), `"deleted": true`) {
+		t.Fatalf("tombstone lost: %s", b)
+	}
+}
+
+func mustVaultID(t *testing.T, dir string) string {
+	t.Helper()
+	vf, err := format.ReadVaultFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vf.ID
+}
+
+// A tombstone the folder's index lost is written back by the next write.
+func TestRepairingWriteKeepsTombstone(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("A_KEY", "", "a")
+	e.set("B_KEY", "", "b")
+	e.mustRun("rm", "B_KEY", "--yes")
+	_ = os.WriteFile(filepath.Join(dir, "index.json"), []byte(`{"version":2,"vault_id":"`+mustVaultID(t, dir)+`","entries":[]}`), 0o600)
+	e.mustRunIn("c", "set", "C_KEY")
+	b, _ := os.ReadFile(filepath.Join(dir, "index.json"))
+	if !strings.Contains(string(b), `"B_KEY"`) || !strings.Contains(string(b), `"deleted": true`) {
+		t.Fatalf("the tombstone was dropped: %s", b)
+	}
+}
+
+// ue1.15: a stale file sealed under a retired key doesn't block a rotation.
+func TestStaleOldKeyFileDoesNotBlockRotation(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("API_KEY", "", "v")
+	old, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age"))
+	e.mustRunIn(testPass+"\nsecond passphrase\n", "passwd", "main", "--passphrase-stdin")
+	// Someone copies an old-epoch file back in under another name.
+	_ = os.WriteFile(filepath.Join(dir, "secrets", "STALE_OLDKEY.age"), old, 0o600)
+	r := e.runIn(testPass+"\nthird passphrase\n", "passwd", "main", "--passphrase-stdin")
+	if r.code != 0 {
+		t.Fatalf("a stale file blocked the rotation: %s", r)
+	}
+	if !strings.Contains(r.err, "STALE_OLDKEY") || !strings.Contains(r.err, "older vault key") {
+		t.Fatalf("the stale file was not reported: %s", r)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "STALE_OLDKEY.age")); !bytes.Equal(after, old) {
+		t.Fatal("the stale file was changed")
+	}
+	if got := e.mustRun("get", "API_KEY").out; got != "v\n" {
+		t.Fatalf("%q", got)
 	}
 }

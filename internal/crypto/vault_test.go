@@ -403,9 +403,24 @@ func TestRotateExtraKeys(t *testing.T) {
 	k3 := mustKey(t)
 	_ = WriteSecret(v.dir, "A", v.key, []byte("a"))
 	_ = WriteSecret(v.dir, "B", k3, []byte("b"))
-	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); !errors.Is(err, ErrOtherKey) {
-		t.Fatalf("rotation over an unknown-key file = %v", err)
+	// A file under a key Rotate doesn't know is left alone and reported
+	// instead of aborting the rotation (ue1.15); the next test shows the
+	// same file re-sealed once its key is given.
+	before, _ := format.ReadSecretFile(v.dir, "B")
+	var skipped []string
+	o0 := v.rotateTo(t, v.pw)
+	o0.SkippedFiles = &skipped
+	nk0, err := Rotate(v.dir, v.key, o0)
+	if err != nil || len(skipped) != 1 || skipped[0] != "B" {
+		t.Fatalf("rotation over an unknown-key file = %v, skipped %v", err, skipped)
 	}
+	if after, _ := format.ReadSecretFile(v.dir, "B"); !bytes.Equal(before, after) {
+		t.Fatal("a skipped file was changed")
+	}
+	if got, err := ReadSecret(v.dir, "A", nk0); err != nil || string(got) != "a" {
+		t.Fatalf("A after the rotation = %q, %v", got, err)
+	}
+	v.key = nk0
 	opt := v.rotateTo(t, v.pw)
 	opt.ExtraKeys = []*VaultKey{k3}
 	nk, err := Rotate(v.dir, v.key, opt)

@@ -300,7 +300,10 @@ func (a *app) memberRemove(v *vaultRef, name string, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	opt := members.RotateOptions{Passphrase: policy, Pending: ps, Now: a.now()}
+	var skipped []string
+	dropped := 0
+	opt := members.RotateOptions{Passphrase: policy, Pending: ps, Now: a.now(), TrustedEntries: a.trustedEntries(v), SkippedFiles: &skipped, IndexDropped: &dropped}
+	defer a.noteRotation(v, &skipped, &dropped)
 	switch policy {
 	case format.PassKept:
 		pass, err := a.askHidden("Current vault passphrase for '" + v.name + "' (to keep it): ")

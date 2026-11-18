@@ -215,8 +215,9 @@ func cmdRebuild(a *app, p *parsed) error {
 	}
 	oldID := v.chain.File.ID
 	newKey, err := crypto.Rotate(v.dir, key, crypto.RotateOptions{
-		Expect:     v.chain.Raw,
-		NewVaultID: true,
+		Expect:         v.chain.Raw,
+		NewVaultID:     true,
+		TrustedEntries: a.trustedEntries(v),
 		Next: func(nk *crypto.VaultKey) (*format.VaultFile, error) {
 			vf, err := crypto.NewVaultFile(v.chain.File.Name, nk, []crypto.KeyWrapper{mw, pw})
 			if err != nil {

@@ -163,10 +163,25 @@ func stageIndex(vaultDir, oldID, newID string, legacy bool, oldKey, newKey *Vaul
 			}
 		}
 	}
+	// The caller's trusted entries (its anchored snapshot) fill every name
+	// the folder's index doesn't carry at an equal or higher rev: live ones
+	// only if their file is there and not older than the entry, tombstones
+	// as tombstones (ue1.14).
 	for _, e := range trusted {
-		if old, ok := byName[e.Name]; !ok || e.Rev > old.Rev {
-			byName[e.Name] = e
+		if old, ok := byName[e.Name]; ok && e.Rev <= old.Rev {
+			continue
 		}
+		if !e.Deleted {
+			if !live[e.Name] {
+				continue
+			}
+			if ct, err := format.ReadSecretFile(vaultDir, e.Name); err != nil {
+				continue
+			} else if v, err := VersionOf(ct); err != nil || v < e.Version {
+				continue
+			}
+		}
+		byName[e.Name] = e
 	}
 	for _, e := range byName {
 		if e.Deleted && !present[e.Name] {

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
@@ -300,11 +301,11 @@ func (a *app) trustedEntries(v *vaultRef) []format.IndexEntry {
 	}
 	var out []format.IndexEntry
 	for _, e := range snap.Entries {
-		if e.Deleted || !have[e.Name] {
+		if !e.Deleted && !have[e.Name] {
 			continue
 		}
 		ie := format.IndexEntry{Name: e.Name, Description: e.Description, Tags: e.Tags, Updated: e.Updated, UpdatedBy: e.UpdatedBy,
-			Version: e.Version, Rev: e.Rev}
+			Version: e.Version, Rev: e.Rev, Deleted: e.Deleted}
 		if ie.Updated.IsZero() {
 			ie.Updated = snap.Verified
 		}
@@ -405,5 +406,18 @@ func (a *app) noteIndexState(v *vaultRef, lv *index.LockedView) {
 		}
 	case index.StatePrivate:
 		a.infof("Vault '%s' has a private index: nothing is listed without unlocking it.", v.name)
+	}
+}
+
+// noteRotation tells the person what a rotation left alone or dropped.
+func (a *app) noteRotation(v *vaultRef, skipped *[]string, dropped *int) {
+	if skipped != nil && len(*skipped) > 0 {
+		a.warnf("warning: %s in '%s' %s sealed under an older vault key and %s left as they were (stale copies, perhaps restored from version history); they can't be read: %s",
+			plural(len(*skipped), "file"), v.name, map[bool]string{true: "is", false: "are"}[len(*skipped) == 1],
+			map[bool]string{true: "was", false: "were"}[len(*skipped) == 1], strings.Join(*skipped, ", "))
+	}
+	if dropped != nil && *dropped > 0 {
+		a.warnf("warning: %s in the index of '%s' failed verification and %s left out of the new index; keys this machine had verified were put back from its own record",
+			plural(*dropped, "entry"), v.name, map[bool]string{true: "was", false: "were"}[*dropped == 1])
 	}
 }

@@ -121,6 +121,11 @@ func cmdDoctor(a *app, p *parsed) error {
 		if vi.view.Damaged {
 			a.warnf("warning: the index of '%s' is missing or damaged; each key is rebuilt by writing it again, or adopted with --adopt NAME", v.name)
 		}
+		for _, n := range vi.view.Names() {
+			if k, _ := vi.view.Key(n); k.Status == index.StatusReconstructed {
+				problems = append(problems, problemRow{n, "missing from the index; this machine's own record has it and the next change repairs the index"})
+			}
+		}
 		for _, k := range vi.view.Problems() {
 			if k.Status == index.StatusUnlisted || k.Status == index.StatusDamaged {
 				unlisted = append(unlisted, k.Name)

@@ -402,6 +402,7 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 	var found []*keyRef
 	var failed []error
 	var damaged []string
+	var unlisted []string
 	for _, n := range names {
 		v, err := a.vault(n)
 		if err != nil {
@@ -424,9 +425,18 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 		if lv.Damaged {
 			damaged = append(damaged, v.name)
 		}
+		matched := false
 		for _, r := range lv.Rows {
 			if r.Entry.Name == name {
+				matched = true
 				found = append(found, &keyRef{v: v, vf: vf, entry: r.Entry, verified: r.Verified || lv.State == index.StateLegacy})
+			}
+		}
+		// A file with no entry is not a key, but "not found" would tell an
+		// agent to create it: say that the index has no signed entry (ue1.13).
+		if !matched && lv.State != index.StateLegacy {
+			if ok, _ := format.SecretExists(v.dir, name); ok {
+				unlisted = append(unlisted, v.name)
 			}
 		}
 	}
@@ -448,6 +458,9 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 			// Not "not found": the index that would list it is gone or damaged (IM1).
 			return nil, &exitErr{code: ExitUnverified, indexDamaged: true,
 				msg: fmt.Sprintf("that key was not found, but the index of '%s' is missing or damaged, so it may be there. Nothing can be trusted from it until it is repaired: %s doctor %s", strings.Join(damaged, "', '"), a.prog, damaged[0])}
+		}
+		if len(unlisted) > 0 {
+			return nil, &exitErr{code: ExitUnverified, indexDamaged: true, msg: fmt.Sprintf("that key has a file in '%s' but no signed entry in its index, so it is not trusted (the index may have been changed or rolled back). Check it with: %s doctor %s", strings.Join(unlisted, "', '"), a.prog, unlisted[0])}
 		}
 		return nil, notFoundErr("key not found. Try: %s search WORDS", a.prog)
 	case 1:

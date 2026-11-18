@@ -251,3 +251,9 @@ What the code does where this document was not specific, or differs slightly:
 - **Retries:** the index compare-and-swap retries up to ten times; within one process the check and write are one step (a mutex), across machines it is best effort like `vault.json`'s.
 - **`vault upgrade`** refuses without `--yes` when there is no terminal. Reads of a format-2 vault print a one-line notice; every write exits 1 with `Run: vault upgrade NAME` and the brew/npm hint.
 - Not built, as the design allowed: nothing here changes the agent protocol; the agent still holds only the vault key.
+
+### After the re-test (ue1.13, ue1.14, ue1.15)
+
+- **A name missing from an otherwise valid index** is never "key not found" (ue1.13). A locked listing also shows names this machine verified that the folder's index no longer lists, if their file is there (flagged `pending_change`); unlocked, the entry is rebuilt from the snapshot and the next write repairs the index. A file with no entry and nothing vouching for it exits 5 ("no signed entry"), and `set` may still create the key. `doctor` lists rebuilt-from-snapshot entries as "missing from the index".
+- **A rotation over an index that doesn't verify** (ue1.14) starts from the verified folder entries and fills every name this machine's anchored snapshot vouches for (live: file present and not older than the entry; tombstones as tombstones), then reports how many entries were dropped. Lost-race repair and `rebuild` pass the same entries. A repairing write also writes back snapshot tombstones.
+- **A file sealed under a retired key does not abort a rotation** (ue1.15): it is left in place unopened and reported by name. A file under the *current* key that fails to open still aborts.
