@@ -21,10 +21,42 @@ type store struct {
 	now       func() time.Time
 	keys      map[string]entry
 	emptyFrom time.Time // when the store last became empty (or was created)
+	last      time.Time // highest wall-clock time seen, to catch the clock moving back
 }
 
+// maxClockBack is how far the wall clock may move backwards before the store
+// assumes tampering and locks everything. Small corrections (NTP) are fine.
+const maxClockBack = 3 * time.Minute
+
 func newStore(now func() time.Time) *store {
-	return &store{now: now, keys: map[string]entry{}, emptyFrom: now()}
+	st := &store{now: now, keys: map[string]entry{}}
+	st.emptyFrom = st.wall()
+	st.last = st.emptyFrom
+	return st
+}
+
+// wall reads the clock as a pure wall-clock time. Round(0) strips Go's
+// monotonic reading, which stops while the machine sleeps, so every
+// comparison uses wall time and a 4h unlock really ends after 4h.
+func (s *store) wall() time.Time { return s.now().Round(0) }
+
+// tick reads the clock under s.mu. If the wall clock moved back by more than
+// maxClockBack since the last reading, every key is destroyed (moving the
+// clock back must not extend an unlock). Callers hold s.mu.
+func (s *store) tick() time.Time {
+	now := s.wall()
+	if now.Before(s.last.Add(-maxClockBack)) {
+		for v, e := range s.keys {
+			s.drop(v, e)
+		}
+		s.last = now
+		s.emptyFrom = now
+		return now
+	}
+	if now.After(s.last) {
+		s.last = now
+	}
+	return now
 }
 
 func (s *store) destroy(e entry) {
@@ -36,13 +68,14 @@ func (s *store) destroy(e entry) {
 func (s *store) put(vault string, key *crypto.VaultKey, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.tick()
 	if old, ok := s.keys[vault]; !ok && len(s.keys) >= MaxVaults {
 		return errFull
 	} else if ok {
 		s.destroy(old)
 	}
 	lockMemory(key.Bytes()) // best effort: keep the key out of swap
-	s.keys[vault] = entry{key: key, expires: s.now().Add(ttl)}
+	s.keys[vault] = entry{key: key, expires: now.Add(ttl)}
 	return nil
 }
 
@@ -51,11 +84,12 @@ func (s *store) put(vault string, key *crypto.VaultKey, ttl time.Duration) error
 func (s *store) get(vault string) (*crypto.VaultKey, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.tick()
 	e, ok := s.keys[vault]
 	if !ok {
 		return nil, false
 	}
-	if !s.now().Before(e.expires) {
+	if !now.Before(e.expires) {
 		s.drop(vault, e)
 		return nil, false
 	}
@@ -70,7 +104,7 @@ func (s *store) drop(vault string, e entry) {
 	s.destroy(e)
 	delete(s.keys, vault)
 	if len(s.keys) == 0 {
-		s.emptyFrom = s.now()
+		s.emptyFrom = s.last
 	}
 }
 
@@ -90,7 +124,7 @@ func (s *store) wipe() {
 	for v, e := range s.keys {
 		s.drop(v, e)
 	}
-	s.emptyFrom = s.now()
+	s.emptyFrom = s.tick()
 }
 
 // reap destroys expired keys and reports how long the store has been empty
@@ -98,7 +132,7 @@ func (s *store) wipe() {
 func (s *store) reap() time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
+	now := s.tick()
 	for v, e := range s.keys {
 		if !now.Before(e.expires) {
 			s.drop(v, e)
@@ -114,7 +148,7 @@ func (s *store) reap() time.Duration {
 func (s *store) status() []VaultStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := s.now()
+	now := s.tick()
 	out := make([]VaultStatus, 0, len(s.keys))
 	for v, e := range s.keys {
 		if now.Before(e.expires) {

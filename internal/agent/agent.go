@@ -147,7 +147,8 @@ type DialOptions struct {
 	// executable with AgentArg.
 	Exe  string
 	Args []string
-	// Env is the agent process environment; default is this process's.
+	// Env is the agent process environment; default is this process's
+	// environment reduced to a small allowlist (see CleanEnv).
 	Env []string
 	// StartTimeout bounds waiting for a freshly started agent; default 3s.
 	StartTimeout time.Duration
