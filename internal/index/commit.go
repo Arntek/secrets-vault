@@ -10,7 +10,7 @@ import (
 )
 
 // maxAttempts bounds the compare-and-swap retry loop.
-const maxAttempts = 5
+const maxAttempts = 10
 
 // ErrBusy means index.json kept changing under every attempt.
 var ErrBusy = errors.New("the index kept changing while saving; run the command again")

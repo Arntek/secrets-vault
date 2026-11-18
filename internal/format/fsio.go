@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -257,6 +258,8 @@ func WriteIndex(vaultDir string, idx *Index) error {
 	return WriteFileAtomic(IndexPath(vaultDir), data, FileMode)
 }
 
+var indexCASMu sync.Mutex
+
 // ErrIndexChanged means index.json changed between reading and writing it.
 var ErrIndexChanged = errors.New("index.json changed while this command was running")
 
@@ -272,6 +275,11 @@ func WriteIndexCAS(vaultDir string, idx *Index, expect []byte) error {
 	if err := CheckVaultDirs(vaultDir); err != nil {
 		return err
 	}
+	// The check and the write are one step among writers in this process;
+	// across machines (a sync service) the compare-and-swap is best effort,
+	// like vault.json's, and conflict copies are merged by package index.
+	indexCASMu.Lock()
+	defer indexCASMu.Unlock()
 	cur, err := readRegular(IndexPath(vaultDir), MaxFileSize)
 	switch {
 	case expect == nil && errors.Is(err, fs.ErrNotExist):

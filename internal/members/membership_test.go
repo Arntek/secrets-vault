@@ -869,9 +869,15 @@ func FuzzVerify(f *testing.F) {
 	v := newVault(f, alice)
 	v.join(f, alice, bob)
 	f.Add(mustReadFile(f, format.VaultFilePath(v.dir)))
+	lv := newLegacyVault(f, alice)
+	next, _ := lv.c.UpgradeFormat(alice.un, t0)
+	if uc, err := WriteUpgrade(lv.dir, lv.c, next); err == nil {
+		f.Add(uc.Raw)
+	}
+	f.Add(lv.c.Raw)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		vf, err := format.ParseVaultFile(data)
-		if err != nil || vf.Version != format.VaultVersion {
+		if err != nil || vf.Version < format.LegacyVaultVersion {
 			return
 		}
 		c, err := Verify(vf, data, "")

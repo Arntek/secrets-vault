@@ -117,7 +117,12 @@ func Locked(dir string, legacy bool, snap *Snapshot) (*LockedView, error) {
 	for name, es := range byName {
 		sn, known := snapBy[name]
 		if known {
-			same := slices.ContainsFunc(es, func(e format.IndexEntry) bool { return e.MAC == sn.MAC && e.Rev == sn.Rev })
+			// Same MAC alone isn't enough: a relabelled entry keeps its old
+			// MAC, and the difference is exactly what to flag.
+			same := slices.ContainsFunc(es, func(e format.IndexEntry) bool {
+				return e.MAC == sn.MAC && e.Rev == sn.Rev && e.Version == sn.Version && e.Deleted == sn.Deleted &&
+					e.Description == sn.Description && e.UpdatedBy == sn.UpdatedBy && e.Updated.Equal(sn.Updated) && slices.Equal(e.Tags, sn.Tags)
+			})
 			if same {
 				if !sn.Deleted {
 					lv.Rows = append(lv.Rows, LockedRow{Entry: fromSnap(name, sn), Verified: true})

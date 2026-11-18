@@ -236,6 +236,7 @@ func FuzzParseRecordBody(f *testing.F) {
 	}
 	f.Add(body)
 	f.Add([]byte(`{"seq":0}`))
+	f.Add([]byte(`{"seq":1,"prev":"` + strings.Repeat("a", 64) + `","vault_id":"0123456789abcdef0123456789abcdef","time":"2026-11-20T10:00:00Z","op":"upgrade-format","format":3,"key_id":"fedcba9876543210fedcba9876543210","members_hash":"` + strings.Repeat("b", 64) + `","unlockers_hash":"` + strings.Repeat("c", 64) + `"}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r, err := ParseRecordBody(data)
 		if err != nil {
@@ -252,4 +253,58 @@ func FuzzParseRecordBody(f *testing.F) {
 			t.Fatalf("re-marshalled record rejected: %v", err)
 		}
 	})
+}
+
+// The vault format is part of the signed history (docs/design/index-auth.md):
+// genesis and upgrade-format records carry it, nothing else may.
+func TestRecordFormatField(t *testing.T) {
+	genesis := func(f int) *Record {
+		r := validRecord()
+		r.Seq, r.Prev, r.Op, r.Format = 0, "", OpGenesis, f
+		r.Member.Role = RoleOwner
+		return r
+	}
+	upgrade := func(f int) *Record {
+		r := validRecord()
+		r.Op, r.Member, r.Format = OpUpgradeFormat, nil, f
+		return r
+	}
+	ok := map[string]*Record{"genesis 3": genesis(3), "genesis legacy": genesis(0), "upgrade 3": upgrade(3)}
+	for name, r := range ok {
+		body, err := MarshalRecordBody(r)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if back, err := ParseRecordBody(body); err != nil || back.Format != r.Format {
+			t.Errorf("%s: round trip %v", name, err)
+		}
+	}
+	rotate := validRecord()
+	rotate.Op, rotate.Member, rotate.Passphrase, rotate.Format = OpRotate, nil, PassDropped, 3
+	bad := map[string]*Record{
+		"genesis 2":        genesis(2),
+		"genesis 4":        genesis(4),
+		"upgrade 0":        upgrade(0),
+		"upgrade 2":        upgrade(2),
+		"upgrade 4":        upgrade(4),
+		"format on rotate": rotate,
+	}
+	addFmt := validRecord()
+	addFmt.Format = 3
+	bad["format on add-member"] = addFmt
+	withMember := upgrade(3)
+	withMember.Member = &Member{Name: "dan", Recipient: testRecipB, SignKey: testSignB, Role: RoleMember}
+	bad["upgrade naming a member"] = withMember
+	for name, r := range bad {
+		if _, err := MarshalRecordBody(r); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	// A record from a build before this field has no "format" and is read
+	// as before; the upgrade op is unknown to such builds by design.
+	body, _ := MarshalRecordBody(validRecord())
+	if bytes.Contains(body, []byte(`"format"`)) {
+		t.Fatal("format written when unset")
+	}
 }
