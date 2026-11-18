@@ -37,7 +37,7 @@ type Conflict struct {
 
 // Patterns sync services use for conflict copies:
 //
-//	Dropbox:   NAME (Dan's conflicted copy 2026-11-20).ext, NAME (conflicted copy).ext
+//	Dropbox:   NAME (Bob's conflicted copy 2026-11-20).ext, NAME (conflicted copy).ext
 //	Box Drive: NAME (Dan Smith's conflicted copy).ext, NAME (1).ext
 //	Syncthing: NAME.sync-conflict-20261120-101500-ABCDEFG.ext
 //	OneDrive:  NAME-HOSTNAME.ext (not detectable by name; caught as unknown in secrets/)
