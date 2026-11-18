@@ -45,7 +45,7 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 	ok(owner, personal+"\n"+passB+"\n", "init", "two", "--path", dirB, "--passphrase-stdin")
 	ok(owner, "", "lock", "--all")
 	run(owner, wrong+"\n"+wrong+"\n", "unlock", "one", "--passphrase-stdin") // wrong passphrases
-	ok(owner, wrong+"\n"+passA+"\n", "unlock", "one", "--passphrase-stdin")   // identity fails, vault passphrase works
+	ok(owner, wrong+"\n"+passA+"\n", "unlock", "one", "--passphrase-stdin")  // identity fails, vault passphrase works
 	ok(owner, personal+"\n", "unlock", "two", "--passphrase-stdin")
 	ok(owner, vals[0], "set", "EXAMPLE_KEY_ONE", "--desc", "first", "--vault", "one")
 	ok(owner, vals[1], "set", "EXAMPLE_KEY_TWO", "--vault", "one")

@@ -555,3 +555,54 @@ func copyTree(t *testing.T, src, dst string) {
 		t.Fatal(err)
 	}
 }
+
+// Attacker 6 / ue1.4 through the CLI: a planted staging folder is never
+// moved over real secrets: not by read-only commands, and not by a write
+// unless every staged file opens under the verified key.
+func TestPlantedStagingNeverOverwrites(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("API_KEY", "", "real")
+	e.mustRunIn(testPass+"\nrotated passphrase\n", "passwd", "main", "--passphrase-stdin")
+	vf, _ := format.ReadVaultFile(dir)
+	before, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age"))
+	stage := filepath.Join(dir, "secrets", ".sv-rotate-"+vf.KeyID)
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(stage, "API_KEY.age"), []byte("attacker junk"), 0o600)
+	_ = os.WriteFile(filepath.Join(stage, "MANIFEST"), []byte("secrets-vault rotation v1\nkey "+vf.KeyID+"\nAPI_KEY.age\n"), 0o600)
+
+	e.mustRun("info", "API_KEY")
+	e.mustRun("get", "API_KEY")
+	e.mustRun("list")
+	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age")); string(after) != string(before) {
+		t.Fatal("a read-only command moved staged files")
+	}
+	expectCode(t, e.runIn("new", "set", "OTHER"), ExitError)
+	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age")); string(after) != string(before) {
+		t.Fatal("a write moved a staged file that does not open under the key")
+	}
+	// A staging folder for a key the chain never had blocks writes.
+	_ = os.RemoveAll(stage)
+	_ = os.MkdirAll(filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab"), 0o700)
+	r := e.runIn("new", "set", "OTHER")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "newer state") {
+		t.Fatalf("%s", r)
+	}
+	// A symlinked secrets folder is refused.
+	_ = os.RemoveAll(filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab"))
+	elsewhere := t.TempDir()
+	_ = os.Rename(filepath.Join(dir, "secrets"), filepath.Join(elsewhere, "real"))
+	if err := os.Symlink(filepath.Join(elsewhere, "real"), filepath.Join(dir, "secrets")); err != nil {
+		t.Fatal(err)
+	}
+	r = e.runIn("new", "set", "OTHER")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "symlink") {
+		t.Fatalf("%s", r)
+	}
+}
