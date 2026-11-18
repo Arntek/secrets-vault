@@ -42,6 +42,17 @@ Status: stub from the scaffold. The security review (issue ue1) completes it bef
 | Malicious or vulnerable dependency | Minimal dependencies; govulncheck and Dependabot; pinned CI actions | CI |
 | Tampered release binary | Checksums, SBOM and build provenance on releases | release pipeline (9vt) |
 
+## Accepted risks (ue1 security review)
+
+Known and accepted for Phase 1. The membership design in [design/membership-auth.md](design/membership-auth.md) (issues ue1.1, ue1.2, ue1.4, ue1.6) narrows the last one; the others stand.
+
+- **Same-user processes.** Any process running as you can ask the agent for an unlocked key and read your processes' environment and memory. The unlock window and `touch-every-read` limit this; nothing prevents it.
+- **Unauthenticated index.** Names, descriptions and tags in `index.json` can be edited by any folder writer: relabelling a key so an agent picks the wrong one, or planting a junk `NAME.age` so a name is ambiguous across vaults (exit 2, a denial of service only). Values are never affected. Tracked as a separate issue.
+- **Fingerprint approval.** Fingerprints carry about 46 bits behind scrypt (2^14); a second preimage costs about 2^46 scrypt runs (hundreds of GPU-years). Approval is a y/N against the displayed value, and `--fingerprint` lets an agent approve without a person comparing; unlocking the vault is the only human gate.
+- **`get` when piped.** Values are printed in plain text when stdout is not a terminal, because agents capture it. A guardrail, not a wall.
+- **Single-file rollback.** A folder writer can replace one `secrets/NAME.age` with an older copy sealed under the current key. A rotation re-encrypts everything, so this never crosses a member removal. Tracked with the index issue.
+- **Offline members and rollback.** A member who hasn't opened the vault since a removal can't tell that a removed member (who kept folder access) restored the pre-removal folder, so may save new secrets under the old key. Mitigations: `member rm` requires removing the person's folder access; machines that saw the removal refuse the rollback outright; a secret sealed under an unknown newer key trips a warning. There is no complete fix without an out-of-band signal or a server.
+
 ## Open questions for the review
 
 - Memory hygiene in Go: how far can we go in zeroing keys and keeping them out of swap and core dumps?
