@@ -77,19 +77,21 @@ var passphraseLogN = 0
 
 // app is one invocation of the program.
 type app struct {
-	prog     string
-	in       *bufio.Reader
-	rawStdin io.Reader
-	out      io.Writer
-	errOut   io.Writer
-	term     terminal
-	touch    touchBackend
-	audit    audit.Logger
-	now      func() time.Time
-	getenv   func(string) string
-	environ  func() []string
-	clip     clipboard
-	exePath  func() (string, error)
+	// quarantined lists secret files a rotation moved aside (--json).
+	quarantined []string
+	prog        string
+	in          *bufio.Reader
+	rawStdin    io.Reader
+	out         io.Writer
+	errOut      io.Writer
+	term        terminal
+	touch       touchBackend
+	audit       audit.Logger
+	now         func() time.Time
+	getenv      func(string) string
+	environ     func() []string
+	clip        clipboard
+	exePath     func() (string, error)
 
 	asJSON    bool
 	passStdin bool
@@ -197,6 +199,9 @@ func (a *app) infof(format string, args ...any) { fmt.Fprintf(a.errOut, format+"
 type exitErr struct {
 	code int
 	msg  string
+	// indexDamaged marks a refusal because a vault's index is missing or
+	// damaged: `set` can still write a new key then (it is the repair).
+	indexDamaged bool
 }
 
 func (e *exitErr) Error() string { return e.msg }

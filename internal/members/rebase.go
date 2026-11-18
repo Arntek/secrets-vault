@@ -36,8 +36,10 @@ type RebaseResult struct {
 // machine's keys from lost rotations: files sealed under them are re-sealed
 // to the key of the re-applied rotation, never to the winner's key (N1). If
 // no lost op rotates any more but such files exist, a plain rotation is
-// made for them.
-func Rebase(vaultDir string, c *Chain, key *crypto.VaultKey, signer *Unlocked, lost []*format.Record, pending []*crypto.VaultKey, ask AskPassphrase, store *PendingStore, now time.Time) (*RebaseResult, error) {
+// made for them. trusted are this machine's own verified index entries (its
+// local snapshot) for those files; nothing read from the folder's index under
+// a retired key is ever carried over (IM2).
+func Rebase(vaultDir string, c *Chain, key *crypto.VaultKey, signer *Unlocked, lost []*format.Record, pending []*crypto.VaultKey, trusted []format.IndexEntry, ask AskPassphrase, store *PendingStore, now time.Time) (*RebaseResult, error) {
 	res := &RebaseResult{Chain: c, Key: key}
 	extra := pending
 	advance := func(nc *Chain, nk *crypto.VaultKey) {
@@ -49,7 +51,7 @@ func Rebase(vaultDir string, c *Chain, key *crypto.VaultKey, signer *Unlocked, l
 		res.Written = append(res.Written, nc.LastEntry())
 	}
 	askFor := func(policy string) (RotateOptions, error) {
-		opt := RotateOptions{Passphrase: policy, ExtraKeys: extra, Pending: store, Now: now}
+		opt := RotateOptions{Passphrase: policy, ExtraKeys: extra, Pending: store, TrustedEntries: trusted, Now: now}
 		if policy == format.PassDropped {
 			return opt, nil
 		}

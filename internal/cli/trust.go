@@ -47,7 +47,12 @@ func (a *app) loadVault(v *vaultRef) (*members.Chain, *format.VaultFile, error) 
 	case errors.Is(err, format.ErrUnsupportedVersion):
 		return nil, nil, failf("vault '%s' was saved by a newer secrets-vault. Upgrade to open it: brew upgrade secrets-vault (Homebrew) or npm update -g secrets-vault (npm)", v.name)
 	case errors.Is(err, format.ErrUnsafeDir):
-		return nil, nil, verifyErrf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it", v.name)
+		return nil, nil, verifyErrf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it. Nothing is read or written (not even by key changes) until it is fixed: replace the link with the real folder, or restore it from the provider's version history", v.name)
+	case errors.Is(err, format.ErrMalformed), errors.Is(err, format.ErrTooLarge):
+		// A vault.json that exists but doesn't parse is as much "the folder
+		// was tampered with" as a bad signature (ue1.12): exit 5, with the
+		// innocent explanation (a half-synced file) named too.
+		return nil, nil, verifyErrf("vault '%s': vault.json is damaged or was altered (%v). If a sync is still running, wait and try again; otherwise restore it from the provider's version history. Nothing was read or written", v.name, pathless(err))
 	}
 	return nil, nil, failf("cannot open vault '%s': %v", v.name, vaultErr(err))
 }
@@ -263,7 +268,11 @@ func (a *app) afterWrite(v *vaultRef, c *members.Chain, written ...format.LogEnt
 // signed by alice".
 func headLine(c *members.Chain) string {
 	h := c.Head()
-	return fmt.Sprintf("%s@%d, %s, signed by %s", c.File.Name, h.Seq, h.Time.Local().Format("2006-01-02 15:04"), h.By)
+	s := fmt.Sprintf("%s@%d, %s, signed by %s", c.File.Name, h.Seq, h.Time.Local().Format("2006-01-02 15:04"), h.By)
+	if h.Format == format.LegacyVaultVersion {
+		s += ", format 2 (not upgraded)" // so a state-code comparison catches a cut-off chain
+	}
+	return s
 }
 
 // printMembers lists the head's members with fingerprints on stderr.
@@ -399,7 +408,10 @@ func (a *app) repairLostRace(v *vaultRef, key *crypto.VaultKey) (*crypto.VaultKe
 		defer clear(p)
 		return a.passphraseWrapper(p)
 	}
-	res, err := members.Rebase(v.dir, v.chain, key, un, v.class.Lost, pending, ask, ps, a.now())
+	if err := a.setAsideConflicts(v, key); err != nil {
+		return nil, err
+	}
+	res, err := members.Rebase(v.dir, v.chain, key, un, v.class.Lost, pending, a.trustedEntries(v), ask, ps, a.now())
 	if res != nil && len(res.Written) > 0 {
 		if serr := a.afterWrite(v, res.Chain, res.Written...); serr != nil && err == nil {
 			err = serr
@@ -430,6 +442,9 @@ func (a *app) repairLostRace(v *vaultRef, key *crypto.VaultKey) (*crypto.VaultKe
 // finish a verified interrupted rotation, then the write guard.
 func (a *app) prepareWrite(v *vaultRef, key *crypto.VaultKey) error {
 	c := v.chain
+	if legacyChain(c) && !v.allowLegacy {
+		return failf("vault '%s' uses the older format and must be upgraded before it can be changed. Run: %s upgrade %s (%s)", v.name, a.prog, v.name, upgradeHint)
+	}
 	if _, rotation, ok := c.KeyIntroducedAt(c.Head().KeyID); ok && rotation {
 		if _, err := crypto.RecoverRotation(v.dir, key); err != nil {
 			return failf("vault '%s' has an unfinished key rotation that could not be completed: %v. "+

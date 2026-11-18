@@ -107,6 +107,15 @@ func (s *Staging) AddTrashed(t TrashedSecret, ciphertext []byte) error {
 	return s.add(TrashDir+"/"+t.File, ciphertext)
 }
 
+// AddIndex stages the new index.json. It is moved to the vault root, not
+// into secrets/, when the rotation is committed.
+func (s *Staging) AddIndex(data []byte) error {
+	if len(data) > MaxFileSize {
+		return ErrTooLarge
+	}
+	return s.add(IndexFileName, data)
+}
+
 // Finish writes the MANIFEST. After it, writing vault.json commits.
 func (s *Staging) Finish() error {
 	var b strings.Builder
@@ -166,8 +175,12 @@ func ParseManifest(data []byte, keyID string) ([]string, error) {
 	return files, nil
 }
 
-// validateManifestEntry allows "NAME.age" and ".trash/<trash file name>".
+// validateManifestEntry allows "NAME.age", ".trash/<trash file name>" and
+// "index.json".
 func validateManifestEntry(rel string) error {
+	if rel == IndexFileName {
+		return nil
+	}
 	if t, ok := strings.CutPrefix(rel, TrashDir+"/"); ok {
 		_, err := ParseTrashName(t)
 		return err
@@ -243,6 +256,9 @@ func CommitStaged(vaultDir, keyID string) error {
 	for _, f := range files {
 		src := filepath.Join(dir, filepath.FromSlash(f))
 		dst := filepath.Join(SecretsPath(vaultDir), filepath.FromSlash(f))
+		if f == IndexFileName {
+			dst = IndexPath(vaultDir)
+		}
 		if path.Dir(f) == TrashDir {
 			if err := os.MkdirAll(TrashPath(vaultDir), DirMode); err != nil {
 				return err
@@ -266,7 +282,7 @@ type StagedFile struct {
 	// Rel is the path inside the staging folder ("NAME.age" or
 	// ".trash/<trash file>").
 	Rel string
-	// Name is the key name the file belongs to.
+	// Name is the key name the file belongs to (empty for index.json).
 	Name string
 }
 
@@ -295,6 +311,10 @@ func StagedFiles(vaultDir, keyID string) ([]StagedFile, error) {
 	}
 	out := make([]StagedFile, 0, len(rels))
 	for _, rel := range rels {
+		if rel == IndexFileName {
+			out = append(out, StagedFile{Rel: rel})
+			continue
+		}
 		if t, ok := strings.CutPrefix(rel, TrashDir+"/"); ok {
 			ts, err := ParseTrashName(t)
 			if err != nil {
@@ -317,13 +337,21 @@ func ReadStagedFile(vaultDir, keyID, rel string) ([]byte, error) {
 	if err := validateManifestEntry(rel); err != nil {
 		return nil, err
 	}
-	return readRegular(filepath.Join(stagingDir(vaultDir, keyID), filepath.FromSlash(rel)), MaxSecretFileSize)
+	limit := int64(MaxSecretFileSize)
+	if rel == IndexFileName {
+		limit = MaxFileSize
+	}
+	return readRegular(filepath.Join(stagingDir(vaultDir, keyID), filepath.FromSlash(rel)), limit)
 }
 
 // QuarantineDir is where `vault doctor --quarantine-staging` moves rotation
 // staging folders it can't use: at the vault root, outside secrets/, so the
 // write guard no longer sees them. Nothing is deleted.
 const QuarantineDir = "quarantine"
+
+// ConflictsDir is where sync-conflict copies and other unexpected entries
+// are set aside inside QuarantineDir.
+const ConflictsDir = "conflicts"
 
 // QuarantineStaging moves secrets/.sv-rotate-<keyID>/ to
 // quarantine/sv-rotate-<keyID>-<UTC time>/ and returns the new path
@@ -353,4 +381,197 @@ func QuarantineStaging(vaultDir, keyID string, now time.Time) (string, error) {
 		return "", err
 	}
 	return path.Join(QuarantineDir, name), nil
+}
+
+// QuarantineSecret moves secrets/NAME.age to
+// quarantine/secrets/NAME.<UTC time>.age and returns the new path relative
+// to the vault folder. Nothing is deleted. A rotation uses it for files it
+// cannot re-seal (sealed under a retired key), so they stop being reported
+// on every write.
+func QuarantineSecret(vaultDir, name string, now time.Time) (string, error) {
+	src, err := SecretPath(vaultDir, name)
+	if err != nil {
+		return "", err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return "", err
+	}
+	if fi, err := os.Lstat(src); err != nil {
+		return "", err
+	} else if !fi.Mode().IsRegular() {
+		return "", ErrNotRegular
+	}
+	q := filepath.Join(vaultDir, QuarantineDir)
+	if err := checkDir(q, true); err != nil {
+		return "", err
+	}
+	// Both levels must be real directories of ours before and after they
+	// are made: a folder writer can plant a symlink at quarantine/ or
+	// quarantine/secrets to send the file anywhere.
+	qs := filepath.Join(q, SecretsDir)
+	if err := checkDir(qs, true); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(qs, DirMode); err != nil {
+		return "", err
+	}
+	if err := checkDir(q, false); err != nil {
+		return "", err
+	}
+	if err := checkDir(qs, false); err != nil {
+		return "", err
+	}
+	file := name + "." + now.UTC().Format("20060102T150405.000000000Z") + SecretExt
+	if err := os.Rename(src, filepath.Join(qs, file)); err != nil {
+		return "", err
+	}
+	if err := syncDir(SecretsPath(vaultDir)); err != nil {
+		return "", err
+	}
+	return path.Join(QuarantineDir, SecretsDir, file), nil
+}
+
+// QuarantineConflict sets aside one entry FindConflicts reported (rel, with
+// "/" separators, in the vault root or secrets/) by renaming it to
+// quarantine/conflicts/. It reads nothing and follows nothing, so a
+// directory, symlink or FIFO is moved as it is; the destination name is
+// built from a sanitised form of the original, never the original path.
+// Nothing is deleted.
+func QuarantineConflict(vaultDir, rel string, now time.Time) (string, error) {
+	if rel == "" || strings.Contains(rel, `\`) || strings.HasPrefix(rel, "/") {
+		return "", fmt.Errorf("%w: bad path", ErrMalformed)
+	}
+	parts := strings.Split(rel, "/")
+	okShape := len(parts) == 1 ||
+		(len(parts) == 2 && parts[0] == SecretsDir) ||
+		(len(parts) == 3 && parts[0] == SecretsDir && parts[1] == TrashDir)
+	if !okShape {
+		return "", fmt.Errorf("%w: not in the vault root, secrets/ or the trash", ErrMalformed)
+	}
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return "", fmt.Errorf("%w: bad path", ErrMalformed)
+		}
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return "", err
+	}
+	src := filepath.Join(vaultDir, filepath.FromSlash(rel))
+	if _, err := os.Lstat(src); err != nil {
+		return "", err
+	}
+	q := filepath.Join(vaultDir, QuarantineDir)
+	qc := filepath.Join(q, ConflictsDir)
+	if err := checkDir(qc, true); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(qc, DirMode); err != nil {
+		return "", err
+	}
+	if err := checkDir(q, false); err != nil {
+		return "", err
+	}
+	if err := checkDir(qc, false); err != nil {
+		return "", err
+	}
+	clean := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '-', r == '_':
+			return r
+		}
+		return '_'
+	}, strings.Join(parts, "__"))
+	if len(clean) > 100 {
+		clean = clean[:100]
+	}
+	dst := filepath.Join(qc, clean+"."+now.UTC().Format("20060102T150405.000000000Z"))
+	if err := os.Rename(src, dst); err != nil {
+		return "", err
+	}
+	if err := syncDir(SecretsPath(vaultDir)); err != nil {
+		return "", err
+	}
+	return path.Join(QuarantineDir, ConflictsDir, filepath.Base(dst)), nil
+}
+
+// ReadSecretCopy reads a sync-conflict copy of a secret file (rel from
+// FindConflicts, "secrets/<name>"): a regular file, never a link.
+func ReadSecretCopy(vaultDir, rel string) ([]byte, error) {
+	name, ok := strings.CutPrefix(rel, SecretsDir+"/")
+	if !ok || strings.Contains(name, "/") || strings.Contains(name, `\`) || name == "" || name == "." || name == ".." {
+		return nil, fmt.Errorf("%w: not a file in secrets/", ErrMalformed)
+	}
+	return readRegular(filepath.Join(SecretsPath(vaultDir), name), MaxSecretFileSize)
+}
+
+// SetAsideBadDirs renames aside, to quarantine-bad-<name>-<UTC time> in the
+// vault folder, any of the vault's own sub-folders (the trash, requests/,
+// quarantine/ and its sub-folders, rotation staging folders) that is a
+// symlink, not a directory or owned by someone else. The entry itself is
+// renamed (rename(2) does not follow it) and nothing is read or deleted. A
+// bad folder can't be written through, but a folder writer can plant one;
+// this keeps that from blocking a key rotation (ue1.15). It returns what it
+// moved and, separately, what it could not move.
+func SetAsideBadDirs(vaultDir string, now time.Time) (moved, failed []string) {
+	if err := checkDir(vaultDir, false); err != nil {
+		return nil, nil // the vault folder itself is the user's own registry path
+	}
+	rels := []string{
+		filepath.Join(SecretsDir, TrashDir), RequestsDir,
+		QuarantineDir, filepath.Join(QuarantineDir, SecretsDir), filepath.Join(QuarantineDir, ConflictsDir),
+	}
+	if entries, err := os.ReadDir(SecretsPath(vaultDir)); err == nil {
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), stagingPrefix) {
+				rels = append(rels, filepath.Join(SecretsDir, e.Name()))
+			}
+		}
+	}
+	stamp := now.UTC().Format("20060102T150405.000000000Z")
+	for _, rel := range rels {
+		p := filepath.Join(vaultDir, rel)
+		if _, err := os.Lstat(p); err != nil {
+			continue
+		}
+		if err := checkDir(p, true); err == nil {
+			continue
+		}
+		name := strings.Map(func(r rune) rune {
+			if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+				return r
+			}
+			return '_'
+		}, filepath.ToSlash(rel))
+		if len(name) > 80 {
+			name = name[:80]
+		}
+		dst := filepath.Join(vaultDir, "quarantine-bad-"+name+"-"+stamp)
+		if err := os.Rename(p, dst); err != nil {
+			failed = append(failed, filepath.ToSlash(rel))
+			continue
+		}
+		moved = append(moved, filepath.ToSlash(rel))
+	}
+	return moved, failed
+}
+
+// UnexpectedTrashEntries lists entries of secrets/.trash that are not
+// regular files with a trash file name (paths relative to the vault folder,
+// "/" separators), by Lstat only.
+func UnexpectedTrashEntries(vaultDir string) []string {
+	entries, err := os.ReadDir(TrashPath(vaultDir))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if isIgnorableHidden(e.Name()) {
+			continue
+		}
+		if _, perr := ParseTrashName(e.Name()); perr == nil && e.Type().IsRegular() {
+			continue
+		}
+		out = append(out, path.Join(SecretsDir, TrashDir, e.Name()))
+	}
+	return out
 }

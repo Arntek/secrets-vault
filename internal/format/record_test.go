@@ -236,6 +236,7 @@ func FuzzParseRecordBody(f *testing.F) {
 	}
 	f.Add(body)
 	f.Add([]byte(`{"seq":0}`))
+	f.Add([]byte(`{"seq":1,"prev":"` + strings.Repeat("a", 64) + `","vault_id":"0123456789abcdef0123456789abcdef","time":"2026-11-20T10:00:00Z","op":"upgrade-format","format":3,"key_id":"fedcba9876543210fedcba9876543210","members_hash":"` + strings.Repeat("b", 64) + `","unlockers_hash":"` + strings.Repeat("c", 64) + `"}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		r, err := ParseRecordBody(data)
 		if err != nil {
@@ -252,4 +253,110 @@ func FuzzParseRecordBody(f *testing.F) {
 			t.Fatalf("re-marshalled record rejected: %v", err)
 		}
 	})
+}
+
+// The vault format is part of the signed history (docs/design/index-auth.md):
+// genesis and upgrade-format records carry it, nothing else may.
+func TestRecordFormatField(t *testing.T) {
+	genesis := func(f int) *Record {
+		r := validRecord()
+		r.Seq, r.Prev, r.Op, r.Format = 0, "", OpGenesis, f
+		r.Member.Role = RoleOwner
+		return r
+	}
+	upgrade := func(f int) *Record {
+		r := validRecord()
+		r.Op, r.Member, r.Format = OpUpgradeFormat, nil, f
+		return r
+	}
+	ok := map[string]*Record{"genesis 3": genesis(3), "genesis legacy": genesis(0), "upgrade 3": upgrade(3)}
+	for name, r := range ok {
+		body, err := MarshalRecordBody(r)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if back, err := ParseRecordBody(body); err != nil || back.Format != r.Format {
+			t.Errorf("%s: round trip %v", name, err)
+		}
+	}
+	rotate := validRecord()
+	rotate.Op, rotate.Member, rotate.Passphrase, rotate.Format = OpRotate, nil, PassDropped, 3
+	bad := map[string]*Record{
+		"genesis 2":        genesis(2),
+		"genesis 4":        genesis(4),
+		"upgrade 0":        upgrade(0),
+		"upgrade 2":        upgrade(2),
+		"upgrade 4":        upgrade(4),
+		"format on rotate": rotate,
+	}
+	addFmt := validRecord()
+	addFmt.Format = 3
+	bad["format on add-member"] = addFmt
+	withMember := upgrade(3)
+	withMember.Member = &Member{Name: "dan", Recipient: testRecipB, SignKey: testSignB, Role: RoleMember}
+	bad["upgrade naming a member"] = withMember
+	for name, r := range bad {
+		if _, err := MarshalRecordBody(r); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	// A record from a build before this field has no "format" and is read
+	// as before; the upgrade op is unknown to such builds by design.
+	body, _ := MarshalRecordBody(validRecord())
+	if bytes.Contains(body, []byte(`"format"`)) {
+		t.Fatal("format written when unset")
+	}
+}
+
+func TestQuarantineSecretMovesNeverDeletes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "secrets"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSecretFile(dir, "STALE", []byte("old bytes")); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := QuarantineSecret(dir, "STALE", testTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel))); err != nil || string(got) != "old bytes" {
+		t.Fatalf("quarantined file: %q %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets", "STALE.age")); err == nil {
+		t.Fatal("still in secrets/")
+	}
+	if _, err := QuarantineSecret(dir, "STALE", testTime); err == nil {
+		t.Fatal("quarantined a file that is gone")
+	}
+	if _, err := QuarantineSecret(dir, "../x", testTime); err == nil {
+		t.Fatal("accepted a bad name")
+	}
+}
+
+func TestQuarantineSecretRefusesSymlinkedDirs(t *testing.T) {
+	for _, level := range []string{"quarantine", "quarantine/secrets"} {
+		dir, elsewhere := t.TempDir(), t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, "secrets"), 0o700)
+		if err := WriteSecretFile(dir, "STALE", []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, filepath.FromSlash(level))
+		if level == "quarantine/secrets" {
+			_ = os.MkdirAll(filepath.Join(dir, "quarantine"), 0o700)
+		}
+		if err := os.Symlink(elsewhere, link); err != nil {
+			t.Skip("symlinks unavailable")
+		}
+		if _, err := QuarantineSecret(dir, "STALE", testTime); err == nil {
+			t.Fatalf("%s: moved through a symlink", level)
+		}
+		if m, _ := filepath.Glob(filepath.Join(elsewhere, "*")); len(m) != 0 {
+			t.Fatalf("%s: wrote outside the vault: %v", level, m)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "secrets", "STALE.age")); err != nil {
+			t.Fatalf("%s: the file left secrets/ although the move was refused", level)
+		}
+	}
 }

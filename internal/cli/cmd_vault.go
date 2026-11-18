@@ -187,7 +187,7 @@ func cmdAttach(a *app, p *parsed) error {
 	}
 	res["member"] = member
 	if member || p.has("no-request") {
-		if vf.Version == format.VaultVersion {
+		if vf.Version >= format.LegacyVaultVersion {
 			// Verify it and pin it now (trust on first use, with the checks
 			// of design section 7).
 			if _, err := a.open(ref); err != nil {
@@ -200,7 +200,7 @@ func cmdAttach(a *app, p *parsed) error {
 		a.printf("Registered '%s' (%d keys)\n", name, len(idx.Entries))
 		return nil
 	}
-	if vf.Version != format.VaultVersion {
+	if vf.Version < format.LegacyVaultVersion {
 		return failf("registered '%s', but it was made by a pre-release version: ask its owner to open it once, then attach again", name)
 	}
 
@@ -273,6 +273,10 @@ func cmdDetach(a *app, p *parsed) error {
 	// keys of unconfirmed rotations go (S3).
 	if ps, err := a.pendingStore(); err == nil && id != "" {
 		_ = ps.DeleteAll(id)
+	}
+	// What this machine verified of the index goes with the registration.
+	if st, err := a.indexStore(); err == nil && id != "" {
+		_ = st.Delete(id)
 	}
 	delete(cfg.Vaults, v.name)
 	if cfg.DefaultVault == v.name {
@@ -373,6 +377,7 @@ func cmdPasswd(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	a.setAsideBadFolders(v)
 	vf, err := a.open(v)
 	if err != nil {
 		return err
@@ -404,7 +409,13 @@ func cmdPasswd(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now()})
+	var skipped []string
+	dropped := 0
+	if err := a.setAsideConflicts(v, key); err != nil {
+		return err
+	}
+	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now(), TrustedEntries: a.trustedEntries(v), SkippedFiles: &skipped, IndexDropped: &dropped})
+	a.noteRotation(v, &skipped, &dropped)
 	if res != nil && res.NewKey != nil {
 		a.switchKey(v, res.NewKey)
 	}
@@ -418,7 +429,7 @@ func cmdPasswd(a *app, p *parsed) error {
 	}
 	code := members.StateCode(v.chain, v.chain.Head().Seq)
 	if a.asJSON {
-		return a.printJSON(map[string]any{"vault": v.name, "changed": true, "rotated": rotate, "state_code": code})
+		return a.printJSON(map[string]any{"vault": v.name, "changed": true, "rotated": rotate, "state_code": code, "quarantined": a.quarantinedList()})
 	}
 	if rotate {
 		a.printf("Passphrase changed for '%s', and the vault key replaced: the old passphrase opens nothing new.\n", v.name)
@@ -431,6 +442,9 @@ func cmdPasswd(a *app, p *parsed) error {
 
 // switchKey hands a rotated key to the agent.
 func (a *app) switchKey(v *vaultRef, k *crypto.VaultKey) {
+	// The rotation re-sealed the index under the new key: verify it and
+	// refresh this machine's record of it.
+	_, _ = a.openIndex(v, k)
 	if cl := a.client(true); cl != nil {
 		if dup, err := crypto.VaultKeyFromBytes(k.Bytes()); err == nil {
 			_ = cl.Unlock(v.chain.File.ID, dup, a.ttlFor(v))

@@ -695,7 +695,7 @@ func TestRebaseLostRemoval(t *testing.T) {
 	if err != nil || len(keys) != 1 || keys[0].ID() != k3.ID() {
 		t.Fatalf("pending keys: %v %v", keys, err)
 	}
-	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, keys, nil, pending, t0)
+	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, keys, nil, nil, pending, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,9 +869,15 @@ func FuzzVerify(f *testing.F) {
 	v := newVault(f, alice)
 	v.join(f, alice, bob)
 	f.Add(mustReadFile(f, format.VaultFilePath(v.dir)))
+	lv := newLegacyVault(f, alice)
+	next, _ := lv.c.UpgradeFormat(alice.un, t0)
+	if uc, err := WriteUpgrade(lv.dir, lv.c, next); err == nil {
+		f.Add(uc.Raw)
+	}
+	f.Add(lv.c.Raw)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		vf, err := format.ParseVaultFile(data)
-		if err != nil || vf.Version != format.VaultVersion {
+		if err != nil || vf.Version < format.LegacyVaultVersion {
 			return
 		}
 		c, err := Verify(vf, data, "")
@@ -945,7 +951,7 @@ func TestClassifyOwnerOnlyHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, []*crypto.VaultKey{ar.NewKey}, nil, nil, t0)
+	rb, err := Rebase(v.dir, winner, wk, alice.un, cl.Lost, []*crypto.VaultKey{ar.NewKey}, nil, nil, nil, t0)
 	if err != nil {
 		t.Fatal(err)
 	}

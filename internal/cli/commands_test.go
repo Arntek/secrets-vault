@@ -333,9 +333,12 @@ func TestSearchInfoDescribeTag(t *testing.T) {
 	}
 	expectCode(t, e.run("tag", "XERO_CLIENT_SECRET", "Bad Tag"), ExitUsage)
 	expectCode(t, e.run("info", "NO_SUCH_KEY"), ExitNotFound)
-	// describe and tag work while the vault is locked.
+	// An index entry is sealed with the vault key, so describe and tag need
+	// the vault unlocked (they used to work locked, on an unsigned index).
 	e.mustRun("lock", "--all")
-	e.mustRun("describe", "SENDGRID_API_KEY", "now locked")
+	expectCode(t, e.run("describe", "SENDGRID_API_KEY", "now locked"), ExitLocked)
+	e.unlock("main")
+	e.mustRun("describe", "SENDGRID_API_KEY", "now unlocked")
 }
 
 func TestListWorksWithoutAnyVaultAndDamagedIndex(t *testing.T) {
@@ -351,13 +354,15 @@ func TestListWorksWithoutAnyVaultAndDamagedIndex(t *testing.T) {
 	dir := e.initVault("main")
 	e.unlock("main")
 	e.set("EXAMPLE_API_KEY", "", "x")
-	// A deleted index is rebuilt from secrets/ (descriptions are lost).
+	// A deleted index: the machine's own record of what it verified still
+	// lists the key (flagged as changed in the folder), and reading works
+	// because that record vouches for the file (IM1).
 	if err := os.Remove(filepath.Join(dir, "index.json")); err != nil {
 		t.Fatal(err)
 	}
 	rows := decodeJSON[[]keyRow](t, e.mustRun("list", "--json").out)
-	if len(rows) != 1 || rows[0].Name != "EXAMPLE_API_KEY" {
-		t.Fatalf("rebuilt index: %+v", rows)
+	if len(rows) != 1 || rows[0].Name != "EXAMPLE_API_KEY" || !rows[0].Verified || rows[0].IndexState != "pending-changes" {
+		t.Fatalf("damaged index: %+v", rows)
 	}
 }
 

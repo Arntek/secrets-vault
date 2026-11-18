@@ -16,6 +16,7 @@ import (
 	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
+	"github.com/Arntek/secrets-vault/internal/index"
 	"github.com/Arntek/secrets-vault/internal/members"
 )
 
@@ -29,6 +30,13 @@ type keyRow struct {
 	Updated     string   `json:"updated"`
 	UpdatedBy   string   `json:"updated_by,omitempty"`
 	Locked      bool     `json:"locked"`
+	// Verified is true when the row is what this machine last verified
+	// with the vault key; false for a name only the folder claims (the
+	// index can't be checked without unlocking). PendingChange: the folder
+	// holds a different entry than the verified one shown.
+	Verified      bool   `json:"verified"`
+	PendingChange bool   `json:"pending_change,omitempty"`
+	IndexState    string `json:"index_state"`
 }
 
 // vaultError is a vault that could not be listed, in --json output.
@@ -38,9 +46,10 @@ type vaultError struct {
 }
 
 type vaultSummary struct {
-	Name     string `json:"name"`
-	Keys     int    `json:"keys"`
-	Unlocked bool   `json:"unlocked"`
+	Name       string `json:"name"`
+	Keys       int    `json:"keys"`
+	Unlocked   bool   `json:"unlocked"`
+	IndexState string `json:"index_state"`
 }
 
 // collectKeys reads every registered vault's index (no unlock needed).
@@ -69,9 +78,10 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		// Verified (no prompts, no writes), so a tampered or substituted
-		// vault is reported, never silently left out (ue1.10).
-		_, vf, err := a.loadVault(v)
+		// Verified and classified against this machine's pin (no prompts, no
+		// writes), so a tampered, substituted or quarantined vault is
+		// reported, never silently answered from (ue1.10, ue1.12).
+		c, vf, err := a.openQuiet(v)
 		if err != nil && !errors.Is(err, members.ErrOldFormat) {
 			msg := err.Error()
 			var ee *exitErr
@@ -82,14 +92,22 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []
 			errs = append(errs, vaultError{Vault: n, Error: msg})
 			continue
 		}
-		idx, err := v.index()
+		lv, err := a.lockedView(v, c)
 		if err != nil {
-			a.warnf("%v", err)
+			msg := err.Error()
+			var ee *exitErr
+			if errors.As(err, &ee) {
+				msg = ee.msg
+			}
+			a.warnf("%s", msg)
+			errs = append(errs, vaultError{Vault: n, Error: msg})
 			continue
 		}
+		a.noteIndexState(v, lv)
 		unlocked := states[vf.ID].Unlocked
 		count := 0
-		for _, e := range idx.Entries {
+		for _, lr := range lv.Rows {
+			e := lr.Entry
 			if tag != "" && !slices.Contains(e.Tags, tag) {
 				continue
 			}
@@ -101,10 +119,10 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []
 			rows = append(rows, keyRow{
 				Name: e.Name, Vault: n, Description: e.Description, Tags: tags,
 				Updated: e.Updated.UTC().Format("2006-01-02T15:04:05Z"), UpdatedBy: e.UpdatedBy,
-				Locked: !unlocked,
+				Locked: !unlocked, Verified: lr.Verified || lv.State == index.StateLegacy, PendingChange: lr.Pending, IndexState: lv.State,
 			})
 		}
-		sums = append(sums, vaultSummary{Name: n, Keys: count, Unlocked: unlocked})
+		sums = append(sums, vaultSummary{Name: n, Keys: count, Unlocked: unlocked, IndexState: lv.State})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Name != rows[j].Name {
@@ -121,7 +139,11 @@ func (a *app) printKeyTable(rows []keyRow, sums []vaultSummary) {
 	} else {
 		t := newTable(a.out, "NAME", "VAULT", "DESCRIPTION")
 		for _, r := range rows {
-			t.row(r.Name, r.Vault, r.Description)
+			d := r.Description
+			if !r.Verified {
+				d = "[unverified] " + d
+			}
+			t.row(r.Name, r.Vault, d)
 		}
 		t.flush()
 	}
@@ -221,6 +243,7 @@ func cmdInfo(a *app, p *parsed) error {
 		return a.printJSON(map[string]any{
 			"name": e.Name, "vault": k.v.name, "description": e.Description, "tags": tags,
 			"updated": e.Updated.UTC().Format("2006-01-02T15:04:05Z"), "updated_by": e.UpdatedBy,
+			"verified": k.verified,
 		})
 	}
 	a.printf("Name         %s\n", e.Name)
@@ -231,6 +254,9 @@ func cmdInfo(a *app, p *parsed) error {
 	if e.UpdatedBy != "" {
 		a.printf("Updated by   %s\n", e.UpdatedBy)
 	}
+	if !k.verified {
+		a.printf("Verified     no (unlock %s to check this entry with the vault key)\n", k.v.name)
+	}
 	return nil
 }
 
@@ -238,25 +264,35 @@ func cmdInfo(a *app, p *parsed) error {
 
 // readValue decrypts one key. The caller zeroes the result.
 func (a *app) readValue(k *keyRef, p purpose) ([]byte, error) {
-	key, err := a.openKey(k.v, k.vf, openOpts{purpose: p})
-	if err != nil {
-		return nil, err
-	}
-	defer key.Destroy()
-	return a.decrypt(k, key)
+	val, _, err := a.readValueInfo(k, p)
+	return val, err
 }
 
-func (a *app) decrypt(k *keyRef, key *crypto.VaultKey) ([]byte, error) {
-	val, err := crypto.ReadSecret(k.v.dir, k.entry.Name, key)
-	switch {
-	case err == nil:
-		return val, nil
-	case errors.Is(err, fs.ErrNotExist):
-		return nil, notFoundErr("key not found. Try: %s search WORDS", a.prog)
-	case errors.Is(err, crypto.ErrOtherKey):
-		return nil, failf("that key was sealed with a different vault key (a rotation on another machine?)")
+// readValueInfo is readValue that also returns the verified index entry of
+// the key (its description and tags are what the vault key vouches for,
+// unlike the entry a locked listing showed).
+func (a *app) readValueInfo(k *keyRef, p purpose) ([]byte, format.IndexEntry, error) {
+	key, err := a.openKey(k.v, k.vf, openOpts{purpose: p})
+	if err != nil {
+		return nil, format.IndexEntry{}, err
 	}
-	return nil, failf("cannot decrypt that key; the file may be damaged")
+	defer key.Destroy()
+	return a.decryptInfo(k, key)
+}
+
+// decryptInfo opens the vault's authenticated index with key and reads one
+// key through it: the value is returned only if the entry and the file
+// agree (docs/design/index-auth.md).
+func (a *app) decryptInfo(k *keyRef, key *crypto.VaultKey) ([]byte, format.IndexEntry, error) {
+	vi, err := a.openIndex(k.v, key)
+	if err != nil {
+		return nil, format.IndexEntry{}, err
+	}
+	val, ki, err := vi.read(k.entry.Name)
+	if err != nil {
+		return nil, format.IndexEntry{}, err
+	}
+	return val, ki.Entry, nil
 }
 
 func (a *app) record(vault, key string, act audit.Action) {
@@ -403,21 +439,6 @@ func cmdRun(a *app, p *parsed) error {
 
 // --- writing ---
 
-// modifyIndex re-reads the index, applies fn and writes it back.
-func (v *vaultRef) modifyIndex(fn func(idx *format.Index) error) error {
-	idx, err := v.index()
-	if err != nil {
-		return err
-	}
-	if err := fn(idx); err != nil {
-		return err
-	}
-	if err := format.WriteIndex(v.dir, idx); err != nil {
-		return failf("cannot write the index of vault '%s': %v", v.name, vaultErr(err))
-	}
-	return nil
-}
-
 func (a *app) readStdinValue() ([]byte, error) {
 	b, err := io.ReadAll(io.LimitReader(a.in, maxStdinValueSize+1))
 	if err != nil {
@@ -464,14 +485,11 @@ func cmdSet(a *app, p *parsed) error {
 	}
 	var v *vaultRef
 	var vf *format.VaultFile
-	var existing *format.IndexEntry
 	if k, err := a.findKey(name, p.str("vault")); err == nil {
 		v, vf = k.v, k.vf
-		e := k.entry
-		existing = &e
 	} else {
 		var ee *exitErr
-		if !errors.As(err, &ee) || ee.code != ExitNotFound {
+		if !errors.As(err, &ee) || (ee.code != ExitNotFound && !ee.indexDamaged) {
 			return err
 		}
 		if v, err = a.defaultVault(p.str("vault")); err != nil {
@@ -491,25 +509,34 @@ func cmdSet(a *app, p *parsed) error {
 		return err
 	}
 	defer clear(val)
-	if err := crypto.WriteSecret(v.dir, name, key, val); err != nil {
+	vi, err := a.openIndex(v, key)
+	if err != nil {
+		return err
+	}
+	ver, err := vi.view.NextVersion(name)
+	if err != nil {
+		return failf("%v", err)
+	}
+	if err := crypto.WriteSecretVersion(v.dir, name, key, val, ver); err != nil {
 		if errors.Is(err, crypto.ErrTooLarge) {
 			return failf("the value is too large")
 		}
 		return failf("cannot save the key: %v", vaultErr(err))
 	}
-	err = v.modifyIndex(func(idx *format.Index) error {
-		e := format.IndexEntry{Name: name}
-		if existing != nil {
-			e = *existing
+	err = vi.commit(index.Edit{Name: name, Apply: func(cur *format.IndexEntry) (format.IndexEntry, error) {
+		e := format.IndexEntry{}
+		if cur != nil && !cur.Deleted {
+			e = *cur
 		}
 		if p.has("desc") {
 			e.Description = p.str("desc")
 		}
+		e.Version = max(ver, e.Version)
+		e.Deleted = false
 		e.Updated = a.now().UTC()
 		e.UpdatedBy = a.myName()
-		idx.Upsert(e)
-		return nil
-	})
+		return e, nil
+	}})
 	if err != nil {
 		return err
 	}
@@ -532,16 +559,8 @@ func cmdDescribe(a *app, p *parsed) error {
 		return err
 	}
 	text := strings.Join(p.args[1:], " ")
-	err = k.v.modifyIndex(func(idx *format.Index) error {
-		e, ok := idx.Get(k.entry.Name)
-		if !ok {
-			return notFoundErr("key not found")
-		}
+	err = a.changeEntry(k, func(e *format.IndexEntry) {
 		e.Description = text
-		e.Updated = a.now().UTC()
-		e.UpdatedBy = a.myName()
-		idx.Upsert(e)
-		return nil
 	})
 	if err != nil {
 		return err
@@ -573,11 +592,7 @@ func cmdTag(a *app, p *parsed) error {
 		tags = append(tags, t)
 	}
 	var final []string
-	err = k.v.modifyIndex(func(idx *format.Index) error {
-		e, ok := idx.Get(k.entry.Name)
-		if !ok {
-			return notFoundErr("key not found")
-		}
+	err = a.changeEntry(k, func(e *format.IndexEntry) {
 		cur := slices.Clone(e.Tags)
 		if p.has("rm") {
 			cur = slices.DeleteFunc(cur, func(t string) bool { return slices.Contains(tags, t) })
@@ -590,10 +605,6 @@ func cmdTag(a *app, p *parsed) error {
 		}
 		slices.Sort(cur)
 		e.Tags, final = cur, cur
-		e.Updated = a.now().UTC()
-		e.UpdatedBy = a.myName()
-		idx.Upsert(e)
-		return nil
 	})
 	if err != nil {
 		return err
@@ -632,14 +643,7 @@ func cmdMv(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	didx, err := dst.index()
-	if err != nil {
-		return err
-	}
-	if _, ok := didx.Get(k.entry.Name); ok {
-		return failf("a key with that name already exists in the destination vault")
-	}
-	val, err := a.readValue(k, purposeRead)
+	val, ent, err := a.readValueInfo(k, purposeRead)
 	if err != nil {
 		return err
 	}
@@ -649,13 +653,23 @@ func cmdMv(a *app, p *parsed) error {
 		return err
 	}
 	defer dkey.Destroy()
-	if err := crypto.WriteSecret(dst.dir, k.entry.Name, dkey, val); err != nil {
+	dvi, err := a.openIndex(dst, dkey)
+	if err != nil {
+		return err
+	}
+	if exists, err := dvi.exists(k.entry.Name); err != nil {
+		return err
+	} else if exists {
+		return failf("a key with that name already exists in the destination vault")
+	}
+	dver, err := dvi.view.NextVersion(k.entry.Name)
+	if err != nil {
+		return failf("%v", err)
+	}
+	if err := crypto.WriteSecretVersion(dst.dir, k.entry.Name, dkey, val, dver); err != nil {
 		return failf("cannot save the key in the destination vault: %v", vaultErr(err))
 	}
-	ent := k.entry
-	ent.Updated = a.now().UTC()
-	ent.UpdatedBy = a.myName()
-	if err := dst.modifyIndex(func(idx *format.Index) error { idx.Upsert(ent); return nil }); err != nil {
+	if err := dvi.commit(dvi.newEntryEdit(k.entry.Name, ent, dver)); err != nil {
 		return err
 	}
 	if err := a.trashKey(k); err != nil {
@@ -670,13 +684,30 @@ func cmdMv(a *app, p *parsed) error {
 	return nil
 }
 
-// trashKey moves a key's file to the trash and drops it from the index.
+// trashKey deletes a key: its entry becomes a signed tombstone, then the
+// file moves to the trash. It opens the vault for writing (an index entry
+// can only be sealed with the vault key).
 func (a *app) trashKey(k *keyRef) error {
+	key, err := a.openKey(k.v, k.vf, openOpts{purpose: purposeWrite})
+	if err != nil {
+		return err
+	}
+	defer key.Destroy()
+	vi, err := a.openIndex(k.v, key)
+	if err != nil {
+		return err
+	}
+	if err := vi.commit(vi.tombstoneEdit(k.entry.Name)); err != nil {
+		return err
+	}
+	return a.trashFile(k)
+}
+
+// trashFile moves a key's file to the trash (its tombstone is already
+// written) and purges old trash.
+func (a *app) trashFile(k *keyRef) error {
 	if _, err := format.TrashSecret(k.v.dir, k.entry.Name, a.now()); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return vaultErr(err)
-	}
-	if err := k.v.modifyIndex(func(idx *format.Index) error { idx.Remove(k.entry.Name); return nil }); err != nil {
-		return err
 	}
 	_, _ = format.PurgeTrash(k.v.dir, a.now())
 	return nil
@@ -695,14 +726,7 @@ func cmdRename(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	idx, err := k.v.index()
-	if err != nil {
-		return err
-	}
-	if _, ok := idx.Get(newName); ok {
-		return failf("a key with the new name already exists in '%s'", k.v.name)
-	}
-	val, err := a.readValue(k, purposeWrite)
+	val, ent, err := a.readValueInfo(k, purposeWrite)
 	if err != nil {
 		return err
 	}
@@ -712,22 +736,27 @@ func cmdRename(a *app, p *parsed) error {
 		return err
 	}
 	defer key.Destroy()
-	// The key name is bound into the encryption, so renaming re-encrypts.
-	if err := crypto.WriteSecret(k.v.dir, newName, key, val); err != nil {
-		return failf("cannot save the renamed key: %v", vaultErr(err))
-	}
-	ent := k.entry
-	err = k.v.modifyIndex(func(i *format.Index) error {
-		ent.Name = newName
-		ent.Updated = a.now().UTC()
-		ent.UpdatedBy = a.myName()
-		i.Upsert(ent)
-		return nil
-	})
+	vi, err := a.openIndex(k.v, key)
 	if err != nil {
 		return err
 	}
-	if err := a.trashKey(k); err != nil {
+	if exists, err := vi.exists(newName); err != nil {
+		return err
+	} else if exists {
+		return failf("a key with the new name already exists in '%s'", k.v.name)
+	}
+	nver, err := vi.view.NextVersion(newName)
+	if err != nil {
+		return failf("%v", err)
+	}
+	// The key name is bound into the encryption, so renaming re-encrypts.
+	if err := crypto.WriteSecretVersion(k.v.dir, newName, key, val, nver); err != nil {
+		return failf("cannot save the renamed key: %v", vaultErr(err))
+	}
+	if err := vi.commit(vi.newEntryEdit(newName, ent, nver), vi.tombstoneEdit(k.entry.Name)); err != nil {
+		return err
+	}
+	if err := a.trashFile(k); err != nil {
 		return failf("saved under the new name, but could not remove the old one: %v", err)
 	}
 	a.record(k.v.name, newName, audit.ActionRename)
@@ -757,11 +786,6 @@ func cmdRm(a *app, p *parsed) error {
 		}
 	}
 	// Deleting needs the vault unlocked, like any other change.
-	key, err := a.openKey(k.v, k.vf, openOpts{purpose: purposeWrite})
-	if err != nil {
-		return err
-	}
-	key.Destroy()
 	if err := a.trashKey(k); err != nil {
 		return err
 	}
