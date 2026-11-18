@@ -17,7 +17,7 @@ It runs `secrets-vault get NAME -n` as a subprocess: never through a shell, stdo
 | 5 (vault failed verification) | `VaultUnverifiedError` |
 | anything else, timeout, program missing | `SecretsVaultError` / `SecretsVaultNotInstalledError` |
 
-All derive from `SecretsVaultError`, which has `.exit_code`. Options: `executable=` (path to the program), `timeout=` (seconds, default 60), `interactive=True` (let the program ask for the passphrase on the terminal, needed on Windows where nothing stays unlocked). The program is found from `SECRETS_VAULT_BINARY_PATH`, then `PATH`.
+All derive from `SecretsVaultError`, which has `.exit_code`. Options: `executable=` (path to the program), `timeout=` (seconds, default 60), `interactive=True` (let the program ask for the passphrase on the terminal, needed on Windows where nothing stays unlocked). The program is found from `SECRETS_VAULT_BINARY_PATH`, then `PATH`. On Windows only an absolute `PATH` entry (or npm's global folder) is used, never the current folder. `SECRETS_VAULT_BINARY_PATH` decides which program gets your passphrase and values: never take it from untrusted environment (CI config, `.env` files).
 
 Prefer `secrets-vault run -k NAME -- python your_script.py` when you can: then the script never holds the value at all.
 

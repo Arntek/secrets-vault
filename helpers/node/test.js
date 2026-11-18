@@ -69,3 +69,41 @@ test('SECRETS_VAULT_BINARY_PATH is used when no executable is given', { skip }, 
     if (old === undefined) delete process.env.SECRETS_VAULT_BINARY_PATH; else process.env.SECRETS_VAULT_BINARY_PATH = old;
   }
 });
+
+test('interactive: the program gets the real stdin (not a pipe we made) and its stderr', { skip }, async () => {
+  // Fake program reads its stdin; the driver's stdin is a file, so what comes
+  // back is that file's content only if stdin was inherited.
+  const exe = fake('v=$(cat); printf "%s" "$v"\n');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'svnode-in-'));
+  const input = path.join(dir, 'in.txt');
+  fs.writeFileSync(input, 'typed-passphrase');
+  const driver = path.join(dir, 'driver.js');
+  fs.writeFileSync(driver, `require(${JSON.stringify(path.join(__dirname, 'index.js'))}).getSecret('K',{interactive:true,executable:${JSON.stringify(exe)}}).then(v=>process.stdout.write(v))`);
+  const fd = fs.openSync(input, 'r');
+  const { spawnSync } = require('node:child_process');
+  const r = spawnSync(process.execPath, [driver], { stdio: [fd, 'pipe', 'pipe'], encoding: 'utf8', timeout: 10000 });
+  fs.closeSync(fd);
+  assert.strictEqual(r.stdout, 'typed-passphrase');
+});
+
+test('Windows lookup never uses a bare name or the current folder', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'svnode-win-'));
+  fs.writeFileSync(path.join(dir, 'secrets-vault.exe'), 'x');
+  const old = process.cwd();
+  process.chdir(dir); // a secrets-vault.exe sits in the current folder
+  try {
+    for (const PATH of ['', '.', ';;', 'relative\\dir;.', 'C:\\definitely\\not\\here']) {
+      assert.throws(() => sv.findExecutable({}, { PATH }, 'win32'), sv.SecretsVaultNotInstalledError, PATH);
+    }
+    assert.strictEqual(sv.findExecutable({ executable: 'X:\\mine\\sv.exe' }, {}, 'win32'), 'X:\\mine\\sv.exe');
+    assert.strictEqual(sv.findExecutable({}, { SECRETS_VAULT_BINARY_PATH: 'X:\\e.exe' }, 'win32'), 'X:\\e.exe');
+  } finally {
+    process.chdir(old);
+  }
+});
+
+test('Windows lookup finds an absolute PATH entry', { skip: process.platform === 'win32' ? false : 'needs real Windows paths' }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'svnode-win-'));
+  fs.writeFileSync(path.join(dir, 'secrets-vault.exe'), 'x');
+  assert.strictEqual(sv.findExecutable({}, { PATH: `.;${dir}` }, 'win32'), path.join(dir, 'secrets-vault.exe'));
+});

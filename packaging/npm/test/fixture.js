@@ -84,11 +84,17 @@ function makeRelease(version, { platform = process.platform, arch = process.arch
   const other = `${'a'.repeat(64)}  secrets-vault_${version}_plan9_amd64.tar.gz\n`;
   fs.writeFileSync(path.join(dir, 'checksums.txt'), other + (omit ? '' : `${hash}  ${name}\n`));
   fs.writeFileSync(path.join(dir, name), tamper ? Buffer.concat([data, Buffer.from('x')]) : data);
-  return { dir, name, program };
+  return { dir, name, program, hash };
+}
+
+// pinned writes checksums.json into a package root, as the publish step does.
+function pin(root, version, archives) {
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, 'checksums.json'), JSON.stringify({ version, archives }));
 }
 
 function tmp() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'svnpm-'));
 }
 
-module.exports = { makeRelease, tarGz, zip, tmp };
+module.exports = { makeRelease, tarGz, zip, tmp, pin };

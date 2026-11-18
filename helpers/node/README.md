@@ -18,7 +18,7 @@ It runs `secrets-vault get NAME -n` with `execFile`: never through a shell, stdo
 | 5 (vault failed verification) | `VaultUnverifiedError` |
 | anything else, timeout, program missing | `SecretsVaultError` / `SecretsVaultNotInstalledError` |
 
-All extend `SecretsVaultError`, which has `.exitCode`. Options: `executable` (path to the program), `timeout` (milliseconds, default 60000), `interactive: true` (async only: let the program ask for the passphrase on the terminal, needed on Windows where nothing stays unlocked). The program is found from `SECRETS_VAULT_BINARY_PATH`, then the npm install of `secrets-vault` (its real `.exe` on Windows), then `PATH`.
+All extend `SecretsVaultError`, which has `.exitCode`. Options: `executable` (path to the program), `timeout` (milliseconds, default 60000), `interactive: true` (async only: the program gets your terminal's stdin and stderr, so it can show its prompt and read the passphrase; needed on Windows where nothing stays unlocked). The program is found from `SECRETS_VAULT_BINARY_PATH`, then the npm install of `secrets-vault` (its real `.exe` on Windows), then `PATH`. On Windows only an absolute `PATH` entry (or npm's global folder) is used, never the current folder. `SECRETS_VAULT_BINARY_PATH` decides which program gets your passphrase and values: never take it from untrusted environment (CI config, `.env` files).
 
 Prefer `secrets-vault run -k NAME -- node your-script.js` when you can: then the script never holds the value at all.
 
