@@ -13,6 +13,9 @@
 # Build outputs and spike test data (never commit vault data)
 /dist/
 /bin/
+/build/
+# Secure Enclave key blobs (only usable on the Mac that made them; never commit)
+*.blob
 spikes/**/build/
 spikes/**/testvault/
 

@@ -37,7 +37,15 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           check-latest: true
-      - run: go test -race -count=1 ./...
+      # On macOS the Makefile builds the Swift Touch ID bridge and tests
+      # with the "touchid" tag; elsewhere it is plain go test.
+      - run: make test
+      - name: vet Touch ID code
+        if: runner.os == 'macOS'
+        run: make vet
+      - name: build without cgo (no Touch ID)
+        if: runner.os == 'macOS'
+        run: CGO_ENABLED=0 go test -count=1 ./internal/touchid
 
   lint:
     runs-on: ubuntu-latest
