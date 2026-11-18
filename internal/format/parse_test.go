@@ -10,9 +10,38 @@ import (
 
 var testTime = time.Date(2026, 11, 17, 15, 30, 0, 0, time.UTC)
 
+const (
+	testRecipA = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsxk8wz"
+	testRecipB = "age1example"
+	testSignA  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testSignB  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+// validVaultFile is a structurally valid version-2 vault file. Its log is
+// not signed: package format checks structure only.
 func validVaultFile() *VaultFile {
 	return &VaultFile{
-		Version: CurrentVersion,
+		Version: VaultVersion,
+		ID:      "0123456789abcdef0123456789abcdef",
+		Name:    "personal",
+		KeyID:   "fedcba9876543210fedcba9876543210",
+		Members: []Member{
+			{Name: "alice", Recipient: testRecipA, SignKey: testSignA, Role: RoleOwner},
+			{Name: "dan", Recipient: testRecipB, SignKey: testSignB, Role: RoleMember},
+		},
+		Unlockers: []Unlocker{
+			{Type: UnlockerPassphrase, WrappedKey: []byte("aaaaaaaaa"), Created: testTime},
+			{Type: UnlockerMember, Label: "alice", Recipient: testRecipA, WrappedKey: []byte("wrapped-2"), Created: testTime},
+			{Type: UnlockerMember, Label: "dan", Recipient: testRecipB, WrappedKey: []byte("wrapped-3"), Created: testTime},
+		},
+		Log: []LogEntry{{Body: []byte(`{"seq":0}`), By: "alice", Sig: bytes.Repeat([]byte{1}, SignatureSize)}},
+	}
+}
+
+// validVaultFileV1 is a version-1 file (read only for migration).
+func validVaultFileV1() *VaultFile {
+	return &VaultFile{
+		Version: 1,
 		ID:      "0123456789abcdef0123456789abcdef",
 		Name:    "personal",
 		KeyID:   "fedcba9876543210fedcba9876543210",
@@ -25,7 +54,7 @@ func validVaultFile() *VaultFile {
 }
 
 func validIndex() *Index {
-	return &Index{Version: CurrentVersion, Entries: []IndexEntry{
+	return &Index{Version: IndexVersion, Entries: []IndexEntry{
 		{Name: "B_KEY", Description: "Second key · ünïcode ok", Tags: []string{"xero", "reporting"}, Updated: testTime, UpdatedBy: "arnold"},
 		{Name: "A_KEY", Updated: testTime},
 	}}
@@ -79,7 +108,7 @@ func mutateJSON(t *testing.T, data []byte, old, new string) []byte {
 }
 
 func TestParseVaultFileRejects(t *testing.T) {
-	good, err := MarshalVaultFile(validVaultFile())
+	good, err := marshal(validVaultFileV1())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,36 +153,36 @@ func TestParseVaultFileRejects(t *testing.T) {
 }
 
 func TestParseVaultFileNewerVersion(t *testing.T) {
-	data := []byte(`{"version": 2, "id": "x", "new_field": {"a": 1}}`)
+	data := []byte(`{"version": 3, "id": "x", "new_field": {"a": 1}}`)
 	if _, err := ParseVaultFile(data); !errors.Is(err, ErrUnsupportedVersion) {
 		t.Fatalf("want ErrUnsupportedVersion, got %v", err)
 	}
 }
 
 func TestParseVaultFileTooLarge(t *testing.T) {
-	data := []byte(`{"version":1,"name":"` + strings.Repeat("a", MaxFileSize) + `"}`)
+	data := []byte(`{"version":1,"name":"` + strings.Repeat("a", MaxVaultFileSize) + `"}`)
 	if _, err := ParseVaultFile(data); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("want ErrTooLarge, got %v", err)
 	}
 }
 
 func TestVaultFileValidateRules(t *testing.T) {
-	vf := validVaultFile()
+	vf := validVaultFileV1()
 	vf.Unlockers = append(vf.Unlockers, vf.Unlockers[0])
 	if vf.Validate() == nil {
 		t.Error("two passphrase unlockers accepted")
 	}
-	vf = validVaultFile()
+	vf = validVaultFileV1()
 	vf.Unlockers = append(vf.Unlockers, vf.Unlockers[2])
 	if vf.Validate() == nil {
 		t.Error("duplicate member recipient accepted")
 	}
-	vf = validVaultFile()
+	vf = validVaultFileV1()
 	vf.Unlockers[1].Created = time.Time{}
 	if vf.Validate() == nil {
 		t.Error("zero created time accepted")
 	}
-	vf = validVaultFile()
+	vf = validVaultFileV1()
 	vf.Unlockers[2].Recipient = "age1 with space"
 	if vf.Validate() == nil {
 		t.Error("recipient with space accepted")
@@ -161,13 +190,70 @@ func TestVaultFileValidateRules(t *testing.T) {
 	if _, err := MarshalVaultFile(&VaultFile{}); err == nil {
 		t.Error("Marshal wrote an invalid vault file")
 	}
+	if _, err := MarshalVaultFile(validVaultFileV1()); err == nil {
+		t.Error("Marshal wrote a version-1 file")
+	}
+}
+
+// TestVaultFileV2Rules covers ue1.1's structural half: the unlocker list
+// must match the member set exactly.
+func TestVaultFileV2Rules(t *testing.T) {
+	if err := validVaultFile().Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(vf *VaultFile){
+		"planted member unlocker": func(vf *VaultFile) {
+			vf.Unlockers = append(vf.Unlockers, Unlocker{Type: UnlockerMember, Label: "dan", Recipient: "age1mallory", WrappedKey: []byte("w"), Created: testTime})
+		},
+		"unlocker for non-member": func(vf *VaultFile) {
+			vf.Unlockers = append(vf.Unlockers, Unlocker{Type: UnlockerMember, Label: "mallory", Recipient: "age1mallory", WrappedKey: []byte("w"), Created: testTime})
+		},
+		"member without unlocker": func(vf *VaultFile) { vf.Unlockers = vf.Unlockers[:2] },
+		"recipient mismatch":      func(vf *VaultFile) { vf.Unlockers[2].Recipient = "age1other" },
+		"touchid unlocker": func(vf *VaultFile) {
+			vf.Unlockers = append(vf.Unlockers, Unlocker{Type: UnlockerTouchID, Label: "Mac", Recipient: "se", WrappedKey: []byte("w"), Created: testTime})
+		},
+		"passphrase with label": func(vf *VaultFile) { vf.Unlockers[0].Label = "x" },
+		"no members":            func(vf *VaultFile) { vf.Members = nil },
+		"unsorted members":      func(vf *VaultFile) { vf.Members[0], vf.Members[1] = vf.Members[1], vf.Members[0] },
+		"duplicate name": func(vf *VaultFile) {
+			vf.Members[1].Name = "alice"
+			vf.Unlockers[2].Label = "alice"
+		},
+		"duplicate sign key": func(vf *VaultFile) { vf.Members[1].SignKey = testSignA },
+		"bad sign key":       func(vf *VaultFile) { vf.Members[1].SignKey = "xyz" },
+		"bad role":           func(vf *VaultFile) { vf.Members[1].Role = "admin" },
+		"no log":             func(vf *VaultFile) { vf.Log = nil },
+		"short sig":          func(vf *VaultFile) { vf.Log[0].Sig = []byte{1} },
+		"bad signer":         func(vf *VaultFile) { vf.Log[0].By = "Not A Name" },
+		"empty body":         func(vf *VaultFile) { vf.Log[0].Body = nil },
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			vf := validVaultFile()
+			mut(vf)
+			if vf.Validate() == nil {
+				t.Fatal("accepted")
+			}
+		})
+	}
+	// Unknown auth fields in a log entry (e.g. a MAC) are rejected by the
+	// strict parser (G1).
+	good, err := MarshalVaultFile(validVaultFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	withMAC := mutateJSON(t, good, `"by": "alice",`, `"by": "alice", "mac": "AAAA",`)
+	if _, err := ParseVaultFile(withMAC); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("log entry with a mac accepted: %v", err)
+	}
 }
 
 // Parse errors describe the problem but never quote the input, in case a
 // secret was pasted into a vault file by mistake.
 func TestParseErrorsDoNotEchoInput(t *testing.T) {
 	const marker = "SVCANARY_PASTED_VALUE"
-	good, err := MarshalVaultFile(validVaultFile())
+	good, err := marshal(validVaultFileV1())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +323,7 @@ func TestValidateVaultNameAndTag(t *testing.T) {
 }
 
 func TestVaultFileUnlockerHelpers(t *testing.T) {
-	vf := validVaultFile()
+	vf := validVaultFileV1()
 	if got := len(vf.UnlockersOf(UnlockerMember)); got != 1 {
 		t.Fatalf("UnlockersOf member = %d", got)
 	}
@@ -262,6 +348,9 @@ func FuzzParseVaultFile(f *testing.F) {
 		f.Fatal(err)
 	}
 	f.Add(good)
+	if v1, err := marshal(validVaultFileV1()); err == nil {
+		f.Add(v1)
+	}
 	f.Add([]byte(`{"version":2}`))
 	f.Add([]byte(`{"version":1,"version":1}`))
 	f.Add([]byte(`[[[[{}]]]]`))
@@ -272,6 +361,9 @@ func FuzzParseVaultFile(f *testing.F) {
 				t.Fatal("non-nil result with error")
 			}
 			return
+		}
+		if vf.Version != VaultVersion {
+			return // version 1 is read only
 		}
 		// Anything accepted is valid and survives a round trip unchanged.
 		out, err := MarshalVaultFile(vf)

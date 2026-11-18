@@ -19,8 +19,11 @@ const maxJSONDepth = 16
 // are not lower case (encoding/json matches field names case-insensitively),
 // unknown fields, nesting deeper than maxJSONDepth and trailing data. Error
 // messages give offsets and our own field names only, never input bytes.
-func decodeStrict(data []byte, v any) error {
-	if err := checkJSONShape(data); err != nil {
+func decodeStrict(data []byte, v any) error { return decodeStrictMax(data, MaxFileSize, v) }
+
+// decodeStrictMax is decodeStrict with its own size limit.
+func decodeStrictMax(data []byte, maxSize int, v any) error {
+	if err := checkJSONShapeMax(data, maxSize); err != nil {
 		return err
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -35,9 +38,11 @@ func decodeStrict(data []byte, v any) error {
 }
 
 // checkJSONShape walks the token stream once without decoding values.
-func checkJSONShape(data []byte) error {
-	if len(data) > MaxFileSize {
-		return fmt.Errorf("%w: larger than %d bytes", ErrTooLarge, MaxFileSize)
+func checkJSONShape(data []byte) error { return checkJSONShapeMax(data, MaxFileSize) }
+
+func checkJSONShapeMax(data []byte, maxSize int) error {
+	if len(data) > maxSize {
+		return fmt.Errorf("%w: larger than %d bytes", ErrTooLarge, maxSize)
 	}
 	if !utf8.Valid(data) {
 		return fmt.Errorf("%w: not valid UTF-8", ErrMalformed)

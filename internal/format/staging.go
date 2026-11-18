@@ -21,8 +21,8 @@ import (
 //  4. CommitStaged moves the staged files over the live ones and removes
 //     the staging folder.
 //
-// If the process dies between 3 and 4, RecoverRotation (called whenever a
-// vault is opened) finishes step 4. Staging folders for other key IDs are
+// If the process dies between 3 and 4, crypto.RecoverRotation (called
+// after a vault is verified and unlocked) finishes step 4. Staging folders for other key IDs are
 // left alone, since on a second machine vault.json may simply not have
 // synced yet; AbandonStaging removes one explicitly.
 const (
@@ -56,6 +56,9 @@ func BeginStaging(vaultDir, keyID string) (*Staging, error) {
 		return nil, err
 	}
 	dir := stagingDir(vaultDir, keyID)
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(SecretsPath(vaultDir), DirMode); err != nil {
 		return nil, err
 	}
@@ -120,6 +123,9 @@ func (s *Staging) Abandon() error { return AbandonStaging(s.vaultDir, s.keyID) }
 // AbandonStaging deletes the staging folder for keyID.
 func AbandonStaging(vaultDir, keyID string) error {
 	if err := ValidateKeyID(keyID); err != nil {
+		return err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
 		return err
 	}
 	return os.RemoveAll(stagingDir(vaultDir, keyID))
@@ -198,7 +204,13 @@ func CommitStaged(vaultDir, keyID string) error {
 	if err := ValidateKeyID(keyID); err != nil {
 		return err
 	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
 	dir := stagingDir(vaultDir, keyID)
+	if err := checkDir(filepath.Join(dir, TrashDir), true); err != nil {
+		return err
+	}
 	data, err := readRegular(filepath.Join(dir, manifestName), MaxFileSize*8)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -215,8 +227,12 @@ func CommitStaged(vaultDir, keyID string) error {
 	resuming := statErr == nil
 	if !resuming {
 		for _, f := range files {
-			if _, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(f))); err != nil {
+			fi, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(f)))
+			if err != nil {
 				return ErrRotationIncomplete
+			}
+			if !fi.Mode().IsRegular() {
+				return fmt.Errorf("staged %s: %w", path.Base(f), ErrNotRegular)
 			}
 		}
 		if err := WriteFileAtomic(marker, []byte("1\n"), FileMode); err != nil {
@@ -244,21 +260,61 @@ func CommitStaged(vaultDir, keyID string) error {
 	return os.RemoveAll(dir)
 }
 
-// RecoverRotation finishes an interrupted rotation whose new key is already
-// in vault.json (currentKeyID). It reports whether it committed anything.
-// Staging folders for other key IDs are left in place.
-func RecoverRotation(vaultDir, currentKeyID string) (bool, error) {
-	ids, err := PendingRotations(vaultDir)
+// StagedFile is one file listed in a rotation's MANIFEST.
+type StagedFile struct {
+	// Rel is the path inside the staging folder ("NAME.age" or
+	// ".trash/<trash file>").
+	Rel string
+	// Name is the key name the file belongs to.
+	Name string
+}
+
+// StagedFiles parses the MANIFEST of the staging folder for keyID.
+func StagedFiles(vaultDir, keyID string) ([]StagedFile, error) {
+	if err := ValidateKeyID(keyID); err != nil {
+		return nil, err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return nil, err
+	}
+	dir := stagingDir(vaultDir, keyID)
+	if err := checkDir(filepath.Join(dir, TrashDir), true); err != nil {
+		return nil, err
+	}
+	data, err := readRegular(filepath.Join(dir, manifestName), MaxFileSize*8)
 	if err != nil {
-		return false, err
-	}
-	for _, id := range ids {
-		if id == currentKeyID {
-			if err := CommitStaged(vaultDir, id); err != nil {
-				return false, err
-			}
-			return true, nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, ErrRotationIncomplete
 		}
+		return nil, err
 	}
-	return false, nil
+	rels, err := ParseManifest(data, keyID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StagedFile, 0, len(rels))
+	for _, rel := range rels {
+		if t, ok := strings.CutPrefix(rel, TrashDir+"/"); ok {
+			ts, err := ParseTrashName(t)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, StagedFile{Rel: rel, Name: ts.Name})
+			continue
+		}
+		name, _ := secretNameFromFile(rel)
+		out = append(out, StagedFile{Rel: rel, Name: name})
+	}
+	return out, nil
+}
+
+// ReadStagedFile reads one staged file (a regular file, not a symlink).
+func ReadStagedFile(vaultDir, keyID, rel string) ([]byte, error) {
+	if err := ValidateKeyID(keyID); err != nil {
+		return nil, err
+	}
+	if err := validateManifestEntry(rel); err != nil {
+		return nil, err
+	}
+	return readRegular(filepath.Join(stagingDir(vaultDir, keyID), filepath.FromSlash(rel)), MaxSecretFileSize)
 }

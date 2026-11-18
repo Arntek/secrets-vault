@@ -2,6 +2,7 @@ package crypto
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -226,7 +227,7 @@ func TestWrappersLeak(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			data, err := format.MarshalVaultFile(&format.VaultFile{
+			data, err := json.Marshal(&format.VaultFile{
 				Version: 1, ID: "0123456789abcdef0123456789abcdef", Name: "v",
 				KeyID: k.ID(), Unlockers: []format.Unlocker{u},
 			})

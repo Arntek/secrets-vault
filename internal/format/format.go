@@ -35,8 +35,14 @@ import (
 	"time"
 )
 
-// CurrentVersion is the vault format version written by this build.
-const CurrentVersion = 1
+// Format versions written by this build. vault.json moved to version 2
+// with the signed membership log (docs/design/membership-auth.md); version
+// 1 files are parsed only so a personal vault can be migrated. index.json
+// is unchanged at version 1.
+const (
+	VaultVersion = 2
+	IndexVersion = 1
+)
 
 // File and directory names inside a vault folder.
 const (
@@ -51,6 +57,9 @@ const (
 // MaxFileSize bounds how much of any vault metadata file is read, so a
 // tampered or corrupt file cannot exhaust memory.
 const MaxFileSize = 1 << 20 // 1 MiB
+
+// MaxVaultFileSize bounds vault.json, which carries the membership log.
+const MaxVaultFileSize = 4 << 20 // 4 MiB
 
 // MaxSecretFileSize bounds how much of one secrets/NAME.age file is read.
 const MaxSecretFileSize = 2 << 20 // 2 MiB
@@ -68,6 +77,11 @@ var (
 	ErrNotRegular = errors.New("vault path is not a regular file")
 	// ErrVaultExists is returned by CreateVault when vault.json already exists.
 	ErrVaultExists = errors.New("a vault already exists in this folder")
+	// ErrUnsafeDir means a folder inside the vault is a symlink, not a
+	// directory, or (on Unix) not owned by the current user.
+	ErrUnsafeDir = errors.New("a folder inside the vault is a symlink or is not owned by you")
+	// ErrChanged means vault.json changed between reading and writing it.
+	ErrChanged = errors.New("vault.json changed while this command was running; run it again")
 )
 
 // UnlockerType names one way of opening a vault key.
@@ -97,6 +111,32 @@ type Unlocker struct {
 	Created    time.Time `json:"created"`
 }
 
+// Member is one person in a vault's member set (vault.json version 2). The
+// set is authenticated by the signed log; package members verifies it.
+type Member struct {
+	Name string `json:"name"`
+	// Recipient is the person's age X25519 public key.
+	Recipient string `json:"recipient"`
+	// SignKey is the person's Ed25519 public key, lower-case hex.
+	SignKey string `json:"sign_key"`
+	Role    string `json:"role"`
+}
+
+// Member roles.
+const (
+	RoleOwner  = "owner"
+	RoleMember = "member"
+)
+
+// LogEntry is one signed record of the membership log. Body holds the
+// record's exact JSON bytes (base64 in the file), so the signature is
+// checked over the bytes that were signed. Package members verifies it.
+type LogEntry struct {
+	Body []byte `json:"body"`
+	By   string `json:"by"`
+	Sig  []byte `json:"sig"`
+}
+
 // VaultFile is the content of vault.json.
 type VaultFile struct {
 	Version int    `json:"version"`
@@ -107,8 +147,12 @@ type VaultFile struct {
 	// which key a secret file was sealed with, and lets the CLI pin the key
 	// it has seen before to notice substitution by someone with write access
 	// to the folder.
-	KeyID     string     `json:"key_id"`
+	KeyID string `json:"key_id"`
+	// Members is the head state's member set, sorted by name (version 2).
+	Members   []Member   `json:"members,omitempty"`
 	Unlockers []Unlocker `json:"unlockers"`
+	// Log is the signed membership log, genesis first (version 2).
+	Log []LogEntry `json:"log,omitempty"`
 }
 
 // IndexEntry describes one key without revealing its value.

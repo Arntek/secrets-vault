@@ -4,6 +4,7 @@ package format
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"syscall"
 )
@@ -15,3 +16,9 @@ func openNoFollow(path string) (*os.File, error) {
 }
 
 func isSymlinkErr(err error) bool { return errors.Is(err, syscall.ELOOP) }
+
+// ownedByMe reports whether fi belongs to the current user.
+func ownedByMe(fi fs.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == os.Getuid()
+}

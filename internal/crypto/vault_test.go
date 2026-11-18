@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,24 +15,70 @@ import (
 )
 
 type testVault struct {
-	dir string
-	key *VaultKey
-	pw  KeyWrapper
+	dir   string
+	key   *VaultKey
+	pw    KeyWrapper
+	owner KeyWrapper // every version-2 vault has an owner member
 }
 
 func newVault(t *testing.T, wrappers ...KeyWrapper) *testVault {
 	t.Helper()
 	pw := passWrapper(t, "test passphrase")
-	k := mustKey(t)
-	vf, err := NewVaultFile("test", k, append([]KeyWrapper{pw}, wrappers...))
+	owner, err := NewMemberWrapper("owner", memberIdentity(t).Recipient().String())
 	if err != nil {
 		t.Fatal(err)
 	}
+	k := mustKey(t)
+	vf, err := NewVaultFile("test", k, append([]KeyWrapper{pw, owner}, wrappers...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete(vf)
 	dir := filepath.Join(t.TempDir(), "vault")
 	if err := format.CreateVault(dir, vf); err != nil {
 		t.Fatal(err)
 	}
-	return &testVault{dir: dir, key: k, pw: pw}
+	return &testVault{dir: dir, key: k, pw: pw, owner: owner}
+}
+
+// complete makes vf structurally valid for format: one member entry per
+// member unlocker (the first is the owner) and a placeholder log. The
+// signed log itself is package members' business and is not checked here.
+func complete(vf *format.VaultFile) {
+	vf.Members = nil
+	for i, u := range vf.Unlockers {
+		if u.Type != format.UnlockerMember {
+			continue
+		}
+		role := format.RoleMember
+		if u.Label == "owner" {
+			role = format.RoleOwner
+		}
+		sk := strings.Repeat(string("0123456789abcdef"[i%16]), format.SignKeyHexLen)
+		vf.Members = append(vf.Members, format.Member{Name: u.Label, Recipient: u.Recipient, SignKey: sk, Role: role})
+	}
+	format.SortMembers(vf.Members)
+	vf.Log = []format.LogEntry{{Body: []byte(`{}`), By: "owner", Sig: make([]byte, format.SignatureSize)}}
+}
+
+// rotateTo returns RotateOptions that wrap the new key for the owner and
+// wrappers, keeping everything else of the current vault.json.
+func (v *testVault) rotateTo(t *testing.T, wrappers ...KeyWrapper) RotateOptions {
+	return RotateOptions{Next: func(newKey *VaultKey) (*format.VaultFile, error) {
+		cur, err := format.ReadVaultFile(v.dir)
+		if err != nil {
+			return nil, err
+		}
+		us, err := WrapAll(newKey, append([]KeyWrapper{v.owner}, wrappers...))
+		if err != nil {
+			return nil, err
+		}
+		next := *cur
+		next.KeyID = newKey.ID()
+		next.Unlockers = us
+		complete(&next)
+		return &next, nil
+	}}
 }
 
 func TestNewVaultAndUnlock(t *testing.T) {
@@ -42,7 +89,7 @@ func TestNewVaultAndUnlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if vf.KeyID != v.key.ID() || len(vf.Unlockers) != 2 {
+	if vf.KeyID != v.key.ID() || len(vf.Unlockers) != 3 {
 		t.Fatalf("vault file: %+v", vf)
 	}
 	k, err := Unlock(vf, v.pw)
@@ -131,7 +178,7 @@ func TestRotate(t *testing.T) {
 	oldVF, _ := format.ReadVaultFile(v.dir)
 
 	// Remove Dan: rewrap for the passphrase only.
-	newKey, err := Rotate(v.dir, v.key, []KeyWrapper{v.pw})
+	newKey, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +189,7 @@ func TestRotate(t *testing.T) {
 	if vf.KeyID == oldVF.KeyID || vf.KeyID != newKey.ID() || vf.ID != oldVF.ID || vf.Name != oldVF.Name {
 		t.Fatalf("vault file after rotation: %+v", vf)
 	}
-	if len(vf.Unlockers) != 1 || vf.Unlockers[0].Type != format.UnlockerPassphrase {
+	if len(vf.Unlockers) != 2 || vf.Unlockers[1].Type != format.UnlockerPassphrase {
 		t.Fatalf("unlockers after rotation: %+v", vf.Unlockers)
 	}
 	if k, err := Unlock(vf, v.pw); err != nil || !bytes.Equal(k.Bytes(), newKey.Bytes()) {
@@ -172,7 +219,7 @@ func TestRotate(t *testing.T) {
 		t.Fatalf("staging left: %v", ids)
 	}
 	// The old key is no longer accepted for a second rotation.
-	if _, err := Rotate(v.dir, v.key, []KeyWrapper{v.pw}); !errors.Is(err, ErrWrongKey) {
+	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); !errors.Is(err, ErrWrongKey) {
 		t.Fatalf("rotate with stale key = %v", err)
 	}
 }
@@ -184,7 +231,7 @@ func TestRotateRefusesConflicts(t *testing.T) {
 	if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Rotate(v.dir, v.key, []KeyWrapper{v.pw}); !errors.Is(err, ErrConflicts) {
+	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); !errors.Is(err, ErrConflicts) {
 		t.Fatalf("rotate with conflicts = %v", err)
 	}
 }
@@ -203,7 +250,7 @@ func TestRotateFailureChangesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(format.VaultFilePath(v.dir))
-	if _, err := Rotate(v.dir, v.key, []KeyWrapper{v.pw}); !errors.Is(err, ErrDecrypt) {
+	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); !errors.Is(err, ErrDecrypt) {
 		t.Fatalf("rotate over a corrupt file = %v", err)
 	}
 	after, _ := os.ReadFile(format.VaultFilePath(v.dir))
@@ -216,8 +263,8 @@ func TestRotateFailureChangesNothing(t *testing.T) {
 	if ids, _ := format.PendingRotations(v.dir); len(ids) != 0 {
 		t.Fatalf("staging left: %v", ids)
 	}
-	if _, err := Rotate(v.dir, v.key, nil); err == nil {
-		t.Fatal("rotation with no wrappers accepted")
+	if _, err := Rotate(v.dir, v.key, RotateOptions{}); err == nil {
+		t.Fatal("rotation without a new vault file accepted")
 	}
 }
 
@@ -235,11 +282,14 @@ func TestVaultLeak(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		vf, err := NewVaultFile("leak", k, []KeyWrapper{pw})
+		owner, _ := NewMemberWrapper("owner", memberIdentity(t).Recipient().String())
+		vf, err := NewVaultFile("leak", k, []KeyWrapper{pw, owner})
 		if err != nil {
 			t.Fatal(err)
 		}
+		complete(vf)
 		dir := filepath.Join(h.TempDir, "vault")
+		v := &testVault{dir: dir, key: k, pw: pw, owner: owner}
 		h.WatchDir(dir)
 		if err := format.CreateVault(dir, vf); err != nil {
 			t.Fatal(err)
@@ -271,17 +321,102 @@ func TestVaultLeak(t *testing.T) {
 		_, err = Unlock(vf, passWrapper(t, pass+"!"))
 		h.Stderr.WriteString(err.Error())
 
-		newKey, err := Rotate(dir, k, []KeyWrapper{pw})
+		newKey, err := Rotate(dir, k, v.rotateTo(t, pw))
 		if err != nil {
 			t.Fatal(err)
 		}
 		h.AddCanary(newKey.Bytes())
 		h.Logger.Info("rotated", "old", k, "new", newKey, "key_id", newKey.ID())
-		_, err = Rotate(dir, k, []KeyWrapper{pw})
+		_, err = Rotate(dir, k, v.rotateTo(t, pw))
 		h.Stderr.WriteString(err.Error())
 		conflicts, _ := format.FindConflicts(dir)
 		if len(conflicts) != 0 {
 			t.Fatalf("leftover files: %+v", conflicts)
 		}
 	})
+}
+
+// ue1.4 / M4: recovery moves staged files only when each opens under the
+// verified key; a planted staging folder for any other key is untouched.
+func TestRecoverRotation(t *testing.T) {
+	v := newVault(t)
+	_ = WriteSecret(v.dir, "A", v.key, []byte("real"))
+	before, _ := format.ReadSecretFile(v.dir, "A")
+
+	// Planted: staging for v.key's id with junk content.
+	s, err := format.BeginStaging(v.dir, v.key.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = s.AddSecret("A", []byte("attacker junk"))
+	_ = s.Finish()
+	if done, err := RecoverRotation(v.dir, v.key); done || err == nil {
+		t.Fatalf("junk staging committed: %v %v", done, err)
+	}
+	if got, _ := format.ReadSecretFile(v.dir, "A"); !bytes.Equal(got, before) {
+		t.Fatal("live file overwritten by planted staging")
+	}
+	_ = format.AbandonStaging(v.dir, v.key.ID())
+
+	// Genuine: staged under the key, opens with its own name.
+	s, _ = format.BeginStaging(v.dir, v.key.ID())
+	ct, _ := mustSealer(t, "A").Seal(v.key, []byte("staged"))
+	_ = s.AddSecret("A", ct)
+	_ = s.Finish()
+	// A file staged for another name does not open as A.
+	other := mustKey(t)
+	if done, _ := RecoverRotation(v.dir, other); done {
+		t.Fatal("recovered a staging folder for another key")
+	}
+	if done, err := RecoverRotation(v.dir, v.key); !done || err != nil {
+		t.Fatalf("RecoverRotation = %v, %v", done, err)
+	}
+	if got, err := ReadSecret(v.dir, "A", v.key); err != nil || string(got) != "staged" {
+		t.Fatalf("after recovery = %q, %v", got, err)
+	}
+}
+
+func TestKeyIDOf(t *testing.T) {
+	k := mustKey(t)
+	ct, _ := mustSealer(t, "A").Seal(k, []byte("x"))
+	if id, err := KeyIDOf(ct); err != nil || id != k.ID() {
+		t.Fatalf("KeyIDOf = %q, %v", id, err)
+	}
+	for _, bad := range [][]byte{nil, []byte("age-encryption.org/v1\n-> X25519 abc\n"), ct[:30]} {
+		if _, err := KeyIDOf(bad); err == nil {
+			t.Errorf("KeyIDOf(%q) accepted", bad)
+		}
+	}
+}
+
+// Files sealed under an extra key (a lost rotation's key) are re-sealed;
+// a file under an unknown key fails the rotation.
+func TestRotateExtraKeys(t *testing.T) {
+	v := newVault(t)
+	k3 := mustKey(t)
+	_ = WriteSecret(v.dir, "A", v.key, []byte("a"))
+	_ = WriteSecret(v.dir, "B", k3, []byte("b"))
+	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); !errors.Is(err, ErrOtherKey) {
+		t.Fatalf("rotation over an unknown-key file = %v", err)
+	}
+	opt := v.rotateTo(t, v.pw)
+	opt.ExtraKeys = []*VaultKey{k3}
+	nk, err := Rotate(v.dir, v.key, opt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadSecret(v.dir, "B", nk); err != nil || string(got) != "b" {
+		t.Fatalf("B = %q, %v", got, err)
+	}
+}
+
+// M4 CAS: Rotate refuses when vault.json is not the bytes the caller
+// verified.
+func TestRotateCAS(t *testing.T) {
+	v := newVault(t)
+	opt := v.rotateTo(t, v.pw)
+	opt.Expect = []byte("{}")
+	if _, err := Rotate(v.dir, v.key, opt); !errors.Is(err, format.ErrChanged) {
+		t.Fatalf("Rotate with stale Expect = %v", err)
+	}
 }

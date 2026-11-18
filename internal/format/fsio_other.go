@@ -23,3 +23,7 @@ func openNoFollow(path string) (*os.File, error) {
 var errSymlink = fs.ErrInvalid
 
 func isSymlinkErr(err error) bool { return err == errSymlink }
+
+// ownedByMe: ownership is not checked on Windows, where mode bits and
+// owner IDs are not comparable.
+func ownedByMe(fs.FileInfo) bool { return true }
