@@ -513,7 +513,7 @@ func (a *app) prepareWrite(v *vaultRef, key *crypto.VaultKey) error {
 		if len(rep.Unknown) == 0 && !rep.NewerCopy {
 			return verifyErrf("vault '%s': %v. If no member is changing the vault key right now, move the leftover folder aside with: %s doctor %s --quarantine-staging", v.name, members.ErrNewerState, a.prog, v.name)
 		}
-		return verifyErrf("vault '%s': %v", v.name, members.ErrNewerState)
+		return verifyErrf("vault '%s': %v. See why and how to clear it: %s doctor %s", v.name, members.ErrNewerState, a.prog, v.name)
 	}
 	a.warnExposed(v, rep)
 	return nil

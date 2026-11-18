@@ -28,6 +28,8 @@ Phase 2: agents, the terminal UI, an authenticated index, npm and Windows.
 - `make snapshot` builds print the snapshot version the Homebrew formula expects (zjv).
 - `help` gives `ui` and `log` their own headings; "entries" plural; `audit.log` is made private again if its permissions were widened.
 
+- `vault doctor VAULT` explains why a vault refuses changes (a planted or not-yet-synced secret or rotation folder from an unknown key), and `--set-aside-unknown` (typed confirmation, or `--yes-checked-with-members`) moves those items into `quarantine/` and logs it. A folder writer can still block changes to a shared vault, but not read new secrets as a removed member.
+
 ### Security
 
 - Unverified index rows show the name only (no description, tags, date or author) in text and `--json`, and descriptions are cleaned of control, bidi and zero-width characters (r1q.6.1).

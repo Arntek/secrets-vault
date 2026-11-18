@@ -34,6 +34,10 @@ const (
 	ActionMemberAdd    Action = "member-add"
 	ActionMemberRemove Action = "member-remove"
 	ActionPasswd       Action = "passwd"
+	// ActionSetAside: `doctor --set-aside-unknown` moved files the write
+	// guard could not account for into quarantine/ (after a typed
+	// confirmation). Nothing is deleted.
+	ActionSetAside Action = "set-aside"
 )
 
 // Event is one audit record. It holds names only, never values.
