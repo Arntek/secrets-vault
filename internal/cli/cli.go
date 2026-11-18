@@ -9,20 +9,25 @@
 //   - Masking values on a terminal; plain output only when piped or --reveal.
 //   - The registry (~/.config/vault/config.toml): which vaults exist and
 //     where. It holds no secrets.
+//   - The unlock flow: agent key, Touch ID, member identity, passphrase.
 //   - Mapping errors to the documented exit codes.
 //
 // Dependency rule: cli is the top of the internal graph. It may import every
 // other internal package; none of them may import cli. Keep business rules
 // out of cli: it orchestrates, the packages below decide.
 //
-// The command set is owned by issue rn5. This scaffold only has version and
-// help so the binary builds and the leak harness has something to run.
+// The command set is owned by issue rn5. Out of scope until Phase 2: ui,
+// prime, setup, log, doctor, backup and the MCP server.
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
+
+	"github.com/Arntek/secrets-vault/internal/agent"
 )
 
 // Exit codes. 3 and 4 are part of the agent contract printed by `vault prime`.
@@ -37,43 +42,223 @@ const (
 // Version is set at build time with -ldflags "-X ...cli.Version=v1.2.3".
 var Version = "dev"
 
+type command struct {
+	name    string
+	group   string
+	usage   string // what follows the program name
+	summary string
+	flags   []flagSpec
+	run     func(a *app, p *parsed) error
+}
+
+var (
+	fJSON    = flagSpec{name: "json"}
+	fVault   = flagSpec{name: "vault", value: true}
+	fPassStd = flagSpec{name: "passphrase-stdin"}
+	fYes     = flagSpec{name: "yes", short: "y"}
+)
+
+// commands is the command table; help and dispatch both read it.
+var commands = []command{
+	{name: "list", group: "Finding keys (no unlock needed)", usage: "list [--vault V] [--tag T]",
+		summary: "Every key across all vaults: name, vault, description, lock state.",
+		flags:   []flagSpec{fVault, {name: "tag", value: true}}, run: cmdList},
+	{name: "search", group: "Finding keys (no unlock needed)", usage: "search WORDS",
+		summary: "Search names, descriptions and tags.",
+		flags:   []flagSpec{fVault, {name: "tag", value: true}}, run: cmdSearch},
+	{name: "info", group: "Finding keys (no unlock needed)", usage: "info NAME",
+		summary: "Description, vault, tags, updated date and who last changed it.",
+		flags:   []flagSpec{fVault}, run: cmdInfo},
+
+	{name: "get", group: "Using keys", usage: "get NAME [--reveal] [-n]",
+		summary: "Print one value. Masked on a terminal unless --reveal; plain when piped.",
+		flags:   []flagSpec{fVault, {name: "reveal"}, {name: "no-newline", short: "n"}}, run: cmdGet},
+	{name: "run", group: "Using keys", usage: "run -k A [-k B] -- cmd args",
+		summary: "Run one command with only those keys set as environment variables.",
+		flags:   []flagSpec{fVault, {name: "key", short: "k", value: true}}, run: cmdRun},
+	{name: "copy", group: "Using keys", usage: "copy NAME",
+		summary: "Copy to the clipboard, cleared after 30 seconds if unchanged.",
+		flags:   []flagSpec{fVault}, run: cmdCopy},
+
+	{name: "set", group: "Changing keys", usage: "set NAME [--desc TEXT] [--vault V]",
+		summary: "Add or update. The value is typed hidden or piped in, never an argument.",
+		flags:   []flagSpec{fVault, {name: "desc", value: true}}, run: cmdSet},
+	{name: "describe", group: "Changing keys", usage: "describe NAME TEXT",
+		summary: "Change the description without touching the value.",
+		flags:   []flagSpec{fVault}, run: cmdDescribe},
+	{name: "tag", group: "Changing keys", usage: "tag NAME TAG[,TAG...] [--rm]",
+		summary: "Add tags for filtering (or remove them with --rm).",
+		flags:   []flagSpec{fVault, {name: "rm"}}, run: cmdTag},
+	{name: "mv", group: "Changing keys", usage: "mv NAME --to VAULT",
+		summary: "Move a key between vaults.",
+		flags:   []flagSpec{fVault, {name: "to", value: true}}, run: cmdMv},
+	{name: "rename", group: "Changing keys", usage: "rename OLD NEW",
+		summary: "Rename a key.",
+		flags:   []flagSpec{fVault}, run: cmdRename},
+	{name: "rm", group: "Changing keys", usage: "rm NAME [--yes]",
+		summary: "Delete, after confirmation. Kept in the trash for 30 days.",
+		flags:   []flagSpec{fVault, fYes}, run: cmdRm},
+
+	{name: "unlock", group: "Locking", usage: "unlock [VAULT] [--for DURATION]",
+		summary: "Unlock ahead of time (default vault if none is named).",
+		flags:   []flagSpec{{name: "for", value: true}, {name: "accept-key-change"}}, run: cmdUnlock},
+	{name: "lock", group: "Locking", usage: "lock [VAULT | --all]",
+		summary: "Forget the key now.", flags: []flagSpec{{name: "all"}}, run: cmdLock},
+	{name: "status", group: "Locking", usage: "status",
+		summary: "Each vault, locked or unlocked, time left, pending join requests.", run: cmdStatus},
+
+	{name: "init", group: "Managing vaults", usage: "init NAME --path DIR [--desc TEXT]",
+		summary: "Create a new vault in a folder you choose.",
+		flags:   []flagSpec{{name: "path", value: true}, {name: "desc", value: true}, {name: "force"}, {name: "touchid"}, {name: "no-touchid"}}, run: cmdInit},
+	{name: "attach", group: "Managing vaults", usage: "attach NAME DIR",
+		summary: "Register a vault that already exists; files a join request if you are not a member.",
+		flags:   []flagSpec{{name: "as", value: true}, {name: "desc", value: true}, {name: "no-request"}}, run: cmdAttach},
+	{name: "detach", group: "Managing vaults", usage: "detach NAME",
+		summary: "Remove from this Mac's registry. Files are untouched.", run: cmdDetach},
+	{name: "vaults", group: "Managing vaults", usage: "vaults",
+		summary: "List registered vaults, paths and key counts.", run: cmdVaults},
+	{name: "passwd", group: "Managing vaults", usage: "passwd VAULT",
+		summary: "Change a vault's passphrase.", run: cmdPasswd},
+	{name: "touchid", group: "Managing vaults", usage: "touchid on|off|list [VAULT]",
+		summary: "Turn Touch ID unlocking on or off for a vault on this Mac; list the Macs that can unlock it.",
+		run:     cmdTouchID},
+
+	{name: "member", group: "Sharing", usage: "member approve|rm|list|requests VAULT [NAME]",
+		summary: "Per-person keys: approve a join request, remove a member, list members or requests.",
+		flags:   []flagSpec{fYes, {name: "fingerprint", value: true}}, run: cmdMember},
+	{name: "identity", group: "Sharing", usage: "identity export|import FILE",
+		summary: "Move your identity to another Mac (passphrase-protected file).", run: cmdIdentity},
+
+	{name: "config", group: "Settings", usage: "config set KEY VALUE [--vault V] | config list",
+		summary: "Change settings: default-ttl, default-vault, touch-every-read, dialog.",
+		flags:   []flagSpec{fVault}, run: cmdConfig},
+	{name: "alias", group: "Settings", usage: "alias add|rm|list NAME [--force]",
+		summary: "Manage short names (vault, sv, ...) for this program.",
+		flags:   []flagSpec{{name: "force"}}, run: cmdAlias},
+}
+
+func findCommand(name string) *command {
+	for i := range commands {
+		if commands[i].name == name {
+			return &commands[i]
+		}
+	}
+	return nil
+}
+
 // Run executes one command. args[0] is the program name as invoked, so help
 // text uses whichever short name the user actually has.
 func Run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	_ = stdin
 	prog := "secrets-vault"
 	if len(args) > 0 && args[0] != "" {
-		prog = filepath.Base(args[0])
+		prog = strings.TrimSuffix(filepath.Base(args[0]), ".exe")
 	}
 	if len(args) < 2 {
 		usage(stderr, prog)
 		return ExitUsage
 	}
+	a := newApp(prog, stdin, stdout, stderr)
+	defer a.close()
+
 	switch args[1] {
+	case agent.AgentArg:
+		if err := agent.Run(); err != nil {
+			return ExitError
+		}
+		return ExitOK
+	case ClipClearArg:
+		return a.runClipClear()
 	case "version", "--version", "-v":
 		fmt.Fprintf(stdout, "secrets-vault %s\n", Version)
 		return ExitOK
 	case "help", "--help", "-h":
+		if len(args) > 2 {
+			if c := findCommand(args[2]); c != nil {
+				commandHelp(stdout, prog, c)
+				return ExitOK
+			}
+		}
 		usage(stdout, prog)
 		return ExitOK
-	default:
+	}
+	c := findCommand(args[1])
+	if c == nil {
 		// Never echo unknown arguments: a value may have been pasted by
 		// mistake.
 		fmt.Fprintf(stderr, "%s: unknown command. Run '%s help'.\n", prog, prog)
 		return ExitUsage
 	}
+	return a.dispatch(c, args[2:])
+}
+
+func (a *app) dispatch(c *command, args []string) int {
+	for _, x := range args {
+		if x == "--" {
+			break
+		}
+		if x == "--help" || x == "-h" {
+			commandHelp(a.out, a.prog, c)
+			return ExitOK
+		}
+	}
+	specs := append([]flagSpec{fJSON, fPassStd}, c.flags...)
+	p, err := parseArgs(args, specs)
+	if err != nil {
+		return a.fail(err, c)
+	}
+	a.asJSON = p.has("json")
+	a.passStdin = p.has("passphrase-stdin")
+	if err := c.run(a, p); err != nil {
+		return a.fail(err, c)
+	}
+	return ExitOK
+}
+
+func (a *app) fail(err error, c *command) int {
+	var ee *exitErr
+	if errors.As(err, &ee) {
+		if ee.msg != "" {
+			fmt.Fprintf(a.errOut, "%s: %s\n", a.prog, ee.msg)
+			if ee.code == ExitUsage && c != nil && !strings.HasPrefix(ee.msg, "usage:") {
+				fmt.Fprintf(a.errOut, "Run '%s %s --help' for usage.\n", a.prog, c.name)
+			}
+		}
+		return ee.code
+	}
+	if errors.Is(err, agent.ErrLocked) {
+		fmt.Fprintf(a.errOut, "%s: the vault is locked\n", a.prog)
+		return ExitLocked
+	}
+	fmt.Fprintf(a.errOut, "%s: %v\n", a.prog, err)
+	return ExitError
 }
 
 func usage(w io.Writer, prog string) {
-	fmt.Fprintf(w, `%[1]s: one command for every secret.
+	fmt.Fprintf(w, "%[1]s: one command for every secret.\n\nUsage:\n  %[1]s <command> [flags]\n", prog)
+	last := ""
+	for _, c := range commands {
+		if c.group != last {
+			fmt.Fprintf(w, "\n%s:\n", c.group)
+			last = c.group
+		}
+		fmt.Fprintf(w, "  %-46s %s\n", c.usage, c.summary)
+	}
+	fmt.Fprintf(w, "\nEvery command accepts --json. Exit codes: 0 ok, 1 error, 2 usage, 3 vault locked, 4 key not found.\n")
+	fmt.Fprintf(w, "More: '%s help COMMAND', '%s version'.\n", prog, prog)
+}
 
-Usage:
-  %[1]s <command> [flags]
-
-Commands:
-  version   Print the version
-  help      Show this help
-
-More commands arrive with the Phase 1 CLI.
-`, prog)
+func commandHelp(w io.Writer, prog string, c *command) {
+	fmt.Fprintf(w, "Usage: %s %s\n\n%s\n", prog, c.usage, c.summary)
+	var opts []string
+	for _, f := range append([]flagSpec{fJSON, fPassStd}, c.flags...) {
+		s := "--" + f.name
+		if f.short != "" {
+			s = "-" + f.short + ", " + s
+		}
+		if f.value {
+			s += " VALUE"
+		}
+		opts = append(opts, s)
+	}
+	fmt.Fprintf(w, "\nOptions: %s\n", strings.Join(opts, ", "))
 }
