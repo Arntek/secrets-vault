@@ -35,14 +35,22 @@ import (
 	"time"
 )
 
-// Format versions written by this build. vault.json moved to version 2
-// with the signed membership log (docs/design/membership-auth.md); version
-// 1 files are parsed only so a personal vault can be migrated. index.json
-// is unchanged at version 1.
+// Format versions written by this build. vault.json is version 3 with the
+// authenticated index and versioned secret files (docs/design/index-auth.md);
+// version 2 (the signed membership log, docs/design/membership-auth.md) is
+// still parsed and read, and upgraded by `vault upgrade`; version 1 is
+// parsed only so a personal vault can be migrated. index.json is version 2
+// (per-entry MACs); version 1 is parsed for legacy vaults and migration.
 const (
-	VaultVersion = 2
-	IndexVersion = 1
+	VaultVersion       = 3
+	LegacyVaultVersion = 2
+	IndexVersion       = 2
+	LegacyIndexVersion = 1
 )
+
+// MaxCounter is the largest value of an index entry's version and rev.
+// A change that would pass it is refused; counters never wrap.
+const MaxCounter = 1<<31 - 1
 
 // File and directory names inside a vault folder.
 const (
@@ -162,12 +170,23 @@ type IndexEntry struct {
 	Tags        []string  `json:"tags,omitempty"`
 	Updated     time.Time `json:"updated"`
 	UpdatedBy   string    `json:"updated_by,omitempty"`
+	// Version counts value writes of the secret (it is also sealed into the
+	// secret file's header); Rev counts every change to this entry. Deleted
+	// marks a tombstone. MAC authenticates the entry under a key derived
+	// from the vault key. All four are zero in a version-1 index.
+	Version uint32 `json:"version,omitempty"`
+	Rev     uint32 `json:"rev,omitempty"`
+	Deleted bool   `json:"deleted,omitempty"`
+	MAC     string `json:"mac,omitempty"`
 }
 
 // Index is the content of index.json. It is readable without unlocking
 // (design D2) and is rebuilt from secrets/ if it drifts.
 type Index struct {
-	Version int          `json:"version"`
+	Version int `json:"version"`
+	// VaultID is advisory (an early reject for a copied-in index); nothing
+	// trusts it. Version 2 only.
+	VaultID string       `json:"vault_id,omitempty"`
 	Private bool         `json:"private,omitempty"`
 	Entries []IndexEntry `json:"entries"`
 }

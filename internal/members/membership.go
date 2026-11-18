@@ -30,6 +30,26 @@ func Load(vaultDir, registeredID string) (*Chain, *format.VaultFile, error) {
 	return c, vf, nil
 }
 
+// UpgradeFormat appends the signed upgrade-format record that moves a
+// format-2 vault to format 3, and returns the new vault.json. The caller
+// has already re-sealed the secret files and written index.json
+// (docs/design/index-auth.md); the CAS write of this file is the commit.
+func (c *Chain) UpgradeFormat(signer *Unlocked, now time.Time) (*format.VaultFile, error) {
+	if c.Head().Format != format.LegacyVaultVersion {
+		return nil, errors.New("members: the vault is already at format 3")
+	}
+	return c.Append(signer, Change{
+		Op: format.OpUpgradeFormat, Format: format.VaultVersion, KeyID: c.File.KeyID,
+		Unlockers: slices.Clone(c.File.Unlockers), Time: now,
+	})
+}
+
+// WriteUpgrade writes next (from UpgradeFormat) over c's file, compare-and-
+// swap on the verified bytes, and returns the re-read chain.
+func WriteUpgrade(vaultDir string, c *Chain, next *format.VaultFile) (*Chain, error) {
+	return write(vaultDir, c, next)
+}
+
 // NewVault creates a vault in vaultDir owned by owner: the vault key is
 // wrapped for owner (and passphrase, if not nil) and the genesis record is
 // signed by owner. It returns the verified chain.
@@ -148,7 +168,12 @@ type RotateOptions struct {
 	// Pending, if set, keeps the new key (encrypted to signer) until the
 	// rotation is confirmed, so a lost race can be repaired.
 	Pending *PendingStore
-	Now     time.Time
+	// TrustedEntries are index entries a lost-race repair vouches for
+	// (see crypto.RotateOptions); IndexDropped receives how many index
+	// entries failed verification.
+	TrustedEntries []format.IndexEntry
+	IndexDropped   *int
+	Now            time.Time
 }
 
 // RotateResult describes a completed rotation.
@@ -284,8 +309,10 @@ func rotate(vaultDir string, c *Chain, key *crypto.VaultKey, signer *Unlocked, o
 	defer func() { _ = format.RemoveLease(vaultDir) }()
 
 	newKey, err := crypto.Rotate(vaultDir, key, crypto.RotateOptions{
-		Expect:    c.Raw,
-		ExtraKeys: opt.ExtraKeys,
+		Expect:         c.Raw,
+		ExtraKeys:      opt.ExtraKeys,
+		TrustedEntries: opt.TrustedEntries,
+		IndexDropped:   opt.IndexDropped,
 		Next: func(nk *crypto.VaultKey) (*format.VaultFile, error) {
 			ws := make([]crypto.KeyWrapper, 0, len(stay)+1)
 			for _, m := range stay {

@@ -9,8 +9,10 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"io"
+	"strconv"
 
 	"filippo.io/age"
 
@@ -26,6 +28,7 @@ const (
 	infoKeyID     = "secrets-vault/v1 key id"
 	infoFileKeyV1 = "secrets-vault/v1 secret file key\x00"
 	infoFileKey   = "secrets-vault/v2 secret file key\x00"
+	infoFileKeyV3 = "secrets-vault/v3 secret file key\x00"
 )
 
 // stanzaType is the age recipient stanza type of secret files:
@@ -36,9 +39,17 @@ const (
 // Each file has its own random salt, so each wrapping key is used once and
 // the fixed nonce is safe (the same construction age uses for scrypt).
 // stanzaTypeV1 ("sv-vaultkey", with infoFileKeyV1) is only read.
+//
+// Version 3 (docs/design/index-auth.md) adds the file's version number:
+//
+//	-> sv-vaultkey3 <key id hex> <salt> <version, decimal>
+//
+// The version is bound into the file key's AES-GCM as associated data and
+// covered by age's header MAC. Builds before it can't open these files.
 const (
 	stanzaType   = "sv-vaultkey2"
 	stanzaTypeV1 = "sv-vaultkey"
+	stanzaTypeV3 = "sv-vaultkey3"
 )
 
 const (
@@ -58,8 +69,20 @@ func NewSealer(name string) (Sealer, error) {
 
 type sealer struct{ name string }
 
-// Seal encrypts plaintext as an age file for key.
+// Seal encrypts plaintext as an unversioned age file for key.
 func (s *sealer) Seal(key *VaultKey, plaintext []byte) ([]byte, error) {
+	return s.seal(key, plaintext, 0)
+}
+
+// SealVersion encrypts plaintext as a version-stamped age file for key.
+func (s *sealer) SealVersion(key *VaultKey, plaintext []byte, version uint32) ([]byte, error) {
+	if version < 1 || version > format.MaxCounter {
+		return nil, ErrVersionRange
+	}
+	return s.seal(key, plaintext, version)
+}
+
+func (s *sealer) seal(key *VaultKey, plaintext []byte, version uint32) ([]byte, error) {
 	if key == nil {
 		return nil, errors.New("crypto: no vault key")
 	}
@@ -67,7 +90,7 @@ func (s *sealer) Seal(key *VaultKey, plaintext []byte) ([]byte, error) {
 		return nil, ErrTooLarge
 	}
 	var buf bytes.Buffer
-	w, err := age.Encrypt(&buf, &vaultKeyRecipient{key: key, name: s.name})
+	w, err := age.Encrypt(&buf, &vaultKeyRecipient{key: key, name: s.name, version: version})
 	if err != nil {
 		return nil, err
 	}
@@ -84,34 +107,43 @@ func (s *sealer) Seal(key *VaultKey, plaintext []byte) ([]byte, error) {
 // whole file is authenticated before any plaintext is returned. Every
 // failure returns ErrDecrypt (or ErrOtherKey, which wraps it).
 func (s *sealer) Open(key *VaultKey, ciphertext []byte) ([]byte, error) {
+	pt, _, err := s.OpenVersion(key, ciphertext)
+	return pt, err
+}
+
+// OpenVersion is Open that also returns the version in the file's header.
+func (s *sealer) OpenVersion(key *VaultKey, ciphertext []byte) ([]byte, uint32, error) {
 	if key == nil {
-		return nil, ErrDecrypt
+		return nil, 0, ErrDecrypt
 	}
 	if len(ciphertext) > format.MaxSecretFileSize {
-		return nil, ErrDecrypt
+		return nil, 0, ErrDecrypt
 	}
 	id := &vaultKeyIdentity{key: key, name: s.name}
 	r, err := age.Decrypt(bytes.NewReader(ciphertext), id)
 	if err != nil {
 		if id.otherKey {
-			return nil, ErrOtherKey
+			return nil, 0, ErrOtherKey
 		}
-		return nil, ErrDecrypt
+		return nil, 0, ErrDecrypt
 	}
 	pt, err := io.ReadAll(io.LimitReader(r, MaxSecretSize+1))
 	if err != nil || len(pt) > MaxSecretSize {
 		clear(pt)
-		return nil, ErrDecrypt
+		return nil, 0, ErrDecrypt
 	}
-	return pt, nil
+	return pt, id.version, nil
 }
 
 // fileKeyWrapper derives the AES-GCM that wraps one file key, with the
 // HKDF label of the given stanza type.
 func fileKeyWrapper(key *VaultKey, salt []byte, name, typ string) (cipher.AEAD, error) {
 	info := infoFileKey
-	if typ == stanzaTypeV1 {
+	switch typ {
+	case stanzaTypeV1:
 		info = infoFileKeyV1
+	case stanzaTypeV3:
+		info = infoFileKeyV3
 	}
 	kek, err := hkdf.Key(sha256.New, key.b[:], salt, info+name, 32)
 	if err != nil {
@@ -126,8 +158,15 @@ func fileKeyWrapper(key *VaultKey, salt []byte, name, typ string) (cipher.AEAD, 
 }
 
 type vaultKeyRecipient struct {
-	key  *VaultKey
-	name string
+	key     *VaultKey
+	name    string
+	version uint32 // 0: unversioned (stanza v2)
+}
+
+func versionAAD(v uint32) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
+	return b[:]
 }
 
 func (r *vaultKeyRecipient) Wrap(fileKey []byte) ([]*age.Stanza, error) {
@@ -135,16 +174,23 @@ func (r *vaultKeyRecipient) Wrap(fileKey []byte) ([]*age.Stanza, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
-	aead, err := fileKeyWrapper(r.key, salt, r.name, stanzaType)
+	typ := stanzaType
+	args := []string{r.key.ID(), base64.RawStdEncoding.EncodeToString(salt)}
+	var aad []byte
+	if r.version != 0 {
+		typ = stanzaTypeV3
+		args = append(args, strconv.FormatUint(uint64(r.version), 10))
+		aad = versionAAD(r.version)
+	}
+	aead, err := fileKeyWrapper(r.key, salt, r.name, typ)
 	if err != nil {
 		return nil, err
 	}
 	nonce := make([]byte, aead.NonceSize())
 	return []*age.Stanza{{
-		Type: stanzaType,
-		Args: []string{r.key.ID(), base64.RawStdEncoding.EncodeToString(salt)},
-		Body: aead.Seal(nil, nonce, fileKey, nil), // #nosec G407 -- the key is derived from a fresh random salt and used for this one seal only
-
+		Type: typ,
+		Args: args,
+		Body: aead.Seal(nil, nonce, fileKey, aad), // #nosec G407 -- the key is derived from a fresh random salt and used for this one seal only
 	}}, nil
 }
 
@@ -152,13 +198,18 @@ func (r *vaultKeyRecipient) Wrap(fileKey []byte) ([]*age.Stanza, error) {
 // one file, so a secret file never carries a second, weaker way in.
 func (r *vaultKeyRecipient) WrapWithLabels(fileKey []byte) ([]*age.Stanza, []string, error) {
 	s, err := r.Wrap(fileKey)
-	return s, []string{stanzaType + "-" + r.key.ID()}, err
+	typ := stanzaType
+	if r.version != 0 {
+		typ = stanzaTypeV3
+	}
+	return s, []string{typ + "-" + r.key.ID()}, err
 }
 
 type vaultKeyIdentity struct {
 	key      *VaultKey
 	name     string
 	otherKey bool // set when the only stanza names a different key ID
+	version  uint32
 }
 
 var errBadStanza = errors.New("crypto: malformed secret file header")
@@ -168,11 +219,24 @@ func (i *vaultKeyIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 		return nil, errBadStanza
 	}
 	s := stanzas[0]
-	if s.Type != stanzaType && s.Type != stanzaTypeV1 {
+	if s.Type != stanzaType && s.Type != stanzaTypeV1 && s.Type != stanzaTypeV3 {
 		return nil, age.ErrIncorrectIdentity
 	}
-	if len(s.Args) != 2 {
+	want := 2
+	if s.Type == stanzaTypeV3 {
+		want = 3
+	}
+	if len(s.Args) != want {
 		return nil, errBadStanza
+	}
+	var aad []byte
+	var version uint32
+	if s.Type == stanzaTypeV3 {
+		v, err := parseVersionArg(s.Args[2])
+		if err != nil {
+			return nil, errBadStanza
+		}
+		version, aad = v, versionAAD(v)
 	}
 	if subtle.ConstantTimeCompare([]byte(s.Args[0]), []byte(i.key.ID())) != 1 {
 		i.otherKey = true
@@ -189,9 +253,26 @@ func (i *vaultKeyIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 	if len(s.Body) != fileKeySize+aead.Overhead() {
 		return nil, errBadStanza
 	}
-	fileKey, err := aead.Open(nil, make([]byte, aead.NonceSize()), s.Body, nil)
+	fileKey, err := aead.Open(nil, make([]byte, aead.NonceSize()), s.Body, aad)
 	if err != nil {
 		return nil, age.ErrIncorrectIdentity
 	}
+	i.version = version
 	return fileKey, nil
+}
+
+// ErrVersionRange is returned for a secret-file version outside
+// 1..format.MaxCounter.
+var ErrVersionRange = errors.New("crypto: secret version out of range")
+
+// parseVersionArg parses the canonical decimal version of a v3 stanza.
+func parseVersionArg(a string) (uint32, error) {
+	if a == "" || (len(a) > 1 && a[0] == '0') || len(a) > 10 {
+		return 0, errBadStanza
+	}
+	n, err := strconv.ParseUint(a, 10, 32)
+	if err != nil || n < 1 || n > format.MaxCounter {
+		return 0, errBadStanza
+	}
+	return uint32(n), nil
 }

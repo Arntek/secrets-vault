@@ -107,6 +107,15 @@ func (s *Staging) AddTrashed(t TrashedSecret, ciphertext []byte) error {
 	return s.add(TrashDir+"/"+t.File, ciphertext)
 }
 
+// AddIndex stages the new index.json. It is moved to the vault root, not
+// into secrets/, when the rotation is committed.
+func (s *Staging) AddIndex(data []byte) error {
+	if len(data) > MaxFileSize {
+		return ErrTooLarge
+	}
+	return s.add(IndexFileName, data)
+}
+
 // Finish writes the MANIFEST. After it, writing vault.json commits.
 func (s *Staging) Finish() error {
 	var b strings.Builder
@@ -166,8 +175,12 @@ func ParseManifest(data []byte, keyID string) ([]string, error) {
 	return files, nil
 }
 
-// validateManifestEntry allows "NAME.age" and ".trash/<trash file name>".
+// validateManifestEntry allows "NAME.age", ".trash/<trash file name>" and
+// "index.json".
 func validateManifestEntry(rel string) error {
+	if rel == IndexFileName {
+		return nil
+	}
 	if t, ok := strings.CutPrefix(rel, TrashDir+"/"); ok {
 		_, err := ParseTrashName(t)
 		return err
@@ -243,6 +256,9 @@ func CommitStaged(vaultDir, keyID string) error {
 	for _, f := range files {
 		src := filepath.Join(dir, filepath.FromSlash(f))
 		dst := filepath.Join(SecretsPath(vaultDir), filepath.FromSlash(f))
+		if f == IndexFileName {
+			dst = IndexPath(vaultDir)
+		}
 		if path.Dir(f) == TrashDir {
 			if err := os.MkdirAll(TrashPath(vaultDir), DirMode); err != nil {
 				return err
@@ -266,7 +282,7 @@ type StagedFile struct {
 	// Rel is the path inside the staging folder ("NAME.age" or
 	// ".trash/<trash file>").
 	Rel string
-	// Name is the key name the file belongs to.
+	// Name is the key name the file belongs to (empty for index.json).
 	Name string
 }
 
@@ -295,6 +311,10 @@ func StagedFiles(vaultDir, keyID string) ([]StagedFile, error) {
 	}
 	out := make([]StagedFile, 0, len(rels))
 	for _, rel := range rels {
+		if rel == IndexFileName {
+			out = append(out, StagedFile{Rel: rel})
+			continue
+		}
 		if t, ok := strings.CutPrefix(rel, TrashDir+"/"); ok {
 			ts, err := ParseTrashName(t)
 			if err != nil {
@@ -317,7 +337,11 @@ func ReadStagedFile(vaultDir, keyID, rel string) ([]byte, error) {
 	if err := validateManifestEntry(rel); err != nil {
 		return nil, err
 	}
-	return readRegular(filepath.Join(stagingDir(vaultDir, keyID), filepath.FromSlash(rel)), MaxSecretFileSize)
+	limit := int64(MaxSecretFileSize)
+	if rel == IndexFileName {
+		limit = MaxFileSize
+	}
+	return readRegular(filepath.Join(stagingDir(vaultDir, keyID), filepath.FromSlash(rel)), limit)
 }
 
 // QuarantineDir is where `vault doctor --quarantine-staging` moves rotation

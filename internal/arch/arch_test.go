@@ -19,12 +19,13 @@ var allowed = map[string][]string{
 	"internal/leaktest": {},
 	"internal/arch":     {},
 	"internal/crypto":   {"internal/format"},
+	"internal/index":    {"internal/crypto", "internal/format"},
 	"internal/agent":    {"internal/crypto", "internal/format"},
 	"internal/touchid":  {"internal/crypto", "internal/format"},
 	"internal/members":  {"internal/crypto", "internal/format", "internal/audit"},
 	"internal/cli": {
 		"internal/format", "internal/crypto", "internal/agent",
-		"internal/touchid", "internal/members", "internal/audit",
+		"internal/touchid", "internal/members", "internal/audit", "internal/index",
 	},
 	"cmd/secrets-vault": {"internal/cli"},
 }
