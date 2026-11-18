@@ -14,18 +14,19 @@ const module = "github.com/Arntek/secrets-vault/"
 // allowed lists, for each internal package, the internal packages its
 // non-test code may import. Keep in sync with docs/architecture.md.
 var allowed = map[string][]string{
-	"internal/format":   {},
-	"internal/audit":    {},
-	"internal/leaktest": {},
-	"internal/arch":     {},
-	"internal/crypto":   {"internal/format"},
-	"internal/index":    {"internal/crypto", "internal/format"},
-	"internal/agent":    {"internal/crypto", "internal/format"},
-	"internal/touchid":  {"internal/crypto", "internal/format"},
-	"internal/members":  {"internal/crypto", "internal/format", "internal/audit"},
+	"internal/format":     {},
+	"internal/audit":      {},
+	"internal/leaktest":   {},
+	"internal/arch":       {},
+	"internal/agentsetup": {},
+	"internal/crypto":     {"internal/format"},
+	"internal/index":      {"internal/crypto", "internal/format"},
+	"internal/agent":      {"internal/crypto", "internal/format"},
+	"internal/touchid":    {"internal/crypto", "internal/format"},
+	"internal/members":    {"internal/crypto", "internal/format", "internal/audit"},
 	"internal/cli": {
 		"internal/format", "internal/crypto", "internal/agent",
-		"internal/touchid", "internal/members", "internal/audit", "internal/index",
+		"internal/touchid", "internal/members", "internal/audit", "internal/index", "internal/agentsetup",
 	},
 	"cmd/secrets-vault": {"internal/cli"},
 }

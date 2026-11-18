@@ -11,6 +11,7 @@ secrets-vault is one Go binary (`cmd/secrets-vault`) installed as `secrets-vault
 | `internal/touchid` | Touch ID unlocker: Secure Enclave key via a Swift CryptoKit static library linked through cgo (`darwin && cgo && touchid` build tag, set by the Makefile), implementing `crypto.KeyWrapper`. Returns `ErrUnsupported` in every other build. | p1d |
 | `internal/agent` | Memory-only unlock agent (like ssh-agent) and its `Client`: holds unlocked keys per vault with a TTL (default 4h, 5m to 24h) behind a user-only socket. | 244 |
 | `internal/members` | Personal identities (age X25519 + Ed25519 signing key), fingerprints (`MAPLE-RIVER-OTTER-4417`, over both keys), signed join requests, the signed membership log and its verifier, trust pins, approve, remove/passwd with key rotation, lost-race rebase, write guard. | p2h, ue1.1 |
+| `internal/agentsetup` | Additive edits to an AI-agent setup: writes one file it owns (checksum marker on its last line) or one marked block inside CLAUDE.md/AGENTS.md; refuses symlinks and hand-edited content; atomic writes, original permissions kept, dry-run diff; and the agent rules text (`Rules`) printed by `vault prime`. | r1q.1 |
 | `internal/audit` | Local read log (`vault log`). Events hold names only; the type has no field for a value. | Phase 2 (interface fixed now) |
 | `internal/index` | The authenticated index: per-entry MAC verification, cross-checks against the secret files' versions, the local snapshot, the locked view and the compare-and-swap write loop (docs/design/index-auth.md). | ue1.7 |
 | `internal/cli` | Commands, flags, prompts, `--json`, masking, exit codes, registry (`~/.config/vault/config.toml`), aliases. Orchestrates; holds no business rules. | rn5 |
@@ -25,7 +26,7 @@ Arrows point from importer to imported. Nothing may import "upwards".
 layer 0  cmd/secrets-vault
 layer 1  internal/cli
 layer 2  internal/members   internal/agent   internal/touchid   internal/index
-layer 3  internal/crypto    internal/audit
+layer 3  internal/crypto    internal/audit    internal/agentsetup
 layer 4  internal/format
 ```
 
@@ -35,7 +36,7 @@ Allowed internal imports (non-test code), enforced by `internal/arch/arch_test.g
 
 | Package | May import |
 |---|---|
-| `format`, `audit`, `leaktest` | standard library only |
+| `format`, `audit`, `agentsetup`, `leaktest` | standard library only |
 | `crypto` | `format` |
 | `agent` | `crypto`, `format` |
 | `touchid` | `crypto`, `format` |
