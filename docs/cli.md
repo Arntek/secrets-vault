@@ -17,8 +17,9 @@ aliases = ["sv"]             # short names added by `alias add`
 path = "/path/to/folder"
 description = "..."
 ttl = "8h"                   # per-vault overrides: ttl, touch_every_read, dialog
-id = "..."                   # vault id recorded at init/attach, see Trust below
 ```
+
+`registry.toml` (written only by this build) holds `[vaults.NAME] id = "...", path = "..."`: the vault ID registered for each name and folder. See Trust.
 
 ## Unlock flow
 
@@ -49,7 +50,7 @@ The socket path must fit in 100 bytes (macOS limit is 104). When `~/Library/Cach
 
 Design: [design/membership-auth.md](design/membership-auth.md). In short:
 
-- The registry entry's `id` is the vault ID recorded at `init`/`attach`. A `vault.json` with another ID is refused ("this folder now holds a different vault").
+- The vault ID recorded at `init`/`attach` is kept in `registry.toml` next to `config.toml` (name, ID, path), not in `config.toml`: builds from before the membership log rewrite `config.toml` and would drop it (ue1.8). A `vault.json` with another ID is refused ("this folder now holds a different vault"). An entry with no registered ID, for a folder this machine already has a trust pin for, is refused too ("lost its record"); `detach` + `attach` fixes it.
 - `trust/<vault id>.json` is this machine's pin: the last membership-log head it verified, plus the records it wrote itself that nobody has extended yet. A folder that extends the pin is accepted silently; one that is older or different is refused with no override flag (`vault trust VAULT --accept-rollback` is the deliberate way, with a typed fingerprint). A change of this machine's that lost a race with another member's is re-applied on the next write, or by `vault trust VAULT`.
 - First use: a member added by someone else types that person's fingerprint; the owner's own second machine is shown the head and asked for the state code from another machine (Enter skips). A passphrase-only user pins on the first successful unlock.
 - `pending/` holds the new keys of this machine's unconfirmed rotations, encrypted to its own identity, so a lost race can be repaired. They are deleted when confirmed, on `detach` and on `--accept-rollback`.

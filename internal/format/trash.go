@@ -181,3 +181,18 @@ func RestoreSecret(vaultDir string, t TrashedSecret) error {
 	}
 	return syncDir(filepath.Dir(dst))
 }
+
+// WriteTrashedFile atomically replaces the content of a trashed key (used
+// to upgrade its file format in place).
+func WriteTrashedFile(vaultDir string, t TrashedSecret, ciphertext []byte) error {
+	if _, err := ParseTrashName(t.File); err != nil {
+		return err
+	}
+	if len(ciphertext) > MaxSecretFileSize {
+		return ErrTooLarge
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
+	return WriteFileAtomic(filepath.Join(TrashPath(vaultDir), t.File), ciphertext, FileMode)
+}

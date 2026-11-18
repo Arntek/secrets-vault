@@ -139,7 +139,14 @@ func (w *memberWrapper) Unwrap(u format.Unlocker) (*VaultKey, error) {
 	return unwrapAge(w.identity, u.WrappedKey)
 }
 
-// wrapAge encrypts the raw vault key as an age file to r.
+// wrappedKeyMarker starts the plaintext of every wrapped key this build
+// writes (ue1.8). Builds from before the membership log expect exactly the
+// 32 key bytes, so they can't unwrap a key from a version-2 vault even if a
+// folder writer rewrites its vault.json as version 1: an old build gets
+// nothing to unlock, and so nothing to re-wrap for a planted unlocker.
+const wrappedKeyMarker = "secrets-vault/v2 wrapped key\x00"
+
+// wrapAge encrypts the marked vault key as an age file to r.
 func wrapAge(r age.Recipient, key *VaultKey) ([]byte, error) {
 	if key == nil {
 		return nil, errors.New("crypto: no vault key")
@@ -149,7 +156,9 @@ func wrapAge(r age.Recipient, key *VaultKey) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := w.Write(key.b[:]); err != nil {
+	pt := append([]byte(wrappedKeyMarker), key.b[:]...)
+	defer clear(pt)
+	if _, err := w.Write(pt); err != nil {
 		return nil, err
 	}
 	if err := w.Close(); err != nil {
@@ -158,7 +167,9 @@ func wrapAge(r age.Recipient, key *VaultKey) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// unwrapAge opens a wrapped vault key. Every failure is ErrWrongKey.
+// unwrapAge opens a wrapped vault key: the marked form, or the bare 32
+// bytes of earlier versions (version-1 vaults being migrated, identity
+// files from before). Every failure is ErrWrongKey.
 func unwrapAge(id age.Identity, wrapped []byte) (*VaultKey, error) {
 	if len(wrapped) == 0 || len(wrapped) > format.MaxWrappedKeyLen {
 		return nil, ErrWrongKey
@@ -168,9 +179,16 @@ func unwrapAge(id age.Identity, wrapped []byte) (*VaultKey, error) {
 		return nil, ErrWrongKey
 	}
 	// ReadAll returns a nil error only at a clean, authenticated EOF.
-	b, err := io.ReadAll(io.LimitReader(r, KeySize+1))
+	b, err := io.ReadAll(io.LimitReader(r, int64(len(wrappedKeyMarker)+KeySize+1)))
 	defer clear(b)
-	if err != nil || len(b) != KeySize {
+	if err != nil {
+		return nil, ErrWrongKey
+	}
+	switch {
+	case len(b) == len(wrappedKeyMarker)+KeySize && string(b[:len(wrappedKeyMarker)]) == wrappedKeyMarker:
+		b = b[len(wrappedKeyMarker):]
+	case len(b) == KeySize:
+	default:
 		return nil, ErrWrongKey
 	}
 	k := &VaultKey{}

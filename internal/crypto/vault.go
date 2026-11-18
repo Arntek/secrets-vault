@@ -305,11 +305,17 @@ func RecoverRotation(vaultDir string, key *VaultKey) (bool, error) {
 // KeyIDOf returns the vault key ID a secret file is sealed under, read from
 // its age header without decrypting anything.
 func KeyIDOf(ciphertext []byte) (string, error) {
-	const intro = "age-encryption.org/v1\n-> " + stanzaType + " "
-	if !bytes.HasPrefix(ciphertext, []byte(intro)) {
+	var rest []byte
+	for _, typ := range []string{stanzaType, stanzaTypeV1} {
+		intro := "age-encryption.org/v1\n-> " + typ + " "
+		if bytes.HasPrefix(ciphertext, []byte(intro)) {
+			rest = ciphertext[len(intro):]
+			break
+		}
+	}
+	if rest == nil {
 		return "", errBadStanza
 	}
-	rest := ciphertext[len(intro):]
 	end := bytes.IndexAny(rest, " \n")
 	if end < 0 {
 		return "", errBadStanza
@@ -347,4 +353,60 @@ func reseal(name string, keys []*VaultKey, newKey *VaultKey, ct []byte) ([]byte,
 	}
 	defer clear(pt)
 	return s.Seal(newKey, pt)
+}
+
+// UpgradeSecrets re-seals every live and trashed secret still in the
+// version-1 file format (stanza sv-vaultkey) under the same key in the
+// current format, one atomic file write each. It is part of migrating a
+// version-1 vault (ue1.8): afterwards no file is left that a build from
+// before the membership log could open or rotate. It returns how many
+// files it rewrote.
+func UpgradeSecrets(vaultDir string, key *VaultKey) (int, error) {
+	n := 0
+	isV1 := func(ct []byte) bool {
+		return bytes.HasPrefix(ct, []byte("age-encryption.org/v1\n-> "+stanzaTypeV1+" "))
+	}
+	secrets, err := format.ListSecrets(vaultDir)
+	if err != nil {
+		return n, err
+	}
+	for _, s := range secrets {
+		ct, err := format.ReadSecretFile(vaultDir, s.Name)
+		if err != nil {
+			return n, err
+		}
+		if !isV1(ct) {
+			continue
+		}
+		nct, err := reseal(s.Name, []*VaultKey{key}, key, ct)
+		if err != nil {
+			return n, err
+		}
+		if err := format.WriteSecretFile(vaultDir, s.Name, nct); err != nil {
+			return n, err
+		}
+		n++
+	}
+	trash, err := format.ListTrash(vaultDir)
+	if err != nil {
+		return n, err
+	}
+	for _, t := range trash {
+		ct, err := format.ReadTrashedFile(vaultDir, t)
+		if err != nil {
+			return n, err
+		}
+		if !isV1(ct) {
+			continue
+		}
+		nct, err := reseal(t.Name, []*VaultKey{key}, key, ct)
+		if err != nil {
+			return n, err
+		}
+		if err := format.WriteTrashedFile(vaultDir, t, nct); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }

@@ -81,6 +81,11 @@ func (a *app) migrate(v *vaultRef, o openOpts) (*crypto.VaultKey, error) {
 	if err := format.WriteVaultFileCAS(v.dir, next, raw); err != nil {
 		return fail(failf("could not upgrade vault '%s': %v", v.name, vaultErr(err)))
 	}
+	// Re-seal the secrets in the current file format, so no file is left
+	// that an older build could open or rotate (ue1.8).
+	if _, err := crypto.UpgradeSecrets(v.dir, key); err != nil {
+		return fail(failf("upgraded '%s', but re-sealing its secrets failed (run the command again to finish): %v", v.name, vaultErr(err)))
+	}
 	v.v1 = nil
 	c, _, err := a.loadVault(v)
 	if err != nil {

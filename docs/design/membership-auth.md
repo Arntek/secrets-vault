@@ -315,3 +315,17 @@ What the code does where this document was not specific, or differs slightly:
 - **Registry entries from before this change** get their vault ID on first use; a legacy `key_id` pin must appear in the chain's history, or the vault is refused.
 - **`rebuild`** keeps the secrets and the index, makes a new vault ID and genesis (signed by the person rebuilding), and needs a new recovery passphrase.
 - **Index writes.** Reading no longer writes a rebuilt `index.json`; the next write stores it.
+
+## Older builds (issue ue1.8)
+
+Builds from before this design can't verify anything, so they are kept from *using* a version-2 vault at all, rather than trusted to check it:
+
+- **Versions.** Every file whose format changed is written with a higher version than older builds accept: `vault.json` 2, identity files 2, join requests 2. Older builds refuse them ("not supported by this build; upgrade"). New builds say how to upgrade: "vault 'team' was saved by a newer secrets-vault. Upgrade to open it: brew upgrade secrets-vault (Homebrew) or npm update -g secrets-vault (npm)."
+- **Downgrade by a folder writer** (rewriting a version-2 `vault.json` as version 1, with a planted unlocker) gives an older build nothing to work with:
+  - every wrapped vault key (member and passphrase unlockers) now carries a marker (`"secrets-vault/v2 wrapped key\0"` before the 32 key bytes); older builds expect exactly 32 bytes, so they can't unlock the vault at all;
+  - secret files use a new stanza type and HKDF label (`sv-vaultkey2`, `"secrets-vault/v2 secret file key\0"`); older builds can't open them, so even with a key their rotation fails before `vault.json` is written. Migration re-seals version-1 files in the new format (`crypto.UpgradeSecrets`), and every write re-checks.
+  - A fixed build refuses the downgraded file (M3: version 1 with member unlockers, or with a v2 pin, is never migrated).
+- **Registry.** Older builds rewrite `config.toml` and drop fields they don't know, so the registered vault ID (M1) lives in `registry.toml`, which older builds never write. If an entry has no registered ID while this machine has a trust pin for that folder, the vault is refused ("lost its record of which vault this is"); `detach` + `attach` registers it again.
+- Checked against a build of `main` from before the fix (3f8902d): it refuses a genuine version-2 vault, and on a downgraded file it can't unlock (`unlock`, `get`, `member rm` all fail) and changes nothing.
+
+A member running an outdated build is protected because it refuses newer vaults, not because it can verify them. Upgrading is required to use a shared vault.

@@ -2,13 +2,17 @@ package crypto
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"filippo.io/age"
 
 	"github.com/Arntek/secrets-vault/internal/format"
 	"github.com/Arntek/secrets-vault/internal/leaktest"
@@ -418,5 +422,124 @@ func TestRotateCAS(t *testing.T) {
 	opt.Expect = []byte("{}")
 	if _, err := Rotate(v.dir, v.key, opt); !errors.Is(err, format.ErrChanged) {
 		t.Fatalf("Rotate with stale Expect = %v", err)
+	}
+}
+
+// v1Seal seals like builds from before ue1.8 did (stanza sv-vaultkey,
+// v1 HKDF label), for the compatibility and old-build tests.
+type v1Recipient struct {
+	key  *VaultKey
+	name string
+}
+
+func (r *v1Recipient) Wrap(fileKey []byte) ([]*age.Stanza, error) {
+	salt := bytes.Repeat([]byte{3}, saltSize)
+	aead, err := fileKeyWrapper(r.key, salt, r.name, stanzaTypeV1)
+	if err != nil {
+		return nil, err
+	}
+	return []*age.Stanza{{Type: stanzaTypeV1, Args: []string{r.key.ID(), base64.RawStdEncoding.EncodeToString(salt)},
+		Body: aead.Seal(nil, make([]byte, aead.NonceSize()), fileKey, nil)}}, nil
+}
+
+func v1Seal(t *testing.T, key *VaultKey, name, value string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w, err := age.Encrypt(&buf, &v1Recipient{key: key, name: name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = w.Write([]byte(value))
+	_ = w.Close()
+	return buf.Bytes()
+}
+
+// oldBuildIdentity opens secret files the way builds from before ue1.8
+// did: only the v1 stanza type and label.
+type oldBuildIdentity struct{ v *vaultKeyIdentity }
+
+func (o oldBuildIdentity) Unwrap(st []*age.Stanza) ([]byte, error) {
+	if len(st) != 1 || st[0].Type != stanzaTypeV1 {
+		return nil, age.ErrIncorrectIdentity
+	}
+	return o.v.Unwrap(st)
+}
+
+// ue1.8 B: what this build writes gives an old build nothing to work with.
+func TestOldBuildsCannotUseV2Data(t *testing.T) {
+	key := mustKey(t)
+	// Secret files: an old build's identity finds no stanza it knows.
+	ct, err := mustSealer(t, "A").Seal(key, []byte("v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := age.Decrypt(bytes.NewReader(ct), oldBuildIdentity{&vaultKeyIdentity{key: key, name: "A"}}); err == nil {
+		t.Fatal("an old build could open a v2 secret file")
+	}
+	// Wrapped keys: an old build expects exactly 32 bytes and gets more.
+	id := memberIdentity(t)
+	w, _ := NewMemberIdentityWrapper("m", id)
+	u, err := w.Wrap(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := age.Decrypt(bytes.NewReader(u.WrappedKey), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(io.LimitReader(r, KeySize+1))
+	if len(b) == KeySize {
+		t.Fatal("an old build could unwrap a v2 member unlocker")
+	}
+	pw := passWrapper(t, "pass phrase")
+	pu, _ := pw.Wrap(key)
+	sid, _ := age.NewScryptIdentity("pass phrase")
+	r, err = age.Decrypt(bytes.NewReader(pu.WrappedKey), sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := io.ReadAll(io.LimitReader(r, KeySize+1)); len(b) == KeySize {
+		t.Fatal("an old build could unwrap a v2 passphrase unlocker")
+	}
+	// This build still reads both forms.
+	if k, err := w.Unwrap(u); err != nil || k.ID() != key.ID() {
+		t.Fatalf("v2 unwrap: %v", err)
+	}
+	var legacy bytes.Buffer
+	enc, _ := age.Encrypt(&legacy, id.Recipient())
+	_, _ = enc.Write(key.Bytes())
+	_ = enc.Close()
+	if k, err := w.Unwrap(format.Unlocker{Type: format.UnlockerMember, Recipient: u.Recipient, WrappedKey: legacy.Bytes()}); err != nil || k.ID() != key.ID() {
+		t.Fatalf("legacy unwrap: %v", err)
+	}
+}
+
+// Migration helper: v1-format files are read and upgraded in place.
+func TestUpgradeSecrets(t *testing.T) {
+	v := newVault(t)
+	if err := format.WriteSecretFile(v.dir, "OLD", v1Seal(t, v.key, "OLD", "old value")); err != nil {
+		t.Fatal(err)
+	}
+	_ = WriteSecret(v.dir, "NEW", v.key, []byte("new value"))
+	if got, err := ReadSecret(v.dir, "OLD", v.key); err != nil || string(got) != "old value" {
+		t.Fatalf("v1 file read: %q %v", got, err)
+	}
+	ct, _ := format.ReadSecretFile(v.dir, "OLD")
+	if id, err := KeyIDOf(ct); err != nil || id != v.key.ID() {
+		t.Fatalf("KeyIDOf v1: %v", err)
+	}
+	n, err := UpgradeSecrets(v.dir, v.key)
+	if err != nil || n != 1 {
+		t.Fatalf("UpgradeSecrets = %d, %v", n, err)
+	}
+	ct, _ = format.ReadSecretFile(v.dir, "OLD")
+	if !bytes.Contains(ct[:64], []byte(stanzaType+" ")) {
+		t.Fatal("not upgraded")
+	}
+	if got, err := ReadSecret(v.dir, "OLD", v.key); err != nil || string(got) != "old value" {
+		t.Fatalf("after upgrade: %q %v", got, err)
+	}
+	if n, _ := UpgradeSecrets(v.dir, v.key); n != 0 {
+		t.Fatal("not idempotent")
 	}
 }

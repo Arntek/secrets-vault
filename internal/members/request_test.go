@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Arntek/secrets-vault/internal/format"
 )
 
 func TestWriteRequestRefusals(t *testing.T) {
@@ -127,4 +129,22 @@ func FuzzParseRequest(f *testing.F) {
 			t.Fatal("accepted a request whose fingerprint does not match")
 		}
 	})
+}
+
+// ue1.8: every file whose format changed carries a version number above
+// what builds from before the membership log accept, so those builds
+// refuse them ("upgrade") instead of misreading them. Those builds accepted
+// vault.json, identity and request files of version 1 only.
+func TestFormatVersionsBumped(t *testing.T) {
+	if format.VaultVersion <= 1 || identityVersion <= 1 || requestVersion <= 1 {
+		t.Fatalf("versions: vault %d, identity %d, request %d", format.VaultVersion, identityVersion, requestVersion)
+	}
+	alice, bob := newPerson(t, "alice"), newPerson(t, "bob")
+	v := newVault(t, alice)
+	_ = WriteRequest(v.dir, bob.un, t0)
+	for _, p := range []string{format.VaultFilePath(v.dir), filepath.Join(v.dir, "requests", "bob.json"), alice.store.path()} {
+		if !bytes.Contains(mustReadFile(t, p), []byte(`"version": 2`)) {
+			t.Errorf("%s is not written as version 2", filepath.Base(p))
+		}
+	}
 }

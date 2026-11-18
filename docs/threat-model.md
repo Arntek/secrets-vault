@@ -54,6 +54,10 @@ Known and accepted for Phase 1. The membership design in [design/membership-auth
 - **Single-file rollback.** A folder writer can replace one `secrets/NAME.age` with an older copy sealed under the current key. A rotation re-encrypts everything, so this never crosses a member removal. Tracked with the index issue.
 - **Offline members and rollback.** A member who hasn't opened the vault since a removal can't tell that the removed member (who kept folder write access) restored the whole pre-removal folder, so may read stale values and save new secrets under the old key. Mitigations: `member rm` requires removing the person's folder access and prints a state code to pass on out of band; machines that saw the removal refuse the rollback outright; any leftover file sealed under a newer key, or a newer `vault.json` conflict copy, makes every write fail; secrets written under a retired key are listed as exposed once the honest state is seen again. No complete fix without a channel outside the folder.
 
+## Older builds
+
+A member running a build from before the membership log is protected because it **refuses** newer vaults, not because it can verify them: version-2 files carry versions it rejects, its wrapped-key and secret-file formats changed so it can't unlock or rotate a vault even if `vault.json` is rewritten as version 1, and the registered vault ID lives in `registry.toml`, which it never writes. Upgrading is required to use a shared vault. No release will contain the ue1.1 bug: nothing is tagged until this fix is merged. (Issue ue1.8; design section "Older builds".)
+
 ## Residual risks of the membership design
 
 - **Stale writer** (above): exact conditions in the design, Threat 4.

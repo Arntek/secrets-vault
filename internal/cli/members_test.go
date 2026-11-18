@@ -495,6 +495,13 @@ func TestIdentityExportImportAndSecondMac(t *testing.T) {
 	if !strings.Contains(r.err, "Trusting vault 'team' at team@") {
 		t.Fatalf("owner second Mac first pin: %s", r)
 	}
+	// In --json mode too, on stderr (Security's request).
+	omac3 := newEnv(t)
+	omac3.mustRunIn("transfer passphrase 2\nowner mac three pass\n", "identity", "import", ofile, "--passphrase-stdin")
+	r = omac3.mustRun("attach", "team", vdir, "--json")
+	if !strings.Contains(r.err, "state_code_checked: false") {
+		t.Fatalf("--json first pin must still say it was unchecked: %s", r)
+	}
 	expectCode(t, mac2.run("identity", "bogus", file), ExitUsage)
 }
 
@@ -604,5 +611,78 @@ func TestPlantedStagingNeverOverwrites(t *testing.T) {
 	expectCode(t, r, ExitError)
 	if !strings.Contains(r.err, "symlink") {
 		t.Fatalf("%s", r)
+	}
+}
+
+// ue1.8 A: an older build rewrites config.toml (dropping fields it doesn't
+// know). The vault ID lives in registry.toml, which older builds never
+// touch, so M1 still holds; and if the registered ID is lost anyway while
+// this machine trusts a vault in that folder, it refuses rather than
+// trusting on first use.
+func TestRegistryIDSurvivesOldBuilds(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("K", "", "v")
+	cfg, err := os.ReadFile(e.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cfg), "id =") {
+		t.Fatalf("the vault ID must not be in config.toml: %s", cfg)
+	}
+	// An old build's save: same content, re-encoded (simulated by a rewrite).
+	if err := os.WriteFile(e.cfg, cfg, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// M1 still holds: a vault.json for another vault is refused.
+	e2 := newEnv(t)
+	e2.initVault("evil")
+	evil, _ := os.ReadFile(filepath.Join(e2.home, "vaults", "evil", "vault.json"))
+	e.activate()
+	good, _ := os.ReadFile(filepath.Join(dir, "vault.json"))
+	_ = os.WriteFile(filepath.Join(dir, "vault.json"), evil, 0o600)
+	r := e.runIn(testPass+"\n", "get", "K", "--passphrase-stdin")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "different vault") {
+		t.Fatalf("%s", r)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "vault.json"), good, 0o600)
+	// The registered ID lost (registry.toml removed): refuse, don't TOFU.
+	_ = os.Remove(filepath.Join(filepath.Dir(e.cfg), "registry.toml"))
+	_ = os.WriteFile(filepath.Join(dir, "vault.json"), evil, 0o600)
+	r = e.runIn(testPass+"\n", "get", "K", "--passphrase-stdin")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "lost its record") {
+		t.Fatalf("%s", r)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "vault.json"), good, 0o600)
+	expectCode(t, e.runIn(testPass+"\n", "get", "K", "--passphrase-stdin"), ExitError) // even for the genuine file
+	// detach + attach registers it again (and finds the existing pin).
+	e.mustRun("detach", "main")
+	e.mustRun("attach", "main", dir)
+	if got := e.mustRunIn(testPass+"\n", "get", "K", "--passphrase-stdin").out; got != "v\n" {
+		t.Fatalf("after re-attach: %q", got)
+	}
+}
+
+// ue1.8: a vault.json newer than this build tells the user how to upgrade.
+func TestNewerVaultMessage(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	data, _ := os.ReadFile(filepath.Join(dir, "vault.json"))
+	data = []byte(strings.Replace(string(data), `"version": 2`, `"version": 3`, 1))
+	_ = os.WriteFile(filepath.Join(dir, "vault.json"), data, 0o600)
+	r := e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin")
+	expectCode(t, r, ExitError)
+	if !strings.Contains(r.err, "vault 'main' was saved by a newer secrets-vault") || !strings.Contains(r.err, "brew upgrade secrets-vault") {
+		t.Fatalf("%s", r)
+	}
+	f := newEnv(t)
+	r = f.run("attach", "x", dir)
+	if !strings.Contains(r.err, "brew upgrade secrets-vault") {
+		t.Fatalf("attach: %s", r)
 	}
 }

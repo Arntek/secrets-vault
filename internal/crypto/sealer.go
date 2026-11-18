@@ -18,19 +18,28 @@ import (
 )
 
 // HKDF info strings. Changing any of them breaks every existing vault.
+// Secret files written by this build use the v2 file-key label and stanza
+// type (ue1.8): builds from before the membership log can't open them, so
+// they can't rotate a version-2 vault even if its vault.json is rewritten
+// as version 1. v1 files are still read (migration).
 const (
-	infoKeyID   = "secrets-vault/v1 key id"
-	infoFileKey = "secrets-vault/v1 secret file key\x00"
+	infoKeyID     = "secrets-vault/v1 key id"
+	infoFileKeyV1 = "secrets-vault/v1 secret file key\x00"
+	infoFileKey   = "secrets-vault/v2 secret file key\x00"
 )
 
 // stanzaType is the age recipient stanza type of secret files:
 //
-//	-> sv-vaultkey <key id hex> <salt, 16 bytes, base64 raw std>
+//	-> sv-vaultkey2 <key id hex> <salt, 16 bytes, base64 raw std>
 //	<AES-256-GCM(file key), zero nonce, under HKDF(vault key, salt, info||name)>
 //
 // Each file has its own random salt, so each wrapping key is used once and
 // the fixed nonce is safe (the same construction age uses for scrypt).
-const stanzaType = "sv-vaultkey"
+// stanzaTypeV1 ("sv-vaultkey", with infoFileKeyV1) is only read.
+const (
+	stanzaType   = "sv-vaultkey2"
+	stanzaTypeV1 = "sv-vaultkey"
+)
 
 const (
 	saltSize    = 16
@@ -97,9 +106,14 @@ func (s *sealer) Open(key *VaultKey, ciphertext []byte) ([]byte, error) {
 	return pt, nil
 }
 
-// fileKeyWrapper derives the AES-GCM that wraps one file key.
-func fileKeyWrapper(key *VaultKey, salt []byte, name string) (cipher.AEAD, error) {
-	kek, err := hkdf.Key(sha256.New, key.b[:], salt, infoFileKey+name, 32)
+// fileKeyWrapper derives the AES-GCM that wraps one file key, with the
+// HKDF label of the given stanza type.
+func fileKeyWrapper(key *VaultKey, salt []byte, name, typ string) (cipher.AEAD, error) {
+	info := infoFileKey
+	if typ == stanzaTypeV1 {
+		info = infoFileKeyV1
+	}
+	kek, err := hkdf.Key(sha256.New, key.b[:], salt, info+name, 32)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +135,7 @@ func (r *vaultKeyRecipient) Wrap(fileKey []byte) ([]*age.Stanza, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return nil, err
 	}
-	aead, err := fileKeyWrapper(r.key, salt, r.name)
+	aead, err := fileKeyWrapper(r.key, salt, r.name, stanzaType)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +168,7 @@ func (i *vaultKeyIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 		return nil, errBadStanza
 	}
 	s := stanzas[0]
-	if s.Type != stanzaType {
+	if s.Type != stanzaType && s.Type != stanzaTypeV1 {
 		return nil, age.ErrIncorrectIdentity
 	}
 	if len(s.Args) != 2 {
@@ -168,7 +182,7 @@ func (i *vaultKeyIdentity) Unwrap(stanzas []*age.Stanza) ([]byte, error) {
 	if err != nil || len(salt) != saltSize {
 		return nil, errBadStanza
 	}
-	aead, err := fileKeyWrapper(i.key, salt, i.name)
+	aead, err := fileKeyWrapper(i.key, salt, i.name, s.Type)
 	if err != nil {
 		return nil, err
 	}

@@ -70,7 +70,7 @@ var (
 	// ErrMalformed wraps every parse or validation failure.
 	ErrMalformed = errors.New("malformed vault file")
 	// ErrUnsupportedVersion means the file was written by a newer build.
-	ErrUnsupportedVersion = errors.New("vault format version not supported by this build; upgrade secrets-vault")
+	ErrUnsupportedVersion = errors.New("this vault was saved by a newer secrets-vault. Upgrade to open it: brew upgrade secrets-vault (Homebrew) or npm update -g secrets-vault (npm)")
 	// ErrTooLarge means a file exceeds its size limit.
 	ErrTooLarge = errors.New("vault file too large")
 	// ErrNotRegular means a vault path is a symlink, directory or device.

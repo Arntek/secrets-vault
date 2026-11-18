@@ -44,8 +44,10 @@ type VaultEntry struct {
 	Dialog         string `toml:"dialog,omitempty"`
 	// ID is the vault ID recorded at init or attach. vault.json is only
 	// accepted if it holds this vault (design M1); the trust pin for it is
-	// kept outside the registry, under trust/<ID>.json.
-	ID string `toml:"id,omitempty"`
+	// kept under trust/<ID>.json. It is stored in registry.toml, never in
+	// config.toml: builds from before the membership log rewrite
+	// config.toml and would drop it (ue1.8 A).
+	ID string `toml:"-"`
 	// KeyID is the legacy key pin from before trust pins. It is read once,
 	// by the migration and first-use checks, then dropped.
 	KeyID string `toml:"key_id,omitempty"`
@@ -78,8 +80,86 @@ func (a *app) loadConfig() (*Config, error) {
 	if c.Vaults == nil {
 		c.Vaults = map[string]*VaultEntry{}
 	}
+	if err := a.loadRegistry(c); err != nil {
+		return nil, err
+	}
 	a.cfg = c
 	return c, nil
+}
+
+// registryFile is registry.toml: which vault ID is registered under each
+// name and folder. Only builds with the membership log write it, so an
+// older build that rewrites config.toml can't make this machine forget
+// which vault it trusts (ue1.8 A).
+type registryFile struct {
+	Version int                       `toml:"version"`
+	Vaults  map[string]registryRecord `toml:"vaults"`
+}
+
+type registryRecord struct {
+	ID   string `toml:"id"`
+	Path string `toml:"path"`
+}
+
+func (a *app) registryPath() (string, error) {
+	d, err := a.configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(d, "registry.toml"), nil
+}
+
+// loadRegistry fills each entry's ID from registry.toml, when the record
+// is for the same name and folder. A damaged registry file is an error,
+// never a silent reset.
+func (a *app) loadRegistry(c *Config) error {
+	path, err := a.registryPath()
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- the user's own registry path
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil || len(data) > maxConfigSize {
+		return failf("cannot read the vault registry (registry.toml)")
+	}
+	var r registryFile
+	md, err := toml.Decode(string(data), &r)
+	if err != nil || len(md.Undecoded()) > 0 || r.Version != 1 {
+		return failf("the vault registry (registry.toml) is damaged; fix or remove it, then detach and attach your vaults again")
+	}
+	for name, rec := range r.Vaults {
+		if format.ValidateVaultName(name) != nil || format.ValidateVaultID(rec.ID) != nil {
+			return failf("the vault registry (registry.toml) has an invalid entry; fix or remove it")
+		}
+		if e, ok := c.Vaults[name]; ok && e.Path == rec.Path {
+			e.ID = rec.ID
+		}
+	}
+	return nil
+}
+
+// saveRegistry writes registry.toml from the entries that have an ID.
+func (a *app) saveRegistry(c *Config) error {
+	path, err := a.registryPath()
+	if err != nil {
+		return err
+	}
+	r := registryFile{Version: 1, Vaults: map[string]registryRecord{}}
+	for name, e := range c.Vaults {
+		if e.ID != "" {
+			r.Vaults[name] = registryRecord{ID: e.ID, Path: e.Path}
+		}
+	}
+	var sb strings.Builder
+	if err := toml.NewEncoder(&sb).Encode(r); err != nil {
+		return failf("cannot write the vault registry")
+	}
+	if err := format.WriteFileAtomic(path, []byte(sb.String()), 0o600); err != nil {
+		return failf("cannot write the vault registry: %v", pathless(err))
+	}
+	return nil
 }
 
 // parseConfig parses registry bytes. Errors describe the problem and never
@@ -117,6 +197,9 @@ func (a *app) saveConfig(c *Config) error {
 	}
 	if err := format.WriteFileAtomic(path, []byte(sb.String()), 0o600); err != nil {
 		return failf("cannot write the vault registry: %v", pathless(err))
+	}
+	if err := a.saveRegistry(c); err != nil {
+		return err
 	}
 	a.cfg = c
 	return nil
@@ -208,6 +291,9 @@ func (a *app) vaultNames() ([]string, error) {
 }
 
 func vaultErr(err error) error {
+	if errors.Is(err, format.ErrUnsupportedVersion) {
+		return format.ErrUnsupportedVersion
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return errors.New("the folder or vault.json is missing (not synced yet, or moved?)")
 	}

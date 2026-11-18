@@ -44,6 +44,8 @@ func (a *app) loadVault(v *vaultRef) (*members.Chain, *format.VaultFile, error) 
 			"If you rebuilt it on purpose, run: %s detach %s, then %s attach %s DIR", v.name, a.prog, v.name, a.prog, v.name)
 	case errors.Is(err, members.ErrTampered):
 		return nil, nil, failf("vault '%s': %v", v.name, members.ErrTampered)
+	case errors.Is(err, format.ErrUnsupportedVersion):
+		return nil, nil, failf("vault '%s' was saved by a newer secrets-vault. Upgrade to open it: brew upgrade secrets-vault (Homebrew) or npm update -g secrets-vault (npm)", v.name)
 	case errors.Is(err, format.ErrUnsafeDir):
 		return nil, nil, failf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it", v.name)
 	}
@@ -74,6 +76,15 @@ func (a *app) open(v *vaultRef) (*format.VaultFile, error) {
 	ts, err := a.trustStore()
 	if err != nil {
 		return nil, err
+	}
+	if v.entry.ID == "" {
+		// No registered ID (an older build may have rewritten the
+		// registry, ue1.8 A). If this machine already trusts a vault in this
+		// folder, never fall back to first-use trust.
+		if old, err := ts.FindByPath(v.dir); err != nil || old != nil {
+			return nil, failf("this machine has lost its record of which vault '%s' is (an older secrets-vault may have rewritten its settings). "+
+				"Nothing was read or written. To register it again, run: %s detach %s, then %s attach %s DIR", v.name, a.prog, v.name, a.prog, v.name)
+		}
 	}
 	pin, err := ts.Load(c.File.ID)
 	if err != nil {
@@ -156,6 +167,7 @@ func (a *app) savePin(v *vaultRef, written []format.LogEntry) error {
 		own = append(own, written...)
 	}
 	pin := members.PinFor(v.chain, own)
+	pin.Path = v.dir
 	if err := ts.Save(pin); err != nil {
 		return failf("cannot save this machine's trust record for '%s': %v", v.name, pathless(err))
 	}
@@ -266,8 +278,10 @@ func (a *app) checkStateCode(v *vaultRef, ask bool) error {
 		if err == nil {
 			code = strings.TrimSpace(line)
 		}
-	} else if code == "" && !a.asJSON {
-		a.infof("Trusting vault '%s' at %s.", v.name, headLine(c))
+	} else if code == "" {
+		// Always on stderr, --json included, so a script or AI agent can't
+		// hide from the user that a vault was pinned unchecked.
+		a.infof("Trusting vault '%s' at %s without a state code (state_code_checked: false). Compare with '%s status' on another member's machine.", v.name, headLine(c), a.prog)
 	}
 	if code == "" {
 		return nil
@@ -344,6 +358,11 @@ func (a *app) prepareWrite(v *vaultRef, key *crypto.VaultKey) error {
 		if _, err := crypto.RecoverRotation(v.dir, key); err != nil {
 			return failf("vault '%s' has an unfinished key rotation that could not be completed: %v", v.name, vaultErr(err))
 		}
+	}
+	// Files a migration left in the version-1 format (if it was
+	// interrupted) are re-sealed so no older build can use them (ue1.8).
+	if _, err := crypto.UpgradeSecrets(v.dir, key); err != nil {
+		return failf("cannot upgrade the secret files of '%s': %v", v.name, vaultErr(err))
 	}
 	rep, err := members.CheckFolder(v.dir, c)
 	if err != nil {

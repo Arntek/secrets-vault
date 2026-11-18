@@ -32,6 +32,9 @@ type Pin struct {
 	Seq     int    `json:"seq"`
 	Head    string `json:"head"`
 	KeyID   string `json:"key_id"`
+	// Path is the vault folder this machine registered, so a registry that
+	// lost its vault ID can be noticed (ue1.8). Informational otherwise.
+	Path string `json:"path,omitempty"`
 	// Own holds the records this machine wrote that nobody has extended
 	// yet, oldest first, ending at Seq. They let a lost race be told apart
 	// from a rollback and re-applied (design section 8b).
@@ -49,6 +52,9 @@ func ParsePin(data []byte) (*Pin, error) {
 		return nil, fmt.Errorf("%w: bad trust pin", ErrMalformed)
 	}
 	if _, err := hex.DecodeString(p.Head); err != nil || strings.ToLower(p.Head) != p.Head {
+		return nil, fmt.Errorf("%w: bad trust pin", ErrMalformed)
+	}
+	if len(p.Path) > 4096 || strings.ContainsFunc(p.Path, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
 		return nil, fmt.Errorf("%w: bad trust pin", ErrMalformed)
 	}
 	for i, e := range p.Own {
@@ -131,6 +137,31 @@ func (t *TrustStore) Save(pin *Pin) error {
 		}
 	}
 	return format.WriteFileAtomic(p, append(data, '\n'), format.FileMode)
+}
+
+// FindByPath returns a pin recorded for the vault folder path, or nil.
+func (t *TrustStore) FindByPath(path string) (*Pin, error) {
+	entries, err := os.ReadDir(t.dir)
+	if err != nil {
+		if isNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for _, e := range entries {
+		id, ok := strings.CutSuffix(e.Name(), ".json")
+		if !ok || format.ValidateVaultID(id) != nil {
+			continue
+		}
+		p, err := t.Load(id)
+		if err != nil {
+			continue
+		}
+		if p != nil && p.Path != "" && filepath.Clean(p.Path) == filepath.Clean(path) {
+			return p, nil
+		}
+	}
+	return nil, nil
 }
 
 // Delete removes the pin for vaultID.
