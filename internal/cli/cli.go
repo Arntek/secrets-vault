@@ -143,7 +143,7 @@ var commands = []command{
 		flags:   []flagSpec{fExpect, fSignFP, {name: "accept-rollback"}}, run: cmdTrust},
 	{name: "doctor", group: "Managing vaults", usage: "doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown --expect CODE]",
 		summary: "Check a vault for sync conflicts, leftover key-rotation folders and index problems; move a foreign folder aside; adopt a file with no signed entry; explain and clear what makes the vault refuse changes.",
-		flags:   []flagSpec{{name: "quarantine-staging"}, {name: "adopt", value: true}, {name: "set-aside-unknown"}, {name: "yes-checked-with-members"}, fYes}, run: cmdDoctor},
+		flags:   []flagSpec{{name: "quarantine-staging"}, {name: "adopt", value: true}, {name: "set-aside-unknown"}, fYes}, run: cmdDoctor},
 	{name: "upgrade", group: "Managing vaults", usage: "upgrade VAULT [--yes]",
 		summary: "Move a vault made by an earlier version to the current format (signed index, versioned files).",
 		flags:   []flagSpec{fYes}, run: cmdUpgrade},

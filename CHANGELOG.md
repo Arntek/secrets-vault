@@ -28,7 +28,7 @@ Phase 2: agents, the terminal UI, an authenticated index, npm and Windows.
 - `make snapshot` builds print the snapshot version the Homebrew formula expects (zjv).
 - `help` gives `ui` and `log` their own headings; "entries" plural; `audit.log` is made private again if its permissions were widened.
 
-- `vault doctor VAULT` explains why a vault refuses changes (a planted or not-yet-synced secret or rotation folder from an unknown key), and `--set-aside-unknown --expect CODE` (the vault's current state code from another member, which the folder must equal or extend; plus a typed confirmation, or `--yes-checked-with-members` in scripts) moves those items into `quarantine/` and logs it. A folder writer can block changes to a shared vault; remove a member's folder access before `member rm`, because someone who keeps it can restore an old copy.
+- `vault doctor VAULT` explains why a vault refuses changes (a planted or not-yet-synced secret or rotation folder from an unknown key). `--set-aside-unknown --expect CODE` moves those items into `quarantine/` and logs it, but only if this Mac's folder is at or past the state code another member gave you, which also proves your copy is current. A folder writer can stall changes to a shared vault; remove a member's folder access before `member rm`.
 
 ### Security
 

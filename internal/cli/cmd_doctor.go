@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
@@ -294,9 +293,6 @@ func (a *app) adopt(v *vaultRef, vi *vindex, key *crypto.VaultKey, name string, 
 	return nil
 }
 
-// checkedPhrase is typed to confirm that the other members were asked.
-const checkedPhrase = "I have checked with the other members that nobody changed this vault's key"
-
 func cleanedNames(ss []string) []string {
 	out := make([]string, len(ss))
 	for i, s := range ss {
@@ -332,11 +328,11 @@ func (a *app) explainGuard(v *vaultRef, g *members.FolderReport) {
 }
 
 // setAsideUnknown moves the items the write guard cannot account for into
-// quarantine/ (a rename, never a delete, never following a link), after the
-// person confirms they checked with the other members: by typing the phrase,
-// or --yes-checked-with-members for scripts. It refuses when a newer verified
-// vault.json exists: that is genuine evidence of another member's change.
-// The action goes in the audit log.
+// quarantine/ (a rename, never a delete, never following a link). It needs
+// --expect CODE, a current member's state code, and proceeds only if this
+// Mac's verified folder equals or extends it: that is what shows the copy is
+// current (a typed "I checked" proves nothing). It also refuses when a newer
+// verified vault.json exists. The action goes in the audit log.
 func (a *app) setAsideUnknown(v *vaultRef, p *parsed, g *members.FolderReport) error {
 	if !g.Blocking() {
 		a.printf("Nothing to set aside: the write guard has no complaint about '%s'.\n", v.name)
@@ -345,28 +341,19 @@ func (a *app) setAsideUnknown(v *vaultRef, p *parsed, g *members.FolderReport) e
 	if g.NewerCopy {
 		return verifyErrf("vault '%s' has a newer verified copy of vault.json, which is real evidence of another member's change and is not set aside. Let the folder finish syncing, then run: %s trust %s", v.name, a.prog, v.name)
 	}
-	// The check that makes "I asked the other members" real: the current
-	// state code from another member's machine, which this folder must equal
-	// or extend. A folder rolled back behind a removal is behind the code.
+	// The check that makes this safe: the current state code from a member,
+	// which this Mac's verified copy of the folder must equal or extend. A
+	// folder that is behind it has a newer change somewhere (or was rolled
+	// back), and then the items may be real.
 	if a.expectCode == "" {
-		return usageErrf("setting these aside needs --expect CODE: the vault's current state code from another member (run '%s status' on their machine)", a.prog)
+		return usageErrf("ask a vault member for the current state code, then see '%s doctor --help'", a.prog)
 	}
 	exp, err := a.parseCodeFor(v, v.chain, a.expectCode)
 	if err != nil {
 		return err
 	}
 	if !exp.Met(v.chain) {
-		return verifyErrf("vault '%s' does not match the state code you gave (it is behind it, or its history differs). Nothing was set aside. Someone may have restored an old copy of the folder: check with the member who gave you the code", v.name)
-	}
-	if !p.has("yes-checked-with-members") {
-		if !a.term.StdinTTY() {
-			return usageErrf("setting these aside needs a terminal, where you confirm that you checked with the other members")
-		}
-		a.infof("This moves %d item(s) in '%s' to quarantine/ (nothing is deleted). Only do it if nobody else changed this vault's key.", len(g.UnknownFiles)+len(g.UnknownStaging), v.name)
-		line, err := a.ask("Type: " + checkedPhrase + "\n> ")
-		if err != nil || strings.TrimSpace(line) != checkedPhrase {
-			return failf("not confirmed; nothing was moved")
-		}
+		return verifyErrf("vault '%s' is behind that state code: a newer change exists that this Mac has not got (or the folder was restored from an old copy). Nothing was set aside. Let the folder sync, or check with the member who gave you the code, then try again", v.name)
 	}
 	moved := 0
 	for _, rel := range g.UnknownFiles {

@@ -61,43 +61,30 @@ func TestDoctorExplainsAndSetsAsideUnknownItems(t *testing.T) {
 	}
 
 	code := decodeJSON[map[string]any](t, e.mustRun("trust", "team", "--json").out)["state_code"].(string)
-	// No state code: refused (the confirmation must be checkable). The
-	// refusal does not name the script flag.
-	r = e.run("doctor", "team", "--set-aside-unknown", "--yes-checked-with-members")
+	// No state code: refused. The refusal does not hand out a bypass.
+	r = e.run("doctor", "team", "--set-aside-unknown")
 	expectCode(t, r, ExitUsage)
-	if !strings.Contains(r.err, "--expect CODE") {
+	if !strings.Contains(r.err, "ask a vault member for the current state code") || !strings.Contains(r.err, "doctor --help") || strings.Contains(r.err, "yes") {
 		t.Fatalf("%s", r)
 	}
-	// A code the folder does not reach (a rolled-back folder is behind the
-	// current code): refused, nothing moved.
-	r = e.run("doctor", "team", "--set-aside-unknown", "--yes-checked-with-members", "--expect", "team@99 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE")
+	// The removed "I checked" paths are gone.
+	expectCode(t, e.run("doctor", "team", "--set-aside-unknown", "--yes-checked-with-members", "--expect", code), ExitUsage)
+	// A code the folder does not reach (a rolled-back or out-of-date folder
+	// is behind the current code): refused, nothing moved.
+	r = e.run("doctor", "team", "--set-aside-unknown", "--expect", "team@99 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE")
 	expectCode(t, r, ExitUnverified)
+	if !strings.Contains(r.err, "behind the state code") {
+		t.Fatalf("%s", r)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "secrets", "PLANTED_KEY.age")); err != nil {
 		t.Fatal("the file moved for a code the folder does not reach")
 	}
 	e.mustRun("trust", "team", "--expect", code) // the right code clears the remembered one
-	// A code, but no confirmation and no terminal: refused, the refusal does
-	// not hand out the script flag.
-	r = e.run("doctor", "team", "--set-aside-unknown", "--expect", code)
-	expectCode(t, r, ExitUsage)
-	if strings.Contains(r.err, "yes-checked") {
-		t.Fatalf("the refusal names the bypass flag: %s", r)
-	}
-	// A typed confirmation that is wrong: refused, nothing moved.
-	e.term.stdinTTY = true
-	r = e.runIn("yes\n", "doctor", "team", "--set-aside-unknown", "--expect", code)
-	e.term.stdinTTY = false
-	expectCode(t, r, ExitError)
-	if _, err := os.Stat(filepath.Join(dir, "secrets", "PLANTED_KEY.age")); err != nil {
-		t.Fatal("the file moved without a confirmation")
-	}
 	expectCode(t, e.runIn("x", "set", "NEW_KEY", "--vault", "team"), ExitUnverified)
 
-	// The typed phrase works.
-	e.term.stdinTTY = true
-	r = e.runIn(checkedPhrase+"\n", "doctor", "team", "--set-aside-unknown", "--expect", code)
-	e.term.stdinTTY = false
-	expectCode(t, r, 0)
+	// With the current code (no terminal needed), planted junk on an
+	// up-to-date folder is set aside.
+	e.mustRun("doctor", "team", "--set-aside-unknown", "--expect", code)
 	if _, err := os.Stat(filepath.Join(dir, "secrets", "PLANTED_KEY.age")); err == nil {
 		t.Fatal("the planted file is still in secrets/")
 	}
@@ -119,12 +106,12 @@ func TestDoctorExplainsAndSetsAsideUnknownItems(t *testing.T) {
 		t.Fatalf("doctor not healthy after the set-aside:\n%s", e.mustRun("doctor", "team").out)
 	}
 
-	// The script flag.
+	// A second round.
 	if err := crypto.WriteSecretVersion(dir, "PLANTED_TWO", other, []byte("x"), 1); err != nil {
 		t.Fatal(err)
 	}
 	code = decodeJSON[map[string]any](t, e.mustRun("trust", "team", "--json").out)["state_code"].(string)
-	e.mustRun("doctor", "team", "--set-aside-unknown", "--yes-checked-with-members", "--expect", code)
+	e.mustRun("doctor", "team", "--set-aside-unknown", "--expect", code)
 	e.mustRunIn("again", "set", "ANOTHER_KEY", "--vault", "team")
 }
 
@@ -157,7 +144,7 @@ func TestSetAsideRefusesARolledBackFolder(t *testing.T) {
 	expectCode(t, r, ExitUnverified)
 	// ...and cannot clear the block with the state code alice gave: his
 	// folder is behind it, so nothing is set aside.
-	r = bob.run("doctor", "team", "--set-aside-unknown", "--yes-checked-with-members", "--expect", code)
+	r = bob.run("doctor", "team", "--set-aside-unknown", "--expect", code)
 	expectCode(t, r, ExitUnverified)
 	if _, err := os.Stat(filepath.Join(vdir, "secrets", "NEW_K2.age")); err != nil {
 		t.Fatal("the newer file was moved from a rolled-back folder")
