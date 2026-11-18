@@ -235,6 +235,9 @@ func (m *Model) safe(cmd tea.Cmd) tea.Cmd {
 func (m *Model) Crashed() bool { return m.crashed }
 
 func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.crashed { // a View panic wiped everything: leave instead of sitting on a blank screen
+		return m, tea.Quit
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height

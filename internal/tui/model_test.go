@@ -628,3 +628,12 @@ func TestWrapLineKeepsRunesWhole(t *testing.T) {
 		}
 	}
 }
+
+func TestAfterACrashTheNextMessageQuits(t *testing.T) {
+	h := newHarness(t, standard())
+	h.m.crash() // as a View panic does
+	_, cmd := h.m.Update(tickMsg(h.clock))
+	if cmd == nil {
+		t.Fatal("no quit after a crash")
+	}
+}
