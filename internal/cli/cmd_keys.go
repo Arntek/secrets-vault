@@ -16,6 +16,7 @@ import (
 	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
+	"github.com/Arntek/secrets-vault/internal/members"
 )
 
 // --- listing ---
@@ -30,6 +31,12 @@ type keyRow struct {
 	Locked      bool     `json:"locked"`
 }
 
+// vaultError is a vault that could not be listed, in --json output.
+type vaultError struct {
+	Vault string `json:"vault"`
+	Error string `json:"error"`
+}
+
 type vaultSummary struct {
 	Name     string `json:"name"`
 	Keys     int    `json:"keys"`
@@ -37,33 +44,42 @@ type vaultSummary struct {
 }
 
 // collectKeys reads every registered vault's index (no unlock needed).
-func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, error) {
+func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []vaultError, error) {
 	names, err := a.vaultNames()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if vaultFilter != "" {
 		if _, err := a.vault(vaultFilter); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		names = []string{vaultFilter}
 	}
 	if tag != "" {
 		if err := format.ValidateTag(tag); err != nil {
-			return nil, nil, usageErrf("%v", err)
+			return nil, nil, nil, usageErrf("%v", err)
 		}
 	}
 	states := a.lockStates()
 	rows := []keyRow{}
 	sums := []vaultSummary{}
+	errs := []vaultError{}
 	for _, n := range names {
 		v, err := a.vault(n)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		vf, err := format.ReadVaultFile(v.dir)
-		if err != nil {
-			a.warnf("vault '%s' is unavailable: %v", n, vaultErr(err))
+		// Verified (no prompts, no writes), so a tampered or substituted
+		// vault is reported, never silently left out (ue1.10).
+		_, vf, err := a.loadVault(v)
+		if err != nil && !errors.Is(err, members.ErrOldFormat) {
+			msg := err.Error()
+			var ee *exitErr
+			if errors.As(err, &ee) {
+				msg = ee.msg
+			}
+			a.warnf("%s", msg)
+			errs = append(errs, vaultError{Vault: n, Error: msg})
 			continue
 		}
 		idx, err := v.index()
@@ -96,7 +112,7 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, er
 		}
 		return rows[i].Vault < rows[j].Vault
 	})
-	return rows, sums, nil
+	return rows, sums, errs, nil
 }
 
 func (a *app) printKeyTable(rows []keyRow, sums []vaultSummary) {
@@ -127,16 +143,29 @@ func plural(n int, word string) string {
 	return itoa(n) + " " + word + "s"
 }
 
+// withErrors appends vaults that could not be listed to a --json key list
+// as {"vault": ..., "error": ...} entries.
+func withErrors(rows []keyRow, errs []vaultError) []any {
+	out := make([]any, 0, len(rows)+len(errs))
+	for _, r := range rows {
+		out = append(out, r)
+	}
+	for _, e := range errs {
+		out = append(out, e)
+	}
+	return out
+}
+
 func cmdList(a *app, p *parsed) error {
 	if err := p.wantArgs(0, 0, a.prog+" list [--vault V] [--tag T]"); err != nil {
 		return err
 	}
-	rows, sums, err := a.collectKeys(p.str("vault"), p.str("tag"))
+	rows, sums, errs, err := a.collectKeys(p.str("vault"), p.str("tag"))
 	if err != nil {
 		return err
 	}
 	if a.asJSON {
-		return a.printJSON(rows)
+		return a.printJSON(withErrors(rows, errs))
 	}
 	a.printKeyTable(rows, sums)
 	return nil
@@ -146,7 +175,7 @@ func cmdSearch(a *app, p *parsed) error {
 	if err := p.wantArgs(1, -1, a.prog+" search WORDS"); err != nil {
 		return err
 	}
-	rows, sums, err := a.collectKeys(p.str("vault"), p.str("tag"))
+	rows, sums, errs, err := a.collectKeys(p.str("vault"), p.str("tag"))
 	if err != nil {
 		return err
 	}
@@ -169,7 +198,7 @@ func cmdSearch(a *app, p *parsed) error {
 		}
 	}
 	if a.asJSON {
-		return a.printJSON(out)
+		return a.printJSON(withErrors(out, errs))
 	}
 	a.printKeyTable(out, sums)
 	return nil

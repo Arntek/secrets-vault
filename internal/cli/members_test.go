@@ -618,20 +618,41 @@ func TestPlantedStagingNeverOverwrites(t *testing.T) {
 	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age")); string(after) != string(before) {
 		t.Fatal("a read-only command moved staged files")
 	}
-	expectCode(t, e.runIn("new", "set", "OTHER"), ExitError)
+	r := e.runIn("new", "set", "OTHER")
+	expectCode(t, r, ExitError)
 	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age")); string(after) != string(before) {
 		t.Fatal("a write moved a staged file that does not open under the key")
 	}
-	// A staging folder for a key the chain never had blocks writes.
-	_ = os.RemoveAll(stage)
+	if !strings.Contains(r.err, "doctor main --quarantine-staging") {
+		t.Fatalf("the refusal should offer the way out: %s", r)
+	}
+	// ue1.10: doctor moves it aside (never deletes), then writes work.
+	if !strings.Contains(e.mustRun("doctor", "main").out, "--quarantine-staging") {
+		t.Fatal("doctor should report the folder")
+	}
+	r = e.mustRun("doctor", "main", "--quarantine-staging")
+	if !strings.Contains(r.out, "moved aside to quarantine/") {
+		t.Fatalf("doctor: %s", r)
+	}
+	q, _ := filepath.Glob(filepath.Join(dir, "quarantine", "sv-rotate-"+vf.KeyID+"-*", "API_KEY.age"))
+	if len(q) != 1 {
+		t.Fatalf("quarantined files: %v", q)
+	}
+	e.mustRunIn("new", "set", "OTHER")
+	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age")); string(after) != string(before) {
+		t.Fatal("API_KEY changed")
+	}
+	// A staging folder for a key the chain never had blocks writes, and
+	// doctor moves that aside too.
 	_ = os.MkdirAll(filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab"), 0o700)
-	r := e.runIn("new", "set", "OTHER")
+	r = e.runIn("new", "set", "OTHER")
 	expectCode(t, r, ExitUnverified)
-	if !strings.Contains(r.err, "newer state") {
+	if !strings.Contains(r.err, "newer state") || !strings.Contains(r.err, "--quarantine-staging") {
 		t.Fatalf("%s", r)
 	}
+	e.mustRun("doctor", "main", "--quarantine-staging")
+	e.mustRunIn("newer", "set", "OTHER")
 	// A symlinked secrets folder is refused.
-	_ = os.RemoveAll(filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab"))
 	elsewhere := t.TempDir()
 	_ = os.Rename(filepath.Join(dir, "secrets"), filepath.Join(elsewhere, "real"))
 	if err := os.Symlink(filepath.Join(elsewhere, "real"), filepath.Join(dir, "secrets")); err != nil {
@@ -714,5 +735,44 @@ func TestNewerVaultMessage(t *testing.T) {
 	r = f.run("attach", "x", dir)
 	if !strings.Contains(r.err, "brew upgrade secrets-vault") {
 		t.Fatalf("attach: %s", r)
+	}
+}
+
+// ue1.10: a tampered vault is never reported as "key not found", and list
+// --json names it with an error instead of leaving it out; a first-use pin
+// is in the --json output.
+func TestTamperedVaultNotKeyNotFound(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("K", "", "v")
+	vf, _ := format.ReadVaultFile(dir)
+	vf.Unlockers[0].WrappedKey[3] ^= 1
+	data, _ := json.MarshalIndent(vf, "", "  ")
+	_ = os.WriteFile(filepath.Join(dir, "vault.json"), data, 0o600)
+	for _, args := range [][]string{{"get", "K"}, {"info", "K"}, {"rm", "K", "--yes"}, {"get", "MISSING"}} {
+		r := e.run(args...)
+		expectCode(t, r, ExitUnverified)
+		if !strings.Contains(r.err, "changed outside secrets-vault") {
+			t.Fatalf("%v: %s", args, r)
+		}
+	}
+	l := decodeJSON[[]map[string]any](t, e.mustRun("list", "--json").out)
+	if len(l) != 1 || l[0]["vault"] != "main" || l[0]["error"] == nil {
+		t.Fatalf("list --json: %v", l)
+	}
+
+	// First pin in --json: on stdout too, with head, signer and members.
+	f := newEnv(t)
+	g := newEnv(t)
+	gdir := g.initVault("team")
+	ofile := filepath.Join(g.home, "id.export")
+	g.mustRunIn(testPass+"\ntransfer passphrase 9\n", "identity", "export", ofile, "--passphrase-stdin")
+	f.mustRunIn("transfer passphrase 9\nsecond mac pass\n", "identity", "import", ofile, "--passphrase-stdin")
+	out := decodeJSON[map[string]any](t, f.mustRun("attach", "team", gdir, "--json").out)
+	fp, _ := out["first_pin"].(map[string]any)
+	if out["state_code_checked"] != false || fp == nil || fp["signed_by"] != testUser || len(fp["members"].([]any)) != 1 {
+		t.Fatalf("attach --json: %v", out)
 	}
 }

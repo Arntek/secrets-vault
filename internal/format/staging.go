@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Key rotation re-encrypts every secret, which cannot be one atomic step on
@@ -317,4 +318,39 @@ func ReadStagedFile(vaultDir, keyID, rel string) ([]byte, error) {
 		return nil, err
 	}
 	return readRegular(filepath.Join(stagingDir(vaultDir, keyID), filepath.FromSlash(rel)), MaxSecretFileSize)
+}
+
+// QuarantineDir is where `vault doctor --quarantine-staging` moves rotation
+// staging folders it can't use: at the vault root, outside secrets/, so the
+// write guard no longer sees them. Nothing is deleted.
+const QuarantineDir = "quarantine"
+
+// QuarantineStaging moves secrets/.sv-rotate-<keyID>/ to
+// quarantine/sv-rotate-<keyID>-<UTC time>/ and returns the new path
+// relative to the vault folder.
+func QuarantineStaging(vaultDir, keyID string, now time.Time) (string, error) {
+	if err := ValidateKeyID(keyID); err != nil {
+		return "", err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return "", err
+	}
+	q := filepath.Join(vaultDir, QuarantineDir)
+	if err := checkDir(q, true); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(q, DirMode); err != nil {
+		return "", err
+	}
+	if err := checkDir(q, false); err != nil {
+		return "", err
+	}
+	name := "sv-rotate-" + keyID + "-" + now.UTC().Format("20060102T150405Z")
+	if err := os.Rename(stagingDir(vaultDir, keyID), filepath.Join(q, name)); err != nil {
+		return "", err
+	}
+	if err := syncDir(SecretsPath(vaultDir)); err != nil {
+		return "", err
+	}
+	return path.Join(QuarantineDir, name), nil
 }

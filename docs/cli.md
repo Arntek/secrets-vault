@@ -45,6 +45,8 @@ The socket path must fit in 100 bytes (macOS limit is 104). When `~/Library/Cach
 - `rm` needs `--yes` without a terminal; `member rm` needs `--yes` and `--folder-access-removed`, plus `--keep-passphrase`, `--new-passphrase` or `--new-passphrase-stdin` to choose what happens to the vault passphrase (default: dropped).
 - `member approve` needs a terminal (the approver types the requester's fingerprint), or `--fingerprint FP`. A member's first use of a vault someone else added them to needs a terminal or `--signer-fingerprint FP`. `--expect CODE` (any command) checks the vault against a state code.
 - `get` prints the plain value when stdout is not a terminal and a masked placeholder on a terminal unless `--reveal`.
+- Exit code 5 means the vault failed verification (tampered, substituted, rolled back, behind a state code, or this machine lost its record of it). `get`, `info`, `rm` and the rest never report such a vault as "key not found" (4); `list --json` and `search --json` add it as `{"vault": "...", "error": "..."}`.
+- A command that pins a vault for the first time adds `"state_code_checked": true|false` and `"first_pin": {vault, state, signed_by, members}` to its `--json` output (and says so on stderr).
 
 ## Trust
 
@@ -55,6 +57,8 @@ Design: [design/membership-auth.md](design/membership-auth.md). In short:
 - First use: a member added by someone else types that person's fingerprint; the owner's own second machine is shown the head and asked for the state code from another machine (Enter skips). A passphrase-only user pins on the first successful unlock.
 - `pending/` holds the new keys of this machine's unconfirmed rotations, encrypted to its own identity, so a lost race can be repaired. They are deleted when confirmed, on `detach` and on `--accept-rollback`.
 - `unlock --accept-key-change` no longer exists: key changes are signed, so they are verified or refused.
+- A state code (`--expect`) the folder doesn't meet is saved in the pin: every command refuses the vault (exit 5, "behind the state code you were given") until the folder reaches it, or the person runs `vault trust VAULT --accept-rollback` (ue1.9).
+- `vault doctor VAULT` reports sync-conflict copies and key-rotation staging folders. With `--quarantine-staging` it finishes a verified interrupted rotation if every staged file opens under the key, and moves any other staging folder to `quarantine/` in the vault folder (never deletes). Writes blocked by such a folder say so.
 
 ## Testing
 

@@ -329,3 +329,10 @@ Builds from before this design can't verify anything, so they are kept from *usi
 - Checked against a build of `main` from before the fix (3f8902d): it refuses a genuine version-2 vault, and on a downgraded file it can't unlock (`unlock`, `get`, `member rm` all fail) and changes nothing.
 
 A member running an outdated build is protected because it refuses newer vaults, not because it can verify them. Upgrading is required to use a shared vault.
+
+## Follow-ups from the re-test (ue1.9, ue1.10)
+
+- **A failed state code is remembered** (ue1.9): if `--expect` finds the folder behind the code (or not containing it), the expectation is saved in the trust pin, and every command refuses the vault until the folder reaches it, or `vault trust VAULT --accept-rollback` is run with the signer's fingerprint. When it is met, it is cleared.
+- **Exit code 5** (ue1.10): any refusal because a vault failed verification exits 5, so a script or agent can't mistake it for "key not found" (4). `list --json` names such vaults with an error.
+- **First pin in `--json`**: `state_code_checked` and `first_pin` (state, signer, members with fingerprints) are part of the JSON result, not only stderr.
+- **`vault doctor --quarantine-staging`** moves a staging folder that can't be used (planted, or for a key the vault never had) to `quarantine/`, after verification; it never deletes.

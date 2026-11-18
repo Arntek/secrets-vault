@@ -60,7 +60,7 @@ File layout, parsing rules and the call sequences for these two packages are in 
 - **`crypto.Sealer`**: `Seal` / `Open` a secret value with a `VaultKey`. Get one from `crypto.NewSealer(name)`: the key name is bound into the encryption. Open failures return `crypto.ErrDecrypt`.
 - **`agent.Client`**: `Unlock(vaultID, key, ttl)`, `Key(vaultID)`, `Lock`, `LockAll`, `Status`, `Close`. Unlocking (Touch ID or passphrase prompt) happens in the CLI process; only the unwrapped key goes to the agent. `agent.ErrLocked` maps to exit code 3.
 - **`audit.Logger`**: `Record(audit.Event) error`. Use `audit.Nop{}` until Phase 2.
-- **`cli.Run(args, stdin, stdout, stderr) int`**: the whole program, testable in-process. Exit codes: 0 ok, 1 error, 2 usage, 3 locked, 4 key not found. It also serves the hidden `__agent` and `__clipclear` subcommands, so `cmd/secrets-vault` stays a one-liner. Commands, registry and flags are described in [cli.md](cli.md).
+- **`cli.Run(args, stdin, stdout, stderr) int`**: the whole program, testable in-process. Exit codes: 0 ok, 1 error, 2 usage, 3 locked, 4 key not found, 5 vault failed verification (tampered, substituted, rolled back, behind a state code). 3, 4 and 5 are the agent contract: an agent must never treat 5 as a missing key. It also serves the hidden `__agent` and `__clipclear` subcommands, so `cmd/secrets-vault` stays a one-liner. Commands, registry and flags are described in [cli.md](cli.md).
 
 ## Unlock flow
 

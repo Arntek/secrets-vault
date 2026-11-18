@@ -158,6 +158,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 | `vault touchid on\|off\|status` | Turn Touch ID on or off for your identity on this Mac (it opens every vault you're a member of) |
 | `vault member approve\|rm\|list\|requests\|log VAULT [NAME]` | Manage who can open a shared vault; `log` shows the signed history |
 | `vault trust VAULT [--expect CODE]` | Check a vault against a state code another member gave you, or finish a change that raced someone else's |
+| `vault doctor VAULT [--quarantine-staging]` | Check for sync conflicts and leftover key-rotation folders; move a foreign one aside (nothing is deleted) |
 | `vault rebuild VAULT` | Recreate a vault under your identity (if the only member's identity is lost); others join again |
 | `vault identity export\|import FILE` | Move your personal identity to another machine |
 | `vault config set KEY VALUE [--vault V]`, `vault config list` | Settings: `default-ttl` (5m to 24h), `default-vault`, `touch-every-read`, `dialog` *(dialog is used in Phase 2)* |
@@ -167,7 +168,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 
 *(coming in Phase 2)*: `vault ui` (full-screen terminal interface), `vault prime` and `vault setup claude|agents` (AI agent setup), `vault log` (read history), `vault doctor`, `vault backup`.
 
-**Exit codes:** `0` ok, `1` error, `2` usage, `3` vault locked and no way to ask for unlock, `4` key not found.
+**Exit codes:** `0` ok, `1` error, `2` usage, `3` vault locked and no way to ask for unlock, `4` key not found, `5` the vault failed verification (changed outside secrets-vault, replaced, rolled back, or behind a state code you were given). Scripts and AI agents must treat `5` as "stop and tell the user", never as "key missing". `list --json` includes such a vault as `{"vault": ..., "error": ...}`.
 
 ## Unlocking and Touch ID
 

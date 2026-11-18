@@ -393,14 +393,17 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 		}
 	}
 	var found []*keyRef
+	var failed []error
 	for _, n := range names {
 		v, err := a.vault(n)
 		if err != nil {
 			return nil, err
 		}
-		vf, err := format.ReadVaultFile(v.dir)
-		if err != nil {
-			a.warnf("vault '%s' is unavailable: %v", n, vaultErr(err))
+		// Verify (no prompts, no writes): a vault that fails must never look
+		// like "key not found" (ue1.10).
+		_, vf, err := a.loadVault(v)
+		if err != nil && !errors.Is(err, members.ErrOldFormat) {
+			failed = append(failed, err)
 			continue
 		}
 		idx, err := v.index()
@@ -411,6 +414,18 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 		if e, ok := idx.Get(name); ok {
 			found = append(found, &keyRef{v: v, vf: vf, entry: e})
 		}
+	}
+	switch {
+	case len(found) == 0 && len(failed) == 1:
+		return nil, failed[0]
+	case len(found) == 0 && len(failed) > 1:
+		for _, e := range failed {
+			a.warnf("%v", e)
+		}
+		return nil, verifyErrf("that key was not found, and %d vaults failed verification, so it may be in one of them", len(failed))
+	}
+	for _, e := range failed {
+		a.warnf("warning: %v", e)
 	}
 	switch len(found) {
 	case 0:
