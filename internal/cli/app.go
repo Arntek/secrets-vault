@@ -373,3 +373,6 @@ func (a *app) configDir() (string, error) {
 	}
 	return filepath.Dir(p), nil
 }
+
+// ExitCode lets other packages map an error to the documented exit code.
+func (e *exitErr) ExitCode() int { return e.code }

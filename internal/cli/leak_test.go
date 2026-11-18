@@ -2,6 +2,7 @@ package cli
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Arntek/secrets-vault/internal/leaktest"
@@ -138,3 +139,56 @@ type bufferPair struct{ b []byte }
 
 func (w *bufferPair) Write(p []byte) (int, error) { w.b = append(w.b, p...); return len(p), nil }
 func (w *bufferPair) String() string              { return string(w.b) }
+
+// TestLeakTerminalUI drives `vault ui` with canary values and passphrases:
+// the value may be drawn only between an explicit reveal and the re-mask,
+// passphrases and typed values never, and no canary reaches HOME, logs or
+// temp files.
+func TestLeakTerminalUI(t *testing.T) {
+	skipWindows(t)
+	h := leaktest.New(t)
+	e := newEnvAt(t, filepath.Join(h.HomeDir, "ui"))
+	identityPass, vaultPass := h.Canary(), h.Canary()
+	stored, typed, wrong := h.Canary(), h.Canary(), h.Canary()
+	dir := filepath.Join(e.home, "vaults", "one")
+	if code := e.runTo(h.Stdout, h.Stderr, identityPass+"\n"+vaultPass+"\n", "init", "one", "--path", dir, "--passphrase-stdin", "--as", "owner"); code != 0 {
+		t.Fatalf("init exited %d", code)
+	}
+	if code := e.runTo(h.Stdout, h.Stderr, stored, "set", "STORED_KEY", "--vault", "one"); code != 0 {
+		t.Fatalf("set exited %d", code)
+	}
+	e.mustRun("lock", "--all")
+
+	d := newUIDriver(t, e)
+	d.goTo("STORED_KEY")
+	d.press(" ")
+	d.press(wrong)
+	d.enter()
+	d.press(identityPass)
+	d.enter()
+	revealedAt := len(d.frames)
+	d.want(stored)
+	d.press("j") // re-mask
+	maskedAt := len(d.frames)
+	d.press("a")
+	d.press("TYPED_KEY")
+	d.enter()
+	d.press(typed)
+	d.enter()
+	d.press("typed value")
+	d.enter()
+	d.press("x")
+	d.press("n")
+
+	for i, f := range d.frames {
+		for _, c := range []string{identityPass, vaultPass, wrong, typed} {
+			if strings.Contains(f, c) {
+				t.Fatalf("frame %d draws a typed secret:\n%s", i, f)
+			}
+		}
+		if strings.Contains(f, stored) && (i < revealedAt-1 || i >= maskedAt) {
+			t.Fatalf("frame %d draws the stored value outside a reveal:\n%s", i, f)
+		}
+	}
+	h.Check()
+}

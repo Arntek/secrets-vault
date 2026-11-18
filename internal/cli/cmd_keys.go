@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
@@ -29,18 +30,24 @@ type keyRow struct {
 	Updated     string   `json:"updated"`
 	UpdatedBy   string   `json:"updated_by,omitempty"`
 	Locked      bool     `json:"locked"`
+
+	updatedAt time.Time // for the terminal UI; not in --json
 }
 
 // vaultError is a vault that could not be listed, in --json output.
 type vaultError struct {
 	Vault string `json:"vault"`
 	Error string `json:"error"`
+
+	verify bool // exit code 5; for the terminal UI, not in --json
 }
 
 type vaultSummary struct {
 	Name     string `json:"name"`
 	Keys     int    `json:"keys"`
 	Unlocked bool   `json:"unlocked"`
+
+	expires time.Time // for the terminal UI; not in --json
 }
 
 // collectKeys reads every registered vault's index (no unlock needed).
@@ -74,12 +81,14 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []
 		_, vf, err := a.loadVault(v)
 		if err != nil && !errors.Is(err, members.ErrOldFormat) {
 			msg := err.Error()
+			verify := false
 			var ee *exitErr
 			if errors.As(err, &ee) {
 				msg = ee.msg
+				verify = ee.code == ExitUnverified
 			}
 			a.warnf("%s", msg)
-			errs = append(errs, vaultError{Vault: n, Error: msg})
+			errs = append(errs, vaultError{Vault: n, Error: msg, verify: verify})
 			continue
 		}
 		idx, err := v.index()
@@ -101,10 +110,10 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []
 			rows = append(rows, keyRow{
 				Name: e.Name, Vault: n, Description: e.Description, Tags: tags,
 				Updated: e.Updated.UTC().Format("2006-01-02T15:04:05Z"), UpdatedBy: e.UpdatedBy,
-				Locked: !unlocked,
+				Locked: !unlocked, updatedAt: e.Updated,
 			})
 		}
-		sums = append(sums, vaultSummary{Name: n, Keys: count, Unlocked: unlocked})
+		sums = append(sums, vaultSummary{Name: n, Keys: count, Unlocked: unlocked, expires: states[vf.ID].Expires})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Name != rows[j].Name {
@@ -271,12 +280,11 @@ func cmdGet(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	val, err := a.readValue(k, purposeRead)
+	val, err := a.revealValue(k)
 	if err != nil {
 		return err
 	}
 	defer clear(val)
-	a.record(k.v.name, k.entry.Name, audit.ActionRead)
 	masked := a.term.StdoutTTY() && !p.has("reveal")
 	if a.asJSON {
 		out := map[string]any{"name": k.entry.Name, "vault": k.v.name}
@@ -309,20 +317,9 @@ func cmdCopy(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	val, err := a.readValue(k, purposeRead)
+	cleared, err := a.copyValue(k)
 	if err != nil {
 		return err
-	}
-	defer clear(val)
-	if err := a.clip.Write(val); err != nil {
-		return failf("%v", err)
-	}
-	a.record(k.v.name, k.entry.Name, audit.ActionRead)
-	digest := sha256.Sum256(val)
-	cleared := true
-	if err := a.clip.ScheduleClear(digest, clipClearDelay); err != nil {
-		cleared = false
-		a.warnf("could not schedule clearing the clipboard; clear it yourself")
 	}
 	if a.asJSON {
 		return a.printJSON(map[string]any{"name": k.entry.Name, "vault": k.v.name, "copied": true, "clears_in_seconds": int(clipClearDelay.Seconds()), "will_clear": cleared})
@@ -459,51 +456,72 @@ func cmdSet(a *app, p *parsed) error {
 		return err
 	}
 	name := p.args[0]
+	var desc *string
+	if p.has("desc") {
+		d := p.str("desc")
+		desc = &d
+	}
+	vault, err := a.setKey(name, p.str("vault"), a.askValue, desc)
+	if err != nil {
+		return err
+	}
+	if a.asJSON {
+		return a.printJSON(map[string]any{"name": name, "vault": vault, "saved": true})
+	}
+	a.printf("Saved %s to '%s'\n", name, vault)
+	return nil
+}
+
+// setKey adds or updates a key. getValue is called once the vault is open
+// (so a locked vault fails before anything is asked) and its result is
+// zeroed here. desc nil leaves an existing description alone. Shared by
+// `set` and the terminal UI.
+func (a *app) setKey(name, vaultName string, getValue func() ([]byte, error), desc *string) (string, error) {
 	if err := format.ValidateKeyName(name); err != nil {
-		return usageErrf("%v", err)
+		return "", usageErrf("%v", err)
 	}
 	var v *vaultRef
 	var vf *format.VaultFile
 	var existing *format.IndexEntry
-	if k, err := a.findKey(name, p.str("vault")); err == nil {
+	if k, err := a.findKey(name, vaultName); err == nil {
 		v, vf = k.v, k.vf
 		e := k.entry
 		existing = &e
 	} else {
 		var ee *exitErr
 		if !errors.As(err, &ee) || ee.code != ExitNotFound {
-			return err
+			return "", err
 		}
-		if v, err = a.defaultVault(p.str("vault")); err != nil {
-			return err
+		if v, err = a.defaultVault(vaultName); err != nil {
+			return "", err
 		}
 		if vf, err = a.open(v); err != nil {
-			return err
+			return "", err
 		}
 	}
 	key, err := a.openKey(v, vf, openOpts{purpose: purposeWrite})
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer key.Destroy()
-	val, err := a.askValue()
+	val, err := getValue()
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer clear(val)
 	if err := crypto.WriteSecret(v.dir, name, key, val); err != nil {
 		if errors.Is(err, crypto.ErrTooLarge) {
-			return failf("the value is too large")
+			return "", failf("the value is too large")
 		}
-		return failf("cannot save the key: %v", vaultErr(err))
+		return "", failf("cannot save the key: %v", vaultErr(err))
 	}
 	err = v.modifyIndex(func(idx *format.Index) error {
 		e := format.IndexEntry{Name: name}
 		if existing != nil {
 			e = *existing
 		}
-		if p.has("desc") {
-			e.Description = p.str("desc")
+		if desc != nil {
+			e.Description = *desc
 		}
 		e.Updated = a.now().UTC()
 		e.UpdatedBy = a.myName()
@@ -511,15 +529,11 @@ func cmdSet(a *app, p *parsed) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	_, _ = format.PurgeTrash(v.dir, a.now())
 	a.record(v.name, name, audit.ActionSet)
-	if a.asJSON {
-		return a.printJSON(map[string]any{"name": name, "vault": v.name, "saved": true})
-	}
-	a.printf("Saved %s to '%s'\n", name, v.name)
-	return nil
+	return v.name, nil
 }
 
 func cmdDescribe(a *app, p *parsed) error {
@@ -527,11 +541,24 @@ func cmdDescribe(a *app, p *parsed) error {
 	if err := p.wantArgs(2, -1, usage); err != nil {
 		return err
 	}
-	k, err := a.findKey(p.args[0], p.str("vault"))
+	text := strings.Join(p.args[1:], " ")
+	vault, name, err := a.describeKey(p.args[0], p.str("vault"), text)
 	if err != nil {
 		return err
 	}
-	text := strings.Join(p.args[1:], " ")
+	if a.asJSON {
+		return a.printJSON(map[string]any{"name": name, "vault": vault, "description": text})
+	}
+	a.printf("Updated the description of %s.\n", name)
+	return nil
+}
+
+// describeKey changes a key's description. Shared by `describe` and the UI.
+func (a *app) describeKey(name, vaultName, text string) (vault, key string, err error) {
+	k, err := a.findKey(name, vaultName)
+	if err != nil {
+		return "", "", err
+	}
 	err = k.v.modifyIndex(func(idx *format.Index) error {
 		e, ok := idx.Get(k.entry.Name)
 		if !ok {
@@ -544,14 +571,10 @@ func cmdDescribe(a *app, p *parsed) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	a.record(k.v.name, k.entry.Name, audit.ActionSet)
-	if a.asJSON {
-		return a.printJSON(map[string]any{"name": k.entry.Name, "vault": k.v.name, "description": text})
-	}
-	a.printf("Updated the description of %s.\n", k.entry.Name)
-	return nil
+	return k.v.name, k.entry.Name, nil
 }
 
 // cmdTag: tag NAME tag1,tag2 [--rm]
@@ -560,26 +583,47 @@ func cmdTag(a *app, p *parsed) error {
 	if err := p.wantArgs(2, 2, usage); err != nil {
 		return err
 	}
-	k, err := a.findKey(p.args[0], p.str("vault"))
+	tags, err := parseTagList(p.args[1])
 	if err != nil {
 		return err
 	}
+	vault, final, err := a.tagKey(p.args[0], p.str("vault"), tags, p.has("rm"))
+	if err != nil {
+		return err
+	}
+	if a.asJSON {
+		return a.printJSON(map[string]any{"name": p.args[0], "vault": vault, "tags": final})
+	}
+	a.printf("%s tags: %s\n", p.args[0], strings.Join(final, ", "))
+	return nil
+}
+
+// parseTagList splits and validates "a,b,c".
+func parseTagList(s string) ([]string, error) {
 	var tags []string
-	for _, t := range strings.Split(p.args[1], ",") {
+	for _, t := range strings.Split(s, ",") {
 		t = strings.TrimSpace(t)
 		if err := format.ValidateTag(t); err != nil {
-			return usageErrf("%v", err)
+			return nil, usageErrf("%v", err)
 		}
 		tags = append(tags, t)
 	}
-	var final []string
+	return tags, nil
+}
+
+// tagKey adds (or with rm removes) tags. Shared by `tag` and the UI.
+func (a *app) tagKey(name, vaultName string, tags []string, rm bool) (vault string, final []string, err error) {
+	k, err := a.findKey(name, vaultName)
+	if err != nil {
+		return "", nil, err
+	}
 	err = k.v.modifyIndex(func(idx *format.Index) error {
 		e, ok := idx.Get(k.entry.Name)
 		if !ok {
 			return notFoundErr("key not found")
 		}
 		cur := slices.Clone(e.Tags)
-		if p.has("rm") {
+		if rm {
 			cur = slices.DeleteFunc(cur, func(t string) bool { return slices.Contains(tags, t) })
 		} else {
 			for _, t := range tags {
@@ -596,16 +640,12 @@ func cmdTag(a *app, p *parsed) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	if final == nil {
 		final = []string{}
 	}
-	if a.asJSON {
-		return a.printJSON(map[string]any{"name": k.entry.Name, "vault": k.v.name, "tags": final})
-	}
-	a.printf("%s tags: %s\n", k.entry.Name, strings.Join(final, ", "))
-	return nil
+	return k.v.name, final, nil
 }
 
 // cmdMv: mv NAME --to VAULT [--vault SRC]
@@ -617,57 +657,66 @@ func cmdMv(a *app, p *parsed) error {
 	if !p.has("to") {
 		return usageErrf("usage: %s", usage)
 	}
-	k, err := a.findKey(p.args[0], p.str("vault"))
+	from, to, name, err := a.moveKey(p.args[0], p.str("vault"), p.str("to"))
 	if err != nil {
 		return err
 	}
-	dst, err := a.vault(p.str("to"))
+	if a.asJSON {
+		return a.printJSON(map[string]any{"name": name, "from": from, "to": to})
+	}
+	a.printf("Moved %s from '%s' to '%s'\n", name, from, to)
+	return nil
+}
+
+// moveKey moves a key between vaults. Shared by `mv` and the UI.
+func (a *app) moveKey(name, vaultName, toVault string) (from, to, key string, err error) {
+	k, err := a.findKey(name, vaultName)
 	if err != nil {
-		return err
+		return "", "", "", err
+	}
+	dst, err := a.vault(toVault)
+	if err != nil {
+		return "", "", "", err
 	}
 	if dst.name == k.v.name {
-		return failf("the key is already in that vault")
+		return "", "", "", failf("the key is already in that vault")
 	}
 	dvf, err := a.open(dst)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 	didx, err := dst.index()
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 	if _, ok := didx.Get(k.entry.Name); ok {
-		return failf("a key with that name already exists in the destination vault")
+		return "", "", "", failf("a key with that name already exists in the destination vault")
 	}
 	val, err := a.readValue(k, purposeRead)
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 	defer clear(val)
 	dkey, err := a.openKey(dst, dvf, openOpts{purpose: purposeWrite})
 	if err != nil {
-		return err
+		return "", "", "", err
 	}
 	defer dkey.Destroy()
 	if err := crypto.WriteSecret(dst.dir, k.entry.Name, dkey, val); err != nil {
-		return failf("cannot save the key in the destination vault: %v", vaultErr(err))
+		return "", "", "", failf("cannot save the key in the destination vault: %v", vaultErr(err))
 	}
 	ent := k.entry
 	ent.Updated = a.now().UTC()
 	ent.UpdatedBy = a.myName()
 	if err := dst.modifyIndex(func(idx *format.Index) error { idx.Upsert(ent); return nil }); err != nil {
-		return err
+		return "", "", "", err
 	}
 	if err := a.trashKey(k); err != nil {
-		return failf("copied to the destination, but could not remove it from the source vault: %v", err)
+		return "", "", "", failf("copied to the destination, but could not remove it from the source vault: %v", err)
 	}
 	a.record(k.v.name, k.entry.Name, audit.ActionMove)
 	a.record(dst.name, k.entry.Name, audit.ActionMove)
-	if a.asJSON {
-		return a.printJSON(map[string]any{"name": k.entry.Name, "from": k.v.name, "to": dst.name})
-	}
-	a.printf("Moved %s from '%s' to '%s'\n", k.entry.Name, k.v.name, dst.name)
-	return nil
+	return k.v.name, dst.name, k.entry.Name, nil
 }
 
 // trashKey moves a key's file to the trash and drops it from the index.
@@ -687,34 +736,46 @@ func cmdRename(a *app, p *parsed) error {
 	if err := p.wantArgs(2, 2, a.prog+" rename OLD NEW [--vault V]"); err != nil {
 		return err
 	}
-	if err := format.ValidateKeyName(p.args[1]); err != nil {
-		return usageErrf("%v", err)
-	}
-	newName := p.args[1]
-	k, err := a.findKey(p.args[0], p.str("vault"))
+	vault, err := a.renameKey(p.args[0], p.str("vault"), p.args[1])
 	if err != nil {
 		return err
+	}
+	if a.asJSON {
+		return a.printJSON(map[string]any{"vault": vault, "name": p.args[1], "renamed_from": p.args[0]})
+	}
+	a.printf("Renamed %s to %s in '%s'\n", p.args[0], p.args[1], vault)
+	return nil
+}
+
+// renameKey renames a key (re-encrypting it: the name is bound into the
+// encryption). Shared by `rename` and the UI.
+func (a *app) renameKey(oldName, vaultName, newName string) (string, error) {
+	if err := format.ValidateKeyName(newName); err != nil {
+		return "", usageErrf("%v", err)
+	}
+	k, err := a.findKey(oldName, vaultName)
+	if err != nil {
+		return "", err
 	}
 	idx, err := k.v.index()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, ok := idx.Get(newName); ok {
-		return failf("a key with the new name already exists in '%s'", k.v.name)
+		return "", failf("a key with the new name already exists in '%s'", k.v.name)
 	}
 	val, err := a.readValue(k, purposeWrite)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer clear(val)
 	key, err := a.openKey(k.v, k.vf, openOpts{purpose: purposeWrite})
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer key.Destroy()
-	// The key name is bound into the encryption, so renaming re-encrypts.
 	if err := crypto.WriteSecret(k.v.dir, newName, key, val); err != nil {
-		return failf("cannot save the renamed key: %v", vaultErr(err))
+		return "", failf("cannot save the renamed key: %v", vaultErr(err))
 	}
 	ent := k.entry
 	err = k.v.modifyIndex(func(i *format.Index) error {
@@ -725,17 +786,13 @@ func cmdRename(a *app, p *parsed) error {
 		return nil
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := a.trashKey(k); err != nil {
-		return failf("saved under the new name, but could not remove the old one: %v", err)
+		return "", failf("saved under the new name, but could not remove the old one: %v", err)
 	}
 	a.record(k.v.name, newName, audit.ActionRename)
-	if a.asJSON {
-		return a.printJSON(map[string]any{"vault": k.v.name, "name": newName, "renamed_from": k.entry.Name})
-	}
-	a.printf("Renamed %s to %s in '%s'\n", k.entry.Name, newName, k.v.name)
-	return nil
+	return k.v.name, nil
 }
 
 // cmdRm: rm NAME [--yes]
@@ -756,7 +813,19 @@ func cmdRm(a *app, p *parsed) error {
 			return failf("cancelled")
 		}
 	}
-	// Deleting needs the vault unlocked, like any other change.
+	if err := a.deleteKey(k); err != nil {
+		return err
+	}
+	if a.asJSON {
+		return a.printJSON(map[string]any{"name": k.entry.Name, "vault": k.v.name, "deleted": true})
+	}
+	a.printf("Deleted %s from '%s' (kept in the trash for 30 days)\n", k.entry.Name, k.v.name)
+	return nil
+}
+
+// deleteKey moves a key to the trash. It needs the vault unlocked, like any
+// other change. The caller has already confirmed. Shared by `rm` and the UI.
+func (a *app) deleteKey(k *keyRef) error {
 	key, err := a.openKey(k.v, k.vf, openOpts{purpose: purposeWrite})
 	if err != nil {
 		return err
@@ -766,11 +835,39 @@ func cmdRm(a *app, p *parsed) error {
 		return err
 	}
 	a.record(k.v.name, k.entry.Name, audit.ActionDelete)
-	if a.asJSON {
-		return a.printJSON(map[string]any{"name": k.entry.Name, "vault": k.v.name, "deleted": true})
-	}
-	a.printf("Deleted %s from '%s' (kept in the trash for 30 days)\n", k.entry.Name, k.v.name)
 	return nil
+}
+
+// revealValue decrypts one key for display or copy and records the read.
+// This is the single call site for "a value was read on a person's request"
+// in get, copy and the terminal UI; the audit hook lives in a.record.
+func (a *app) revealValue(k *keyRef) ([]byte, error) {
+	val, err := a.readValue(k, purposeRead)
+	if err != nil {
+		return nil, err
+	}
+	a.record(k.v.name, k.entry.Name, audit.ActionRead)
+	return val, nil
+}
+
+// copyValue puts a key's value on the clipboard and schedules clearing it.
+// It reports whether the clear was scheduled. Shared by `copy` and the UI.
+func (a *app) copyValue(k *keyRef) (bool, error) {
+	val, err := a.readValue(k, purposeRead)
+	if err != nil {
+		return false, err
+	}
+	defer clear(val)
+	if err := a.clip.Write(val); err != nil {
+		return false, failf("%v", err)
+	}
+	a.record(k.v.name, k.entry.Name, audit.ActionRead)
+	digest := sha256.Sum256(val)
+	if err := a.clip.ScheduleClear(digest, clipClearDelay); err != nil {
+		a.warnf("could not schedule clearing the clipboard; clear it yourself")
+		return false, nil
+	}
+	return true, nil
 }
 
 // childStdin gives a child process the real stdin when possible, so it can
