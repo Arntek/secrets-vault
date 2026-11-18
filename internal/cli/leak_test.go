@@ -72,6 +72,8 @@ func TestLeakBroadCommandSequence(t *testing.T) {
 	ok(owner, "", "status", "--json")
 	ok(owner, "", "trust", "one")
 	ok(owner, "", "member", "log", "one")
+	ok(owner, "", "log")
+	ok(owner, "", "log", "--json", "--since", "1h")
 	ok(owner, "", "mv", "EXAMPLE_KEY_TWO", "--to", "two")
 	ok(owner, "", "rename", "EXAMPLE_KEY_TWO", "EXAMPLE_KEY_RENAMED")
 	ok(owner, "", "copy", "EXAMPLE_KEY_ONE")

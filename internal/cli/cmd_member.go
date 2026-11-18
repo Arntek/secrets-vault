@@ -229,6 +229,7 @@ func (a *app) memberApprove(v *vaultRef, name string, p *parsed) error {
 	if err != nil {
 		return memberErr(err)
 	}
+	a.recordEvent(audit.Event{Vault: v.name, Action: audit.ActionMemberAdd, Member: name})
 	if a.asJSON {
 		return a.printJSON(map[string]any{"vault": v.name, "approved": name, "fingerprint": m.Identity.Fingerprint, "your_fingerprint": un.Fingerprint})
 	}
@@ -352,7 +353,7 @@ func (a *app) memberRemove(v *vaultRef, name string, p *parsed) error {
 		}
 		return memberErr(err)
 	}
-	a.record(v.name, "", audit.ActionUnlock)
+	a.recordEvent(audit.Event{Vault: v.name, Action: audit.ActionMemberRemove, Member: name})
 	exposed := res.ExposedKeys
 	if exposed == nil {
 		exposed = []string{}

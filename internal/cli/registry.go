@@ -31,18 +31,18 @@ type Config struct {
 	DefaultTTL     string                 `toml:"default_ttl,omitempty"`
 	DefaultVault   string                 `toml:"default_vault,omitempty"`
 	TouchEveryRead bool                   `toml:"touch_every_read,omitempty"`
-	Dialog         string                 `toml:"dialog,omitempty"`
+	Dialog         *dialogSetting         `toml:"dialog,omitempty"`
 	Aliases        []string               `toml:"aliases,omitempty"`
 	Vaults         map[string]*VaultEntry `toml:"vaults,omitempty"`
 }
 
 // VaultEntry is one [vaults.NAME] table.
 type VaultEntry struct {
-	Path           string `toml:"path"`
-	Description    string `toml:"description,omitempty"`
-	TTL            string `toml:"ttl,omitempty"`
-	TouchEveryRead *bool  `toml:"touch_every_read,omitempty"`
-	Dialog         string `toml:"dialog,omitempty"`
+	Path           string         `toml:"path"`
+	Description    string         `toml:"description,omitempty"`
+	TTL            string         `toml:"ttl,omitempty"`
+	TouchEveryRead *bool          `toml:"touch_every_read,omitempty"`
+	Dialog         *dialogSetting `toml:"dialog,omitempty"`
 	// ID is the vault ID recorded at init or attach. vault.json is only
 	// accepted if it holds this vault (design M1); the trust pin for it is
 	// kept under trust/<ID>.json. It is stored in registry.toml, never in

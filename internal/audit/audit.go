@@ -12,8 +12,8 @@
 // Dependency rule: audit imports only the standard library. Any package may
 // import it.
 //
-// Owned by Phase 2 (vault log); the Logger interface is fixed now so Phase 1
-// code records events from the start.
+// The Logger interface was fixed in Phase 1 so code recorded events from the
+// start; File (file.go) is the real logger and Nop discards events.
 package audit
 
 import "time"
@@ -30,6 +30,10 @@ const (
 	ActionRename Action = "rename"
 	ActionUnlock Action = "unlock"
 	ActionLock   Action = "lock"
+	// Membership and passphrase changes. Event.Member names the person.
+	ActionMemberAdd    Action = "member-add"
+	ActionMemberRemove Action = "member-remove"
+	ActionPasswd       Action = "passwd"
 )
 
 // Event is one audit record. It holds names only, never values.
@@ -39,6 +43,10 @@ type Event struct {
 	Key     string    `json:"key,omitempty"`
 	Action  Action    `json:"action"`
 	Program string    `json:"program,omitempty"` // calling program, e.g. "python3"
+	PID     int       `json:"pid,omitempty"`     // process ID of the calling program
+	Command string    `json:"command,omitempty"` // the vault command, e.g. "get"
+	Member  string    `json:"member,omitempty"`  // member added or removed
+	Via     string    `json:"via,omitempty"`     // how a vault was unlocked: "dialog"
 	User    string    `json:"user,omitempty"`
 }
 

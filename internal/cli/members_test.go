@@ -118,6 +118,9 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 	if len(ml["members"].([]any)) != 2 {
 		t.Fatalf("member list: %v", ml)
 	}
+	if evs := decodeJSON[[]struct{ Action, Member string }](t, owner.mustRun("log", "--json").out); !hasMemberEvent(evs, "member-add", "dan") {
+		t.Fatalf("approving dan must be in the read log: %v", evs)
+	}
 	logOut := owner.mustRun("member", "log", "team").out
 	if !strings.Contains(logOut, "add-member") || !strings.Contains(logOut, "genesis") {
 		t.Fatalf("member log: %s", logOut)
@@ -131,6 +134,9 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 		if !strings.Contains(r.out, want) {
 			t.Errorf("removal output missing %q:\n%s", want, r.out)
 		}
+	}
+	if evs := decodeJSON[[]struct{ Action, Member string }](t, owner.mustRun("log", "--json").out); !hasMemberEvent(evs, "member-remove", "dan") {
+		t.Fatalf("removing dan must be in the read log: %v", evs)
 	}
 	if got := owner.mustRun("get", "EXAMPLE_TEAM_KEY").out; got != "team-secret-value\n" {
 		t.Fatalf("%q", got)
@@ -775,4 +781,13 @@ func TestTamperedVaultNotKeyNotFound(t *testing.T) {
 	if out["state_code_checked"] != false || fp == nil || fp["signed_by"] != testUser || len(fp["members"].([]any)) != 1 {
 		t.Fatalf("attach --json: %v", out)
 	}
+}
+
+func hasMemberEvent(evs []struct{ Action, Member string }, action, member string) bool {
+	for _, e := range evs {
+		if e.Action == action && e.Member == member {
+			return true
+		}
+	}
+	return false
 }

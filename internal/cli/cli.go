@@ -55,12 +55,13 @@ type command struct {
 }
 
 var (
-	fJSON    = flagSpec{name: "json"}
-	fVault   = flagSpec{name: "vault", value: true}
-	fPassStd = flagSpec{name: "passphrase-stdin"}
-	fExpect  = flagSpec{name: "expect", value: true}
-	fSignFP  = flagSpec{name: "signer-fingerprint", value: true}
-	fYes     = flagSpec{name: "yes", short: "y"}
+	fJSON     = flagSpec{name: "json"}
+	fVault    = flagSpec{name: "vault", value: true}
+	fPassStd  = flagSpec{name: "passphrase-stdin"}
+	fExpect   = flagSpec{name: "expect", value: true}
+	fSignFP   = flagSpec{name: "signer-fingerprint", value: true}
+	fNoDialog = flagSpec{name: "no-dialog"}
+	fYes      = flagSpec{name: "yes", short: "y"}
 )
 
 // commands is the command table; help and dispatch both read it.
@@ -109,6 +110,9 @@ var commands = []command{
 		flags:   []flagSpec{{name: "for", value: true}}, run: cmdUnlock},
 	{name: "lock", group: "Locking", usage: "lock [VAULT | --all]",
 		summary: "Forget the key now.", flags: []flagSpec{{name: "all"}}, run: cmdLock},
+	{name: "log", group: "Locking", usage: "log [--vault V] [--since 24h] [--name K] [--json]",
+		summary: "Who read which key and when: program, command, time. Never values.",
+		flags:   []flagSpec{fVault, {name: "since", value: true}, {name: "name", value: true}}, run: cmdLog},
 	{name: "status", group: "Locking", usage: "status",
 		summary: "Each vault, locked or unlocked, time left, state code, pending join requests.", run: cmdStatus},
 
@@ -226,7 +230,7 @@ func (a *app) dispatch(c *command, args []string) int {
 			return ExitOK
 		}
 	}
-	specs := append([]flagSpec{fJSON, fPassStd, fExpect, fSignFP}, c.flags...)
+	specs := append([]flagSpec{fJSON, fPassStd, fExpect, fSignFP, fNoDialog}, c.flags...)
 	p, err := parseArgs(args, specs)
 	if err != nil {
 		return a.fail(err, c)
@@ -235,6 +239,8 @@ func (a *app) dispatch(c *command, args []string) int {
 	a.passStdin = p.has("passphrase-stdin")
 	a.expectCode = p.str("expect")
 	a.signerFP = p.str("signer-fingerprint")
+	a.noDialog = p.has("no-dialog")
+	a.cmdName = c.name
 	if err := c.run(a, p); err != nil {
 		return a.fail(err, c)
 	}
@@ -277,7 +283,7 @@ func usage(w io.Writer, prog string) {
 func commandHelp(w io.Writer, prog string, c *command) {
 	fmt.Fprintf(w, "Usage: %s %s\n\n%s\n", prog, c.usage, c.summary)
 	var opts []string
-	for _, f := range append([]flagSpec{fJSON, fPassStd}, c.flags...) {
+	for _, f := range append([]flagSpec{fJSON, fPassStd, fNoDialog}, c.flags...) {
 		s := "--" + f.name
 		if f.short != "" {
 			s = "-" + f.short + ", " + s

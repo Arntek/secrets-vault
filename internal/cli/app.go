@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -116,11 +117,18 @@ type app struct {
 	// it is not running.
 	dialAgent func(start bool) (agent.Client, error)
 
-	// dialogPassphrase is the Phase 2 hook for a native macOS password
-	// dialog when an agent (no terminal) hits a locked vault. It is nil
-	// today; unlock falls through to "locked, exit 3" when no terminal is
-	// available.
-	dialogPassphrase func(vault string) ([]byte, error)
+	// dialog shows the native password dialog (macOS only; nil elsewhere).
+	// Tests replace it: no test may open a real dialog.
+	dialog   dialogRunner
+	noDialog bool   // --no-dialog
+	goos     string // runtime.GOOS; tests set "darwin" to exercise the dialog
+	// caller reports the program that started this command (the parent
+	// process) and its process ID, for the dialog and the read log.
+	caller func() (string, int)
+	// cmdName is the command being run, for the read log.
+	cmdName string
+	// auditWarned stops a failing read log from warning more than once.
+	auditWarned bool
 }
 
 func newApp(prog string, stdin io.Reader, stdout, stderr io.Writer) *app {
@@ -130,7 +138,9 @@ func newApp(prog string, stdin io.Reader, stdout, stderr io.Writer) *app {
 		errOut:  stderr,
 		term:    osTerminal{in: stdin, out: stdout},
 		touch:   realTouch(),
-		audit:   audit.Nop{},
+		goos:    runtime.GOOS,
+		dialog:  realDialog(),
+		caller:  audit.Caller,
 		now:     time.Now,
 		getenv:  os.Getenv,
 		environ: os.Environ,
