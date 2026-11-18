@@ -105,10 +105,11 @@ Record body (a **delta**, G3):
 Decided by the **state at n-1**, in one function, `members.authorise(prev State, rec Record, signer Member) error`, used by both writer and verifier:
 
 - `by` names a member of state n-1 and `sig` verifies under that member's `sign_key` **from state n-1**.
-- Policy (one place to change): any member may sign any op. If Arnold picks owner-only removal (Q3), `remove-member` additionally requires `signer.role == owner`.
+- Policy (decided, Q3): **any current member may sign any op**; the product is for high-trust teams. `authorise` is the only place this rule lives, so a stricter policy later is a one-line change; `role` stays in member entries for that.
 - **Genesis** (seq 0) has no state n-1: it must add exactly one member with role `owner`, and it must be signed by **that member** (self-consent). Its trust comes from TOFU (7).
 - There is no MAC, no `share` op and no `prev_key`. No record is ever authorised by vault-key material, so a removed member's old keys give no authority (M2, attacker 3), and there is nothing to verify "under the key just unwrapped" (M4).
 - **Lost identity, no other member:** the vault passphrase still opens the vault and reads every secret, but can't sign. `vault rebuild VAULT` creates a new vault (new id, new genesis under the person's new identity) in the same folder and moves every secret into it. Other Macs then see a different vault id and refuse (M1) until `detach` + `attach`. Lost identity with other members: another member re-adds you, as the original design says. `init` and `member list` recommend `vault identity export` to a safe place.
+- **One-member warning** (kept from today): when a vault has only one member, `member list`, `init` and `status` warn that losing that identity leaves only the passphrase (or nothing, with `--no-passphrase`), and suggest **adding a second trusted member as the recovery route**: "vault member approve" after they attach. A second member can re-add you without a rebuild.
 
 ### 4. Verifying a `vault.json`
 
