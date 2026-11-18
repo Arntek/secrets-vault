@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,7 +60,8 @@ func TestInitSetListGetFlow(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "vault.json")); err != nil {
 		t.Fatal(err)
 	}
-	// Nothing unlocked yet: writing asks for the vault to be unlocked.
+	// init leaves the vault unlocked: lock it to check the locked path too.
+	e.mustRun("lock", "main")
 	expectCode(t, e.runIn("VALUE_ONE", "set", "EXAMPLE_API_KEY"), ExitLocked)
 	e.unlock("main")
 	e.mustRunIn("VALUE_ONE\n", "set", "EXAMPLE_API_KEY", "--desc", "Example key")
@@ -510,6 +512,7 @@ func TestUnlockForStatusAndConfig(t *testing.T) {
 	skipWindows(t)
 	e := newEnv(t)
 	e.initVault("main")
+	e.mustRun("lock", "main") // init leaves it unlocked
 	expectCode(t, e.runIn(testPass+"\n", "unlock", "main", "--for", "1m", "--passphrase-stdin"), ExitUsage)
 	expectCode(t, e.runIn(testPass+"\n", "unlock", "main", "--for", "forever", "--passphrase-stdin"), ExitUsage)
 	expectCode(t, e.runIn("wrong passphrase\n", "unlock", "main", "--passphrase-stdin"), ExitError)
@@ -822,4 +825,62 @@ func TestVersionAndHelpFlags(t *testing.T) {
 	}
 	expectCode(t, e.run(), ExitUsage)
 	_ = exec.ErrNotFound
+}
+
+// init hands the new key to the agent, so set works with no second passphrase.
+func TestInitLeavesVaultUnlocked(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	e.initVault("main")
+	e.mustRunIn("VALUE_ONE\n", "set", "EXAMPLE_API_KEY", "--desc", "Example key")
+	if r := e.mustRun("get", "EXAMPLE_API_KEY"); r.out != "VALUE_ONE\n" {
+		t.Fatalf("get after init+set: %q", r.out)
+	}
+}
+
+// With no reachable agent, init still creates the vault, says it is locked
+// and exits 0.
+func TestInitWithoutAgentStillCreatesVault(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := filepath.Join(e.home, "vaults", "main")
+	var out, errb bytes.Buffer
+	code := func() int {
+		curEnv = e
+		e.t.Setenv("SECRETS_VAULT_AGENT_DIR", "relative/not/absolute")
+		return Run([]string{"sv", "init", "main", "--path", dir, "--passphrase-stdin"}, strings.NewReader(testPass+"\n"), &out, &errb)
+	}()
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "vault.json")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errb.String(), "locked") {
+		t.Fatalf("no locked note: %q", errb.String())
+	}
+}
+
+// An over-long explicit agent dir gives the real reason and a hint, not
+// "not available on this system".
+func TestUnlockShowsRealAgentError(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	e.initVault("main")
+	long := "/tmp/" + strings.Repeat("a", 120)
+	e.t.Setenv("SECRETS_VAULT_AGENT_DIR", long)
+	curEnv = e
+	var out, errb bytes.Buffer
+	code := Run([]string{"sv", "unlock", "main", "--passphrase-stdin"}, strings.NewReader(testPass+"\n"), &out, &errb)
+	if code != ExitError {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	msg := errb.String()
+	if strings.Contains(msg, "not available on this system") {
+		t.Fatalf("hides the real reason: %q", msg)
+	}
+	if !strings.Contains(msg, "socket path too long") || !strings.Contains(msg, "SECRETS_VAULT_AGENT_DIR") {
+		t.Fatalf("missing reason or hint: %q", msg)
+	}
+	notContains(t, "error", msg, testPass)
 }

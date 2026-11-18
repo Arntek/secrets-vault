@@ -96,7 +96,8 @@ type app struct {
 	cfgPath string
 	cfg     *Config
 
-	agentC agent.Client
+	agentC   agent.Client
+	agentErr error // why the last dial failed
 	// dialAgent connects to the agent; start says whether to launch it if
 	// it is not running.
 	dialAgent func(start bool) (agent.Client, error)
@@ -151,10 +152,25 @@ func (a *app) client(start bool) agent.Client {
 	}
 	c, err := a.dialAgent(start)
 	if err != nil {
+		a.agentErr = err
 		return nil
 	}
 	a.agentC = c
 	return c
+}
+
+// agentUnavailableErr explains why the agent could not be used, from the
+// last failed dial. Only a platform without an agent is "not available";
+// anything else shows the real reason (paths only, never key material).
+func (a *app) agentUnavailableErr() error {
+	err := a.agentErr
+	switch {
+	case err == nil, errors.Is(err, agent.ErrUnsupported):
+		return failf("the unlock agent is not available on this system")
+	case errors.Is(err, agent.ErrPathTooLong), errors.Is(err, agent.ErrUnsafeDir):
+		return failf("the unlock agent cannot start: %v. Set SECRETS_VAULT_AGENT_DIR to a short folder that only you can use", err)
+	}
+	return failf("the unlock agent cannot start: %v", err)
 }
 
 func (a *app) printf(format string, args ...any) { fmt.Fprintf(a.out, format, args...) }

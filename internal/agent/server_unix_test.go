@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -615,5 +617,42 @@ func TestCrashOnBadChildEnvIsNotSilent(t *testing.T) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Run(); err == nil {
 		t.Fatal("agent started in an unsafe directory")
+	}
+}
+
+func TestDefaultDirFallsBackWhenPathTooLong(t *testing.T) {
+	long := filepath.Join(t.TempDir(), strings.Repeat("h", 120))
+	tmp, err := os.MkdirTemp("/tmp", "svtmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmp) })
+	t.Setenv(envDir, "")
+	t.Setenv("HOME", long)
+	t.Setenv("XDG_RUNTIME_DIR", long)
+	t.Setenv("TMPDIR", tmp)
+	got, err := DefaultDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(tmp, "secrets-vault-"+strconv.Itoa(os.Geteuid()))
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	// The fallback is a usable, private directory.
+	if err := prepareDir(got); err != nil {
+		t.Fatalf("fallback dir rejected: %v", err)
+	}
+}
+
+func TestDefaultDirExplicitOverrideIsNotReplaced(t *testing.T) {
+	long := "/tmp/" + strings.Repeat("a", 120)
+	t.Setenv(envDir, long)
+	got, err := DefaultDir()
+	if err != nil || got != long {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if err := prepareDir(got); !errors.Is(err, ErrPathTooLong) {
+		t.Fatalf("want ErrPathTooLong, got %v", err)
 	}
 }

@@ -26,23 +26,36 @@ const (
 //	macOS: ~/Library/Caches/secrets-vault (stable across terminals and apps)
 //	Linux: $XDG_RUNTIME_DIR/secrets-vault, else /tmp/secrets-vault-<uid>
 //
+// When that path is too long for a socket address, it falls back to
+// <temp dir>/secrets-vault-<uid>.
+//
 // SECRETS_VAULT_AGENT_DIR overrides it (tests, unusual setups); the directory
 // checks apply to it too.
 func DefaultDir() (string, error) {
 	if d := os.Getenv(envDir); d != "" {
 		return d, nil
 	}
-	if runtime.GOOS == "darwin" {
+	fallback := filepath.Join(os.TempDir(), "secrets-vault-"+strconv.Itoa(os.Geteuid()))
+	var dir string
+	switch {
+	case runtime.GOOS == "darwin":
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
-		return filepath.Join(home, "Library", "Caches", "secrets-vault"), nil
+		dir = filepath.Join(home, "Library", "Caches", "secrets-vault")
+	case os.Getenv("XDG_RUNTIME_DIR") != "":
+		dir = filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "secrets-vault")
+	default:
+		dir = fallback
 	}
-	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
-		return filepath.Join(x, "secrets-vault"), nil
+	// A very long home folder would not fit in a socket address: use a short
+	// per-user folder under the temp dir instead (prepareDir still requires
+	// it to be 0700 and owned by this user).
+	if len(filepath.Join(dir, sockName)) > maxSockPath {
+		return fallback, nil
 	}
-	return filepath.Join(os.TempDir(), "secrets-vault-"+strconv.Itoa(os.Geteuid())), nil
+	return dir, nil
 }
 
 // prepareDir creates dir (0700) if missing and verifies it is a real
@@ -54,7 +67,7 @@ func prepareDir(dir string) error {
 		return fmt.Errorf("%w: path must be absolute", ErrUnsafeDir)
 	}
 	if len(filepath.Join(dir, sockName)) > maxSockPath {
-		return fmt.Errorf("agent: socket path too long (%d bytes, max %d)", len(filepath.Join(dir, sockName)), maxSockPath)
+		return fmt.Errorf("%w (%d bytes, max %d)", ErrPathTooLong, len(filepath.Join(dir, sockName)), maxSockPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return err

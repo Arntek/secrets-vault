@@ -83,7 +83,7 @@ Create a vault in a folder you choose:
 vault init personal --path ~/Vaults/personal --desc "My own accounts"
 ```
 
-You choose a passphrase (keep it in your password manager: there is no recovery), and on a Mac with Touch ID you're offered Touch ID unlock.
+You choose a passphrase (keep it in your password manager: there is no recovery), and on a Mac with Touch ID you're offered Touch ID unlock. The new vault is left unlocked, so you can add keys straight away.
 
 Add a key. The value is typed hidden or piped in, never passed as an argument, so it never lands in shell history:
 
@@ -173,7 +173,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 - **Touch ID** is the normal way in on a Mac. Run `vault touchid on VAULT` once per Mac. It creates a key inside the Mac's Secure Enclave that only works after your fingerprint, and that key can never leave the chip. It works in Terminal, iTerm, VS Code and commands run by AI agents, with no paid Apple developer account involved.
 - **The passphrase** always works too: over SSH, on Linux and Windows, or if you cancel the Touch ID prompt. It is also your recovery route, so keep it safe.
 - **How long it stays unlocked:** 4 hours by default. Change it globally (`vault config set default-ttl 6h`), per vault (`--vault work`), or once (`vault unlock --for 30m`).
-- Unlocked keys are held by a small background helper, like `ssh-agent`, in memory only. Only your own user account can talk to it. Restarting or logging out locks everything.
+- Unlocked keys are held by a small background helper, like `ssh-agent`, in memory only. Only your own user account can talk to it. Restarting or logging out locks everything. If your home folder path is very long, the helper's socket goes in a short folder under the temp directory instead; you can also choose one with `SECRETS_VAULT_AGENT_DIR`.
 
 ## Sharing a vault with someone
 
