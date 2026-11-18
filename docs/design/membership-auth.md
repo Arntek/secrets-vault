@@ -1,6 +1,6 @@
 # Design: authenticated membership (issue ue1.1)
 
-Status: **revision 4, awaiting the Security verdict** (rev 3: M1-M4 hold; this revision fixes N1 and S1-S3). No code yet.
+Status: **implemented** (revision 4, Security verdict: holds). Deviations from the text below are listed under Implementation notes at the end. No code yet.
 
 Covers `ue1.1` (planted unlockers) and the findings with the same root cause, the CLI trusting the shared folder: `ue1.2` (rollback by a removed member), `ue1.4` (recovery before verification, symlinked folders) and `ue1.6` (passphrase survives removal; `passwd` doesn't rotate).
 
@@ -304,3 +304,14 @@ Not touched: `internal/agent`, and the CLI's run/copy/alias code (ue1.3/ue1.5 ar
 - Touch ID survives `member rm` on a second identity unlocker (fake wrapper).
 - Fuzz targets: record body, log entry, pin file, request v2, identity v2, both digests, lease file.
 - Leak tests over approve/rm/trust/passwd/rebuild with canaries; the existing suites; `make lint`, `make fuzz FUZZTIME=10s`, linux/windows `CGO_ENABLED=0` builds.
+
+## Implementation notes
+
+What the code does where this document was not specific, or differs slightly:
+
+- **Lost race on read-only commands.** A read-only command never writes, so it reads from the winning state and prints a note; the next write (or `vault trust VAULT`) re-applies this machine's change. Re-applying a change that needs a passphrase (`--keep-passphrase`, `passwd`) asks for it again; without a terminal it stops and says so.
+- **One identity unlock per command.** A command unlocks the identity at most once (Touch ID or personal passphrase) and uses it both to open the vault and to sign.
+- **`--no-rotate`** on `passwd` is refused for a vault with more than one member.
+- **Registry entries from before this change** get their vault ID on first use; a legacy `key_id` pin must appear in the chain's history, or the vault is refused.
+- **`rebuild`** keeps the secrets and the index, makes a new vault ID and genesis (signed by the person rebuilding), and needs a new recovery passphrase.
+- **Index writes.** Reading no longer writes a rebuilt `index.json`; the next write stores it.
