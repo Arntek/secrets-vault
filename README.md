@@ -15,12 +15,13 @@ $ vault unlock personal
 $ vault run -k EXAMPLE_API_KEY -- python sync.py
 ```
 
-> **Status: pre-release (Phases 1 and 2 built).** Release packaging (GoReleaser and a Homebrew formula) is in place but nothing is published yet. Build from source to try it (see [Building from source](#building-from-source)). `vault backup` is designed but not built yet.
+> **Status: v0.2.0 is released** ([release notes](https://github.com/Arntek/secrets-vault/releases/tag/v0.2.0)). Install it with Homebrew or npm (see [Install](#install)); coming from v0.1.0, read [Upgrading from v0.1.0](#upgrading-from-v010) first. `vault backup` is designed but not built yet.
 
 ## Contents
 
 - [How it works](#how-it-works)
 - [Install](#install)
+- [Upgrading from v0.1.0](#upgrading-from-v010)
 - [Quick start](#quick-start)
 - [Commands](#commands)
 - [Unlocking and Touch ID](#unlocking-and-touch-id)
@@ -53,11 +54,13 @@ One file per key means two people adding different keys to a shared folder never
 
 ## Install
 
-Homebrew (macOS, Linux), once the first release is published:
+Homebrew (macOS, Linux):
 
 ```bash
 brew install arntek/tap/secrets-vault
 ```
+
+Check it with `secrets-vault version`. To update later: `brew upgrade secrets-vault`. If you previously had a shell alias or function called `vault` (for example for an older vault script), remove it from `~/.zshrc` or `~/.bashrc`, or it will hide the new command. `type vault` should show the Homebrew path.
 
 macOS builds include Touch ID unlock; Linux builds use the passphrase only. The builds are not signed or notarised (no paid Apple account), which is fine for Homebrew and npm installs. Downloading an archive from GitHub Releases in a browser shows a macOS warning, so use Homebrew or npm.
 
@@ -81,6 +84,14 @@ sv alias add vault --force   # take "vault" even though another program has it
 ```
 
 Scripts that must work on every machine should call `secrets-vault`, which never changes.
+
+## Upgrading from v0.1.0
+
+1. Update the program: `brew upgrade secrets-vault` (or `npm update -g secrets-vault`).
+2. Run `vault upgrade NAME` **once for each vault** you made with v0.1.0. It moves the vault to the current format: the signed membership log, an authenticated index and versioned secret files. Until you do, the vault still opens, but its index is not authenticated. In a shared vault any member can run it, but afterwards **every member needs v0.2.0**: older builds refuse an upgraded vault. The old index's labels are trusted once as they are, so look over `vault list` afterwards.
+3. **Don't go back to v0.1.0 afterwards.** v0.2.0 rewrites the `dialog` setting in `~/.config/vault/config.toml` as a true/false value that v0.1.0 can't read, and v0.1.0 refuses upgraded vaults by design. If you must go back, you will have to edit the config file by hand.
+
+The release notes list everything that changed: [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start
 
@@ -132,46 +143,57 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 | Command | What it does |
 |---|---|
 | `vault run -k A [-k B] -- CMD ARGS` | Run one command with only those keys set as environment variables. The safest way to use a key |
-| `vault get NAME` | Print one value. Masked on a terminal unless `--reveal`; plain when piped |
+| `vault get NAME [--reveal] [-n]` | Print one value. Masked on a terminal unless `--reveal`; plain when piped |
 | `vault copy NAME` | Copy to the clipboard (macOS only for now), cleared after 30 seconds if unchanged |
 
 **Changing keys**
 
 | Command | What it does |
 |---|---|
-| `vault set NAME [--vault V] [--desc TEXT]` | Add or update a key (hidden prompt or stdin) |
+| `vault set NAME [--desc TEXT] [--vault V]` | Add or update a key (hidden prompt or stdin) |
 | `vault describe NAME "TEXT"` | Change the description only (needs the vault unlocked: index entries are sealed with the vault key) |
 | `vault tag NAME tag1,tag2 [--rm]` | Add tags for filtering (or remove them with `--rm`); needs the vault unlocked |
 | `vault mv NAME --to VAULT` | Move a key to another vault |
 | `vault rename OLD NEW` | Rename a key |
-| `vault rm NAME` | Delete (kept in the vault's trash for 30 days) |
+| `vault rm NAME [--yes]` | Delete, after confirmation (kept in the vault's trash for 30 days) |
 
 **Locking**
 
 | Command | What it does |
 |---|---|
-| `vault unlock [VAULT] [--for 2h]` | Unlock ahead of time (default vault if none named) |
+| `vault unlock [VAULT] [--for DURATION]` | Unlock ahead of time (default vault if none named) |
 | `vault lock [VAULT \| --all]` | Forget unlocked keys now |
 | `vault status` | Each vault: locked or unlocked, time left, its state code |
 | `vault log [--vault V] [--since 24h] [--name K] [--json]` | Who read which key and when: the program and process that asked, the command, the time. Never values. Kept in `~/.config/vault/audit.log` (private, rotated at 5 MB) |
 
-**Vaults, members and settings**
+**Vaults and members**
 
 | Command | What it does |
 |---|---|
-| `vault init NAME --path DIR [--as NAME]` | Create a vault in a folder you choose (and your identity, the first time) |
-| `vault attach NAME DIR [--as NAME] [--no-request]` | Register an existing vault; if you aren't a member, files a join request (`--no-request` to skip) |
+| `vault init NAME --path DIR [--desc TEXT] [--as NAME]` | Create a vault in a folder you choose (and your identity, the first time) |
+| `vault attach NAME DIR` | Register an existing vault; if you aren't a member, files a join request (`--as NAME` names you the first time, `--no-request` skips the request) |
 | `vault detach NAME` | Remove from this machine's registry (files untouched) |
 | `vault vaults` | List registered vaults and their folders |
-| `vault passwd VAULT` | Set a new vault passphrase; also replaces the vault key, so the old passphrase opens nothing new (`--no-rotate` for a one-member vault) |
+| `vault passwd VAULT [--no-rotate]` | Set a new vault passphrase; also replaces the vault key, so the old passphrase opens nothing new (`--no-rotate` for a one-member vault) |
 | `vault touchid on\|off\|status` | Turn Touch ID on or off for your identity on this Mac (it opens every vault you're a member of) |
 | `vault member approve\|rm\|list\|requests\|log VAULT [NAME]` | Manage who can open a shared vault; `log` shows the signed history |
-| `vault trust VAULT [--expect CODE]` | Check a vault against a state code another member gave you, or finish a change that raced someone else's |
-| `vault doctor VAULT [--quarantine-staging]` | Check for sync conflicts and leftover key-rotation folders; move a foreign one aside (nothing is deleted) |
-| `vault rebuild VAULT` | Recreate a vault under your identity (if the only member's identity is lost); others join again |
+| `vault trust VAULT [--expect CODE] [--accept-rollback]` | Check a vault against a state code another member gave you, or finish a change that raced someone else's. `--accept-rollback` accepts an older state on purpose (after you have checked it with another member) |
+| `vault doctor VAULT [--quarantine-staging] [--adopt NAME]` | Check for sync conflicts, leftover key-rotation folders and index problems; move a foreign folder aside (`--quarantine-staging`; nothing is deleted); adopt a secret file that has no signed index entry (`--adopt NAME`) |
+| `vault upgrade VAULT [--yes]` | Move a vault made by an earlier version to the current format (signed membership log, authenticated index, versioned files). See [Upgrading from v0.1.0](#upgrading-from-v010) |
+| `vault rebuild VAULT [--yes]` | Recreate a vault under your identity (if the only member's identity is lost); others join again |
 | `vault identity export\|import FILE` | Move your personal identity to another machine |
+
+**Settings**
+
+| Command | What it does |
+|---|---|
 | `vault config set KEY VALUE [--vault V]`, `vault config list` | Settings: `default-ttl` (5m to 24h), `default-vault`, `touch-every-read`, `dialog` (`true`/`false`: the password dialog for agents, on by default on macOS) |
 | `vault alias add\|rm\|list NAME [--force]` | Manage the short command names. `--force` only skips the "same name elsewhere on PATH" check; it never replaces an existing file |
+
+**AI agents**
+
+| Command | What it does |
+|---|---|
 | `vault prime [--json]` | Print the rules for AI agents plus which vaults exist, locked or unlocked, and time left. Never prints a value; works with every vault locked |
 | `vault setup claude [--claude-md] [--remove] [--dry-run] [--force]` | Add a Claude Code skill (`~/.claude/skills/vault/SKILL.md`) that tells Claude to run `vault prime`; `--claude-md` also adds a marked block to `~/.claude/CLAUDE.md` |
 | `vault setup agents [--path DIR] [--remove] [--dry-run] [--force]` | Add the same marked block to a repo's `AGENTS.md` |
@@ -188,6 +210,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 - **The vault passphrase** is the recovery route if your identity is lost. Keep it safe. It is dropped when a member is removed (set a new one with `vault passwd`).
 - **How long it stays unlocked:** 4 hours by default. Change it globally (`vault config set default-ttl 6h`), per vault (`--vault work`), or once (`vault unlock --for 30m`).
 - Unlocked keys are held by a small background helper, like `ssh-agent`, in memory only. Only your own user account can talk to it. Restarting or logging out locks everything. If your home folder path is very long, the helper's socket goes in a short folder under the temp directory instead; you can also choose one with `SECRETS_VAULT_AGENT_DIR`.
+- **"operation not permitted" on a vault in Dropbox, Box or iCloud:** macOS privacy protection is blocking the app that ran the command (Terminal, iTerm, VS Code, Claude, and so on) from that cloud folder. Give that app access in **System Settings → Privacy & Security → Full Disk Access** (or Files and Folders), then restart it. Each app needs its own permission, so a vault can work in Terminal but not in another app.
 
 ## Sharing a vault with someone
 

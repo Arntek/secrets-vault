@@ -209,6 +209,9 @@ func plural(n int, word string) string {
 	if n == 1 {
 		return "1 " + word
 	}
+	if strings.HasSuffix(word, "y") && !strings.HasSuffix(word, "ey") {
+		return itoa(n) + " " + word[:len(word)-1] + "ies"
+	}
 	return itoa(n) + " " + word + "s"
 }
 

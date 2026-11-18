@@ -8,7 +8,7 @@ from secrets_vault import get_secret, VaultLockedError, SecretNotFoundError
 api_key = get_secret("EXAMPLE_API_KEY", vault="work")   # vault is optional
 ```
 
-It runs `secrets-vault get NAME -n` as a subprocess: never through a shell, stdout captured, stdin closed so it cannot prompt or hang. The value only lives in your variable; it is never logged and never in an exception message.
+It runs `secrets-vault get NAME -n` as a subprocess: never through a shell, stdout captured, stdin closed so it cannot prompt on the terminal or hang. On a Mac with the `dialog` setting on (the default) and a locked vault, the program shows its native password dialog to the human instead; set `vault config set dialog false`, or unlock first (`vault unlock`), to avoid it. The value only lives in your variable; it is never logged and never in an exception message.
 
 | Exit code | Exception |
 |---|---|

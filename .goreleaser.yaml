@@ -26,7 +26,7 @@ builds:
     env:
       - CGO_ENABLED=1
       - MACOSX_DEPLOYMENT_TARGET=13.0
-      - CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries -L{{ .Env.PWD }}/build/touchid-arm64 -lsvtouchid -L{{ .Env.SWIFT_SDK }}/usr/lib/swift -L{{ .Env.SWIFT_TCLIB }}
+      - CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries -L{{ .Env.SV_ROOT }}/build/touchid-arm64 -lsvtouchid -L{{ .Env.SWIFT_SDK }}/usr/lib/swift -L{{ .Env.SWIFT_TCLIB }}
   - id: macos-amd64
     main: ./cmd/secrets-vault
     binary: secrets-vault
@@ -39,7 +39,7 @@ builds:
     env:
       - CGO_ENABLED=1
       - MACOSX_DEPLOYMENT_TARGET=13.0
-      - CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries -L{{ .Env.PWD }}/build/touchid-amd64 -lsvtouchid -L{{ .Env.SWIFT_SDK }}/usr/lib/swift -L{{ .Env.SWIFT_TCLIB }}
+      - CGO_LDFLAGS=-Wl,-no_warn_duplicate_libraries -L{{ .Env.SV_ROOT }}/build/touchid-amd64 -lsvtouchid -L{{ .Env.SWIFT_SDK }}/usr/lib/swift -L{{ .Env.SWIFT_TCLIB }}
   # Linux: pure Go, no Touch ID.
   - id: linux
     main: ./cmd/secrets-vault

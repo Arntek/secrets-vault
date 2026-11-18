@@ -106,7 +106,7 @@ var commands = []command{
 		summary: "Delete, after confirmation. Kept in the trash for 30 days.",
 		flags:   []flagSpec{fVault, fYes}, run: cmdRm},
 
-	{name: "ui", group: "Finding keys (no unlock needed)", usage: "ui",
+	{name: "ui", group: "Terminal interface", usage: "ui",
 		summary: "Full-screen terminal interface: browse, search, add, edit and move keys. Values stay masked.",
 		run:     cmdUI},
 
@@ -115,11 +115,12 @@ var commands = []command{
 		flags:   []flagSpec{{name: "for", value: true}}, run: cmdUnlock},
 	{name: "lock", group: "Locking", usage: "lock [VAULT | --all]",
 		summary: "Forget the key now.", flags: []flagSpec{{name: "all"}}, run: cmdLock},
-	{name: "log", group: "Locking", usage: "log [--vault V] [--since 24h] [--name K] [--json]",
-		summary: "Who read which key and when: program, command, time. Never values.",
-		flags:   []flagSpec{fVault, {name: "since", value: true}, {name: "name", value: true}}, run: cmdLog},
 	{name: "status", group: "Locking", usage: "status",
 		summary: "Each vault, locked or unlocked, time left, state code, pending join requests.", run: cmdStatus},
+
+	{name: "log", group: "Read log", usage: "log [--vault V] [--since 24h] [--name K] [--json]",
+		summary: "Who read which key and when: program, command, time. Never values.",
+		flags:   []flagSpec{fVault, {name: "since", value: true}, {name: "name", value: true}}, run: cmdLog},
 
 	{name: "init", group: "Managing vaults", usage: "init NAME --path DIR [--desc TEXT] [--as NAME]",
 		summary: "Create a new vault in a folder you choose (and your identity, the first time).",
