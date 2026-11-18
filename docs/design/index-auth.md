@@ -1,6 +1,6 @@
 # Design: authenticated index and secret-file rollback (issues ue1.7, ue1.12)
 
-Status: **revision 2, for Security re-review (review of b845619: IM1, IM2, IS1-IS8). No code yet.**
+Status: **implemented** (revision 2, Security verdict: holds, with three implementation notes). Deviations from the text above are under Implementation notes at the end.
 
 Covers `ue1.7` (authenticate `index.json`, detect rollback of a single `secrets/NAME.age`) and the polish items in `ue1.12`. Builds on [membership-auth.md](membership-auth.md); read its sections 4-8 and 10 first.
 
@@ -236,3 +236,18 @@ A new package **`internal/index`** (imports `format`, `crypto`; listed in `arch_
 3. **Unlisted files are not keys** (not adopted automatically): too strict, or right?
 4. **The snapshot is trusted local state** like the trust pin: anything else it should record (for example the head of the chain it was verified against)?
 5. **Chain `format`** (answered: right, not heavy): is a signed `upgrade-format` record the right way to stop downgrade on first-use Macs, or too heavy?
+
+## Implementation notes
+
+What the code does where this document was not specific, or differs slightly:
+
+- **The snapshot is "anchored", not equal to the pin** (Security note 1): its `pin_head` must be the record at `pin_seq` on the verified chain and its `key_id` one of the vault's keys. The pin itself moves on every membership change, so an equality test would drop the snapshot after any change and lose rollback protection; an ancestor check is the stale-snapshot test. A snapshot for a vault whose chain says format 2 is a downgrade (exit 5).
+- **Tombstones at rotation** (note 2): dropped only when no file under any key, live or trashed, exists for the name. A pre-rotation trashed copy brought back afterwards fails by key id (`ErrOtherKey`).
+- **First pin of a format-2 vault** (note 3): `headLine` ends with ", format 2 (not upgraded)".
+- **Damaged index and name resolution:** a vault whose folder index is missing, version 1, unparseable or for another vault is "damaged" while locked too; a name found nowhere then exits 5 (not 4), unless `set` is creating a new key (the repair).
+- **Lists show the snapshot's labels** for an entry whose folder copy differs in any field, including a relabel that kept its old MAC.
+- **`describe` and `tag` need an unlock** (they used to work locked); `rm` unlocks to write the tombstone.
+- **Conflict-copy merge and snapshot reconstruction** take only entries that verify under the current key (IM2); `doctor` calls an index conflict copy "safe to delete" when every verified entry in it is already in the index at the same or a higher rev.
+- **Retries:** the index compare-and-swap retries up to ten times; within one process the check and write are one step (a mutex), across machines it is best effort like `vault.json`'s.
+- **`vault upgrade`** refuses without `--yes` when there is no terminal. Reads of a format-2 vault print a one-line notice; every write exits 1 with `Run: vault upgrade NAME` and the brew/npm hint.
+- Not built, as the design allowed: nothing here changes the agent protocol; the agent still holds only the vault key.

@@ -12,6 +12,7 @@ secrets-vault is one Go binary (`cmd/secrets-vault`) installed as `secrets-vault
 | `internal/agent` | Memory-only unlock agent (like ssh-agent) and its `Client`: holds unlocked keys per vault with a TTL (default 4h, 5m to 24h) behind a user-only socket. | 244 |
 | `internal/members` | Personal identities (age X25519 + Ed25519 signing key), fingerprints (`MAPLE-RIVER-OTTER-4417`, over both keys), signed join requests, the signed membership log and its verifier, trust pins, approve, remove/passwd with key rotation, lost-race rebase, write guard. | p2h, ue1.1 |
 | `internal/audit` | Local read log (`vault log`). Events hold names only; the type has no field for a value. | Phase 2 (interface fixed now) |
+| `internal/index` | The authenticated index: per-entry MAC verification, cross-checks against the secret files' versions, the local snapshot, the locked view and the compare-and-swap write loop (docs/design/index-auth.md). | ue1.7 |
 | `internal/cli` | Commands, flags, prompts, `--json`, masking, exit codes, registry (`~/.config/vault/config.toml`), aliases. Orchestrates; holds no business rules. | rn5 |
 | `internal/leaktest` | Test-only harness: runs code with canary secrets and fails if one appears in stdout, stderr, logs, temp files or HOME. | ii6 |
 | `internal/arch` | Test-only: enforces the dependency rules below. | ii6 |
@@ -23,7 +24,7 @@ Arrows point from importer to imported. Nothing may import "upwards".
 ```
 layer 0  cmd/secrets-vault
 layer 1  internal/cli
-layer 2  internal/members   internal/agent   internal/touchid
+layer 2  internal/members   internal/agent   internal/touchid   internal/index
 layer 3  internal/crypto    internal/audit
 layer 4  internal/format
 ```
@@ -39,6 +40,7 @@ Allowed internal imports (non-test code), enforced by `internal/arch/arch_test.g
 | `agent` | `crypto`, `format` |
 | `touchid` | `crypto`, `format` |
 | `members` | `crypto`, `format`, `audit` |
+| `index` | `crypto`, `format` |
 | `cli` | any internal package except `leaktest` and `arch` |
 | `cmd/secrets-vault` | `cli` |
 
