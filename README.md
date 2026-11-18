@@ -15,7 +15,7 @@ $ vault unlock personal
 $ vault run -k EXAMPLE_API_KEY -- python sync.py
 ```
 
-> **Status: pre-release (Phase 1 in progress).** Not yet published to Homebrew or npm. Build from source to try it (see [Building from source](#building-from-source)). Commands marked *(coming)* are designed but not built yet.
+> **Status: pre-release (Phase 1 in progress).** Release packaging (GoReleaser and a Homebrew formula) is in place but nothing is published yet. Build from source to try it (see [Building from source](#building-from-source)). Commands marked *(coming)* are designed but not built yet.
 
 ## Contents
 
@@ -53,11 +53,13 @@ One file per key means two people adding different keys to a shared folder never
 
 ## Install
 
-Homebrew (macOS, Linux), *(coming)*:
+Homebrew (macOS, Linux), once the first release is published:
 
 ```bash
 brew install arntek/tap/secrets-vault
 ```
+
+macOS builds include Touch ID unlock; Linux builds use the passphrase only. The builds are not signed or notarised (no paid Apple account), which is fine for Homebrew and npm installs. Downloading an archive from GitHub Releases in a browser shows a macOS warning, so use Homebrew or npm.
 
 npm (macOS, Linux, Windows), *(coming in Phase 2)*:
 
@@ -65,12 +67,13 @@ npm (macOS, Linux, Windows), *(coming in Phase 2)*:
 npm install -g secrets-vault
 ```
 
-The program installs as `secrets-vault`, with two short names: `vault` and `sv`. If another `vault` command is already on your PATH (for example HashiCorp Vault), the installer skips that name and you use `sv` instead. Manage the short names any time:
+The program installs as `secrets-vault`, with two short names: `sv` (always) and `vault`. Homebrew adds `vault` only when no other `vault` program is installed (for example HashiCorp Vault), so on such a machine you get `sv` only. Manage the short names any time:
 
 ```bash
 sv alias list
 sv alias add kv          # add another short name
 sv alias rm vault        # give "vault" back to the other program
+sv alias add vault --force   # take "vault" even though another program has it
 ```
 
 Scripts that must work on every machine should call `secrets-vault`, which never changes.
@@ -241,11 +244,12 @@ make build   # binary at bin/secrets-vault
 make test    # tests with -race
 make lint    # gofmt, vet, staticcheck, gosec, govulncheck, gitleaks, actionlint
 make fuzz    # run every fuzz target briefly
+make snapshot  # local dry run of the release build (needs goreleaser)
 ```
 
 If Swift fails to build on macOS with `redefinition of module 'SwiftBridging'`, that's a known Command Line Tools packaging bug. The Makefile works around it automatically with a compiler overlay, without changing system files.
 
-Developer docs: [docs/architecture.md](docs/architecture.md) (packages and how they fit), [docs/vault-format.md](docs/vault-format.md) (on-disk format and crypto API).
+Releasing: [docs/releasing.md](docs/releasing.md). Developer docs: [docs/architecture.md](docs/architecture.md) (packages and how they fit), [docs/vault-format.md](docs/vault-format.md) (on-disk format and crypto API).
 
 ## License
 
