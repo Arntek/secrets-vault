@@ -9,7 +9,7 @@
 - bd version is pinned (see `.claude/hooks/beads-session-start.sh`). Don't install a different version.
 
 ## Sessions
-- Each agent (UI/UX, Developer, QA, Security, Ask Arnold) is its own Claude Code session started by the coordinator with `start_session`, not a background subagent, so Arnold can open, watch and talk to it. See `agent-team.md`.
+- Each agent (UI/UX, Developer, QA, Security, Ask the Human) is its own Claude Code session started by the coordinator with `start_session`, not a background subagent, so Arnold can open, watch and talk to it. See `agent-team.md`.
 - Background subagents are only for quick read-only lookups.
 
 ## Worktrees and dev servers
@@ -23,7 +23,7 @@
 ## Messaging
 - Sessions report back to the coordinator when they finish a turn: what they did, what they verified, what they couldn't verify.
 - A session can message the coordinator or another session with `SendMessage` to that session's id. Use it for blocking questions and hand-offs; beads holds the issue state.
-- Questions only Arnold can answer go to the coordinator, which sends them to the **Ask Arnold** session (his single inbox) as numbered questions, not to its own chat. Ask Arnold sends his answers back to the coordinator. The coordinator reviews results, merges or commits, and reports to Arnold.
+- Questions only Arnold can answer go to the coordinator, which sends them to the **Ask the Human** session (his single inbox) as numbered questions, not to its own chat. Ask the Human sends his answers back to the coordinator. The coordinator reviews results, merges or commits, and reports to Arnold.
 
 ## Local services
 - Every external service has a local provider (see `architecture-layers.md`), so agents never need production accounts. Email goes to Mailpit or the console, not to real people.

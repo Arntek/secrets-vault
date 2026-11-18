@@ -96,7 +96,7 @@ Read `docs/standards/` before writing code: default stack (`stack.md`), design p
 
 Rule: run the agent team as separate Claude Code sessions (`start_session`), never as background subagents. Follow `docs/standards/agent-team.md`.
 
-The main Claude session is the **coordinator**: it talks to Arnold, plans work as beads issues, and starts the UI/UX, Developer, QA and Security (white-hat) specialists as **separate sessions** that Arnold can open and talk to, plus a long-lived **Ask Arnold** session that is his single inbox. Each session follows its role brief in `.claude/agents/<role>.md` and gets its issue, worktree, `*.localhost` hostname and port, and what "done" means. Sessions report back to the coordinator and can message each other. QA closes issues, not the developer. Questions for Arnold go to Ask Arnold as numbered items (Q1, Q2…), not the coordinator's chat, unless he is already asking there.
+The main Claude session is the **coordinator**: it talks to Arnold, plans work as beads issues, and starts the UI/UX, Developer, QA and Security (white-hat) specialists as **separate sessions** that Arnold can open and talk to, plus a long-lived **Ask the Human** session that is his single inbox. Each session follows its role brief in `.claude/agents/<role>.md` and gets its issue, worktree, `*.localhost` hostname and port, and what "done" means. Sessions report back to the coordinator and can message each other. QA closes issues, not the developer. Questions for Arnold go to Ask the Human as numbered items (Q1, Q2…), not the coordinator's chat, unless he is already asking there.
 
 ## This project: secrets-vault (Go CLI)
 
