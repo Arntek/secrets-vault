@@ -257,7 +257,7 @@ func (a *app) fail(err error, c *command) int {
 	var ee *exitErr
 	if errors.As(err, &ee) {
 		if ee.msg != "" {
-			fmt.Fprintf(a.errOut, "%s: %s\n", a.prog, ee.msg)
+			fmt.Fprint(a.errOut, safeLines(fmt.Sprintf("%s: %s\n", a.prog, ee.msg)))
 			if ee.code == ExitUsage && c != nil && !strings.HasPrefix(ee.msg, "usage:") {
 				fmt.Fprintf(a.errOut, "Run '%s %s --help' for usage.\n", a.prog, c.name)
 			}
@@ -268,7 +268,7 @@ func (a *app) fail(err error, c *command) int {
 		fmt.Fprintf(a.errOut, "%s: the vault is locked\n", a.prog)
 		return ExitLocked
 	}
-	fmt.Fprintf(a.errOut, "%s: %v\n", a.prog, err)
+	fmt.Fprint(a.errOut, safeLines(fmt.Sprintf("%s: %v\n", a.prog, err)))
 	return ExitError
 }
 

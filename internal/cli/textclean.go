@@ -81,3 +81,23 @@ func plainName(s string) bool {
 	}
 	return true
 }
+
+// safeLines is the safety net for every message and table the program
+// prints (not values: get, run and copy write those straight through). It
+// removes what could reach a terminal as a command or hide text: control
+// characters other than line breaks and tabs (ESC, CR, C1), zero-width,
+// bidirectional and other format characters. Names and descriptions from a
+// shared folder are also cleaned where they are read (displayName,
+// cleanText), because a line break inside one cannot be told from a real
+// one here.
+func safeLines(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case unicode.IsControl(r), unicode.Is(unicode.Cf, r), unicode.Is(unicode.Zl, r), unicode.Is(unicode.Zp, r), r == 0xfffd:
+			return -1
+		}
+		return r
+	}, s)
+}

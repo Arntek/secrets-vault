@@ -41,7 +41,7 @@ func (t *table) row(cols ...string) {
 		if i > 0 {
 			fmt.Fprint(t.w, "\t")
 		}
-		fmt.Fprint(t.w, c)
+		fmt.Fprint(t.w, cleanText(c))
 	}
 	fmt.Fprintln(t.w)
 }

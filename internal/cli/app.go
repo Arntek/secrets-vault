@@ -200,11 +200,15 @@ func (a *app) agentUnavailableErr() error {
 	return failf("the unlock agent cannot start: %v", err)
 }
 
-func (a *app) printf(format string, args ...any) { fmt.Fprintf(a.out, format, args...) }
-func (a *app) warnf(format string, args ...any) {
-	fmt.Fprintf(a.errOut, a.prog+": "+format+"\n", args...)
+func (a *app) printf(format string, args ...any) {
+	fmt.Fprint(a.out, safeLines(fmt.Sprintf(format, args...)))
 }
-func (a *app) infof(format string, args ...any) { fmt.Fprintf(a.errOut, format+"\n", args...) }
+func (a *app) warnf(format string, args ...any) {
+	fmt.Fprint(a.errOut, safeLines(fmt.Sprintf(a.prog+": "+format+"\n", args...)))
+}
+func (a *app) infof(format string, args ...any) {
+	fmt.Fprint(a.errOut, safeLines(fmt.Sprintf(format+"\n", args...)))
+}
 
 // --- errors and exit codes ---
 
