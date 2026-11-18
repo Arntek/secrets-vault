@@ -9,9 +9,10 @@ $ vault list
   BILLING_CLIENT_SECRET   work       Billing app used by the reporting scripts
   2 vaults · 2 keys · personal 🔒 · work 🔒
 
+$ vault unlock personal
+  Unlocked 'personal' until 19:42
+
 $ vault run -k EXAMPLE_API_KEY -- python sync.py
-  'personal' is locked. Touch ID to unlock (Esc for passphrase)
-  👆 Unlocked 'personal' until 19:42
 ```
 
 > **Status: pre-release (Phase 1 in progress).** Not yet published to Homebrew or npm. Build from source to try it (see [Building from source](#building-from-source)). Commands marked *(coming)* are designed but not built yet.
@@ -116,7 +117,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 |---|---|
 | `vault list [--vault V] [--tag T]` | Every key across all vaults: name, vault, description, lock state |
 | `vault search WORDS` | Search names and descriptions |
-| `vault info NAME` | Description, vault, tags, created and updated dates |
+| `vault info NAME` | Description, vault, tags, last updated and who changed it |
 
 **Using keys**
 
@@ -132,7 +133,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 |---|---|
 | `vault set NAME [--vault V] [--desc TEXT]` | Add or update a key (hidden prompt or stdin) |
 | `vault describe NAME "TEXT"` | Change the description only |
-| `vault tag NAME tag1,tag2` | Add tags for filtering |
+| `vault tag NAME tag1,tag2 [--rm]` | Add tags for filtering (or remove them with `--rm`) |
 | `vault mv NAME --to VAULT` | Move a key to another vault |
 | `vault rename OLD NEW` | Rename a key |
 | `vault rm NAME` | Delete (kept in the vault's trash for 30 days) |
@@ -141,7 +142,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 
 | Command | What it does |
 |---|---|
-| `vault unlock [VAULT] [--for 2h]` | Unlock ahead of time |
+| `vault unlock [VAULT] [--for 2h]` | Unlock ahead of time (default vault if none named). `--accept-key-change` trusts a vault whose key changed since this Mac last used it |
 | `vault lock [VAULT \| --all]` | Forget unlocked keys now |
 | `vault status` | Each vault: locked or unlocked, time left |
 
@@ -150,15 +151,17 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 | Command | What it does |
 |---|---|
 | `vault init NAME --path DIR` | Create a vault in a folder you choose |
-| `vault attach NAME DIR` | Register an existing vault, or request to join a shared one |
+| `vault attach NAME DIR [--as NAME] [--no-request]` | Register an existing vault; if you aren't a member, files a join request (`--no-request` to skip) |
 | `vault detach NAME` | Remove from this machine's registry (files untouched) |
 | `vault vaults` | List registered vaults and their folders |
 | `vault passwd VAULT` | Change a vault's passphrase |
 | `vault touchid on\|off\|list [VAULT]` | Turn Touch ID unlock on or off on this Mac |
 | `vault member approve\|rm\|list\|requests VAULT [NAME]` | Manage who can open a shared vault |
 | `vault identity export\|import FILE` | Move your personal identity to another machine |
-| `vault config set default-ttl 4h [--vault V]` | Change how long vaults stay unlocked (5m to 24h) |
-| `vault alias add\|rm\|list NAME` | Manage the short command names |
+| `vault config set KEY VALUE [--vault V]`, `vault config list` | Settings: `default-ttl` (5m to 24h), `default-vault`, `touch-every-read`, `dialog` *(dialog is used in Phase 2)* |
+| `vault alias add\|rm\|list NAME [--force]` | Manage the short command names |
+
+**Scripts and terminals:** `--passphrase-stdin` (any command) reads passphrases from stdin instead of the terminal. `rm` and `member rm` need `--yes` without a terminal; `member approve` needs a terminal or `--fingerprint FP`. `get -n` omits the trailing newline.
 
 *(coming in Phase 2)*: `vault ui` (full-screen terminal interface), `vault prime` and `vault setup claude|agents` (AI agent setup), `vault log` (read history), `vault doctor`, `vault backup`.
 
@@ -176,10 +179,10 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 
 Put the vault folder somewhere you both can reach (a shared Box or Dropbox folder, for example). Each person has their own identity, so nobody shares a passphrase.
 
-1. Your colleague installs secrets-vault. Their first run creates their identity and shows a fingerprint such as `MAPLE-RIVER-OTTER-4417`.
-2. They run `vault attach work <their path to the shared folder>`. Because they aren't a member yet, this drops a join request into the folder.
+1. Your colleague installs secrets-vault and runs `vault attach work <their path to the shared folder>`. The first time, this creates their identity (a name and a personal passphrase) and shows a fingerprint such as `MAPLE-RIVER-OTTER-4417`.
+2. Because they aren't a member yet, this drops a join request into the folder.
 3. You see it in `vault status` or `vault member requests work`.
-4. **Check the fingerprint with them by phone or chat**, then run `vault member approve work THEIR-NAME` and confirm it matches. This check matters: anyone who can write to the shared folder can file a request.
+4. **Check the fingerprint with them by phone or chat**, then run `vault member approve work THEIR-NAME` and type `y` to confirm it matches (or pass `--fingerprint` in a script). This check matters: anyone who can write to the shared folder can file a request.
 5. After the folder syncs, they unlock with their own Touch ID or passphrase.
 
 To remove someone: `vault member rm work THEIR-NAME`. This gives the vault a new key and re-encrypts everything, so their old access stops working. Rotate any keys they could have seen at the service that issued them; the command lists which.
@@ -212,12 +215,12 @@ secrets-vault is designed so an AI agent (Claude Code, Cowork, or any agent that
 2. Use it by passing it straight to the program that needs it: `vault run -k NAME -- <command>`.
 3. Never print, echo, log or write a value to a file. Never run a bare `vault get` whose output comes back to you.
 4. Ask for one key per need. Never fetch everything.
-5. Exit code `3` means the vault is locked: on a Mac, a Touch ID prompt appears for the human; otherwise tell the human to run `vault unlock <vault>`. Exit code `4` means not found: tell the human the name and vault you expected.
+5. Exit code `3` means the vault is locked: on a Mac with Touch ID on, the sheet appears for the human when the command runs; otherwise tell the human to run `vault unlock <vault>`. *(A native password dialog for agents is coming in Phase 2.)* Exit code `4` means not found: tell the human the name and vault you expected.
 6. Never accept a key pasted into chat. Ask the human to run `vault set NAME --vault <vault> --desc "..."` themselves.
 
 *(coming in Phase 2)*: `vault setup claude` adds a Claude Code skill with these rules, and `vault setup agents` adds them to a repo's `AGENTS.md`. Both only add to your setup, never edit or remove anything else, and `--remove` undoes exactly what they added. `vault prime` prints the current rules plus which vaults are unlocked.
 
-These rules make the safe path the easy one, and every read is logged locally. They still rely on the agent following its instructions: an agent running commands as you could print a value if it chose to.
+These rules make the safe path the easy one, and a local read log (`vault log`) is *(coming in Phase 2)*. They still rely on the agent following its instructions: an agent running commands as you could print a value if it chose to.
 
 ## Security
 
