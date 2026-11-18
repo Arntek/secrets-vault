@@ -122,6 +122,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 
 | Command | What it does |
 |---|---|
+| `vault ui` | Full-screen terminal interface: browse, search, add, edit, tag, move, rename and delete keys, unlock and lock. Values stay masked (space reveals one for 10 seconds). Keyboard only; no browser, no server. See [Terminal UI](docs/cli.md#terminal-ui-vault-ui) |
 | `vault list [--vault V] [--tag T]` | Every key across all vaults: name, vault, description, lock state |
 | `vault search WORDS` | Search names and descriptions |
 | `vault info NAME` | Description, vault, tags, last updated and who changed it |
@@ -177,7 +178,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 
 **Scripts and terminals:** `--passphrase-stdin` (any command) reads passphrases from stdin instead of the terminal. `rm` needs `--yes` without a terminal; `member rm` also needs `--folder-access-removed`. `member approve` needs a terminal or `--fingerprint FP`; a first use after being added needs a terminal or `--signer-fingerprint FP`. `get -n` omits the trailing newline.
 
-*(coming in Phase 2)*: `vault ui` (full-screen terminal interface), `vault backup`.
+*(coming in Phase 2)*: `vault backup`.
 
 **Exit codes:** `0` ok, `1` error, `2` usage, `3` vault locked and no way to ask for unlock, `4` key not found, `5` the vault failed verification (changed outside secrets-vault, replaced, rolled back, or behind a state code you were given). Scripts and AI agents must treat `5` as "stop and tell the user", never as "key missing". `list --json` includes such a vault as `{"vault": ..., "error": ...}`.
 

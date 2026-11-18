@@ -34,20 +34,34 @@ func cmdUnlock(a *app, p *parsed) error {
 		}
 		ttl = d
 	}
-	if _, err := a.open(v); err != nil {
+	until, err := a.unlockVault(v, ttl)
+	if err != nil {
 		return err
+	}
+	if a.asJSON {
+		return a.printJSON(map[string]any{"vault": v.name, "unlocked": true, "until": until.UTC().Format(time.RFC3339)})
+	}
+	a.printf("Unlocked '%s' until %s\n", v.name, until.Local().Format("15:04"))
+	return nil
+}
+
+// unlockVault unlocks v in the agent (asking for Touch ID or a passphrase as
+// needed) and returns when it locks again. Shared by `unlock` and the UI.
+func (a *app) unlockVault(v *vaultRef, ttl time.Duration) (time.Time, error) {
+	if _, err := a.open(v); err != nil {
+		return time.Time{}, err
 	}
 	// An explicit unlock always asks, so --for can reset the window; an
 	// already-unlocked vault with no --for is left alone.
 	key, err := a.openKey(v, nil, openOpts{forceAuth: false, ttl: ttl, requireAgent: true})
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	defer key.Destroy()
 	// Unlocking is when a vault's index gets verified, and what a locked
 	// `list` shows afterwards is exactly what was verified here.
 	if _, err := a.openIndex(v, key); err != nil {
-		return err
+		return time.Time{}, err
 	}
 	vf := v.chain.File
 	if ttl != 0 {
@@ -72,11 +86,7 @@ func cmdUnlock(a *app, p *parsed) error {
 		}
 	}
 	a.record(v.name, "", audit.ActionUnlock)
-	if a.asJSON {
-		return a.printJSON(map[string]any{"vault": v.name, "unlocked": true, "until": until.UTC().Format(time.RFC3339)})
-	}
-	a.printf("Unlocked '%s' until %s\n", v.name, until.Local().Format("15:04"))
-	return nil
+	return until, nil
 }
 
 // cmdLock: lock [VAULT | --all]
@@ -87,43 +97,59 @@ func cmdLock(a *app, p *parsed) error {
 	if len(p.args) == 1 && p.has("all") {
 		return usageErrf("give a vault name or --all, not both")
 	}
-	cl := a.client(false)
 	if len(p.args) == 0 {
-		if cl != nil {
-			if err := cl.LockAll(); err != nil {
-				return failf("could not lock: %v", err)
-			}
+		if err := a.lockAll(); err != nil {
+			return err
 		}
-		a.record("", "", audit.ActionLock)
 		if a.asJSON {
 			return a.printJSON(map[string]any{"locked": "all"})
 		}
-		if cl == nil && runtime.GOOS == "windows" {
+		if a.client(false) == nil && runtime.GOOS == "windows" {
 			a.printf("Nothing to lock: on Windows no vault stays unlocked between commands.\n")
 			return nil
 		}
 		a.printf("Locked every vault.\n")
 		return nil
 	}
-	v, err := a.vault(p.args[0])
+	name, err := a.lockVault(p.args[0])
 	if err != nil {
 		return err
 	}
-	vf, err := format.ReadVaultFile(v.dir)
-	if err != nil {
-		return failf("cannot open vault '%s': %v", v.name, vaultErr(err))
+	if a.asJSON {
+		return a.printJSON(map[string]any{"locked": name})
 	}
-	if cl != nil {
-		if err := cl.Lock(vf.ID); err != nil {
+	a.printf("Locked '%s'.\n", name)
+	return nil
+}
+
+// lockAll makes the agent forget every key. Shared by `lock` and the UI.
+func (a *app) lockAll() error {
+	if cl := a.client(false); cl != nil {
+		if err := cl.LockAll(); err != nil {
 			return failf("could not lock: %v", err)
 		}
 	}
-	a.record(v.name, "", audit.ActionLock)
-	if a.asJSON {
-		return a.printJSON(map[string]any{"locked": v.name})
-	}
-	a.printf("Locked '%s'.\n", v.name)
+	a.record("", "", audit.ActionLock)
 	return nil
+}
+
+// lockVault makes the agent forget one vault's key.
+func (a *app) lockVault(name string) (string, error) {
+	v, err := a.vault(name)
+	if err != nil {
+		return "", err
+	}
+	vf, err := format.ReadVaultFile(v.dir)
+	if err != nil {
+		return "", failf("cannot open vault '%s': %v", v.name, vaultErr(err))
+	}
+	if cl := a.client(false); cl != nil {
+		if err := cl.Lock(vf.ID); err != nil {
+			return "", failf("could not lock: %v", err)
+		}
+	}
+	a.record(v.name, "", audit.ActionLock)
+	return v.name, nil
 }
 
 // cmdStatus: status

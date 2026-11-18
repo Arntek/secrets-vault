@@ -19,6 +19,8 @@ var allowed = map[string][]string{
 	"internal/leaktest":   {},
 	"internal/arch":       {},
 	"internal/agentsetup": {},
+	"internal/tui":        {"internal/tui/quiet"},
+	"internal/tui/quiet":  {},
 	"internal/crypto":     {"internal/format"},
 	"internal/index":      {"internal/crypto", "internal/format"},
 	"internal/agent":      {"internal/crypto", "internal/format"},
@@ -26,7 +28,7 @@ var allowed = map[string][]string{
 	"internal/members":    {"internal/crypto", "internal/format", "internal/audit"},
 	"internal/cli": {
 		"internal/format", "internal/crypto", "internal/agent",
-		"internal/touchid", "internal/members", "internal/audit", "internal/index", "internal/agentsetup",
+		"internal/touchid", "internal/members", "internal/audit", "internal/index", "internal/agentsetup", "internal/tui",
 	},
 	"cmd/secrets-vault": {"internal/cli"},
 }

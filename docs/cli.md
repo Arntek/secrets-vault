@@ -67,6 +67,30 @@ The socket path must fit in 100 bytes (macOS limit is 104). When `~/Library/Cach
 - Exit code 5 means the vault failed verification (tampered, substituted, rolled back, behind a state code, a `vault.json` that is damaged or doesn't parse, or this machine lost its record of it), or a key failed its check against the authenticated index (rolled back, missing file, index damaged). `get`, `info`, `rm` and the rest never report such a vault as "key not found" (4), and the index-only commands (`info`, `list`, `search`) honour an unmet `--expect` too; `list --json` and `search --json` add it as `{"vault": "...", "error": "..."}`.
 - A command that pins a vault for the first time adds `"state_code_checked": true|false` and `"first_pin": {vault, state, signed_by, members}` to its `--json` output (and says so on stderr).
 
+## Terminal UI (`vault ui`)
+
+A full-screen interface that runs inside the vault process: no web server, no open port, nothing a browser extension or another program could reach (design decision D9). It needs a terminal on stdin and stdout (otherwise exit 1) and has no `--json`.
+
+```
+ vault ─ 2 vaults · 5 keys                       personal 🔓 3h41m   ebcfo 🔒
+ ┌─ Vaults ───────┐ ┌─ Keys ──────────────────────────────────────────────┐
+ │ ▸ All          │ │ / search                                            │
+ │   personal  🔓 │ │ ▸ XERO_CLIENT_ID      ebcfo   Xero app "EBCFO ..."  │
+ │   ebcfo     🔒 │ │   XERO_CLIENT_SECRET  ebcfo   Xero app "EBCFO ..."  │
+ └────────────────┘ └─────────────────────────────────────────────────────┘
+ ┌─ XERO_CLIENT_ID ────────────────────────────────────────────────────────┐
+ │ Value     ••••••••••••••••   (space: reveal 10s · c: copy, clears in 30s)│
+ └─────────────────────────────────────────────────────────────────────────┘
+```
+
+Keys: `↑/↓` or `j/k` move, `g`/`G` first/last, `Tab` or `←/→` switch between the Vaults and Keys panes, `/` search (names, descriptions, tags, vault; Enter keeps the filter, Esc clears it), `a` add, `e` edit value, `d` describe, `t` tag (edit the comma list), `m` move, `r` rename, `x` delete (asks `y`), `u` unlock, `l` lock (`L` locks every vault), `c` copy (clears after 30 seconds), space reveal, `R` re-read the vaults, `q` or Ctrl-C quit. Hints are always shown at the bottom.
+
+- **Same operations as the commands.** Every action calls the function the matching command calls (`setKey`, `describeKey`, `tagKey`, `moveKey`, `renameKey`, `deleteKey`, `unlockVault`, `lockVault`, `copyValue`, `revealValue` in `internal/cli`), so the index, audit hook, membership verification, trust pins, write guard and exit-code rules are identical. The audit hook for a value read is `revealValue` (one call site for `get`, `copy` and the UI).
+- **Masked by default.** A value shows only after space, hides after 10 seconds, on any selection, focus, search or vault change, on lock, and on exit. It is never written to scrollback: the UI uses the alternate screen and blanks it on exit, including Ctrl-C and a crash. Text from a vault (names, descriptions, values) is shown with control characters and bidirectional overrides replaced, so an entry cannot send escape sequences to the terminal. Typed values and passphrases are shown as bullets.
+- **Locked vaults list their keys** from the index. Opening a value (or `u`, or any write) runs the normal unlock flow: Touch ID, then the personal passphrase, then the vault passphrase, asked inside the UI. Esc cancels the whole operation.
+- **A vault that fails verification** (exit code 5: changed outside secrets-vault, replaced, rolled back, behind a state code) shows its error in the Keys list and detail pane instead of keys.
+- Works at 80x24 and resizes; below about 48 columns the Vaults pane is hidden. `NO_COLOR` turns colour off (the selected row, focus and errors are marked with glyphs and text, not colour alone).
+
 ## Trust
 
 Design: [design/membership-auth.md](design/membership-auth.md). In short:

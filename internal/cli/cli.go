@@ -16,8 +16,9 @@
 // other internal package; none of them may import cli. Keep business rules
 // out of cli: it orchestrates, the packages below decide.
 //
-// The command set is owned by issue rn5. Out of scope until Phase 2: ui,
-// prime, setup, log, doctor, backup and the MCP server.
+// The command set is owned by issue rn5. ui (the terminal interface, package
+// tui) is in; out of scope until later in Phase 2: prime, setup, log,
+// doctor, backup and the MCP server.
 package cli
 
 import (
@@ -104,6 +105,10 @@ var commands = []command{
 	{name: "rm", group: "Changing keys", usage: "rm NAME [--yes]",
 		summary: "Delete, after confirmation. Kept in the trash for 30 days.",
 		flags:   []flagSpec{fVault, fYes}, run: cmdRm},
+
+	{name: "ui", group: "Finding keys (no unlock needed)", usage: "ui",
+		summary: "Full-screen terminal interface: browse, search, add, edit and move keys. Values stay masked.",
+		run:     cmdUI},
 
 	{name: "unlock", group: "Locking", usage: "unlock [VAULT] [--for DURATION]",
 		summary: "Unlock ahead of time (default vault if none is named).",
