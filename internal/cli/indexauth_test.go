@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/Arntek/secrets-vault/internal/crypto"
@@ -997,7 +996,7 @@ func TestRotationNeverBlockedByPlantedFiles(t *testing.T) {
 			keep := filepath.Join(outside, "keep")
 			_ = os.WriteFile(keep, []byte("outside data"), 0o600)
 			fifo := func(p string) {
-				if err := syscall.Mkfifo(p, 0o600); err != nil {
+				if err := mkfifo(p); err != nil {
 					_ = os.WriteFile(p, []byte("fifo stand-in"), 0o600)
 				}
 			}
@@ -1135,7 +1134,7 @@ func TestMemberRemoveNeverBlockedByPlantedFiles(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(vdir, "vault (bob's conflicted copy).json"), []byte("{}"), 0o600)
 	_ = os.Mkdir(sec("EVIL_DIR.age"), 0o700)
 	_ = os.Symlink(keep, sec("EVIL_LINK.age"))
-	_ = syscall.Mkfifo(sec("EVIL_FIFO.age"), 0o600)
+	_ = mkfifo(sec("EVIL_FIFO.age"))
 	_ = os.WriteFile(sec("RENAMED_COPY.age"), b, 0o600)
 	_ = os.WriteFile(sec("TRUNC.age"), b[:len(b)/2], 0o600)
 	_ = os.Symlink(outside, sec(".trash"))

@@ -21,10 +21,14 @@ type fakeBackend struct {
 	unlocked map[string]bool
 	calls    []string
 	failWith error
+	// unverified marks vaults whose entries this Mac has not verified;
+	// pending marks entries the folder changed since.
+	unverified map[string]bool
+	pending    map[string]bool
 }
 
 func newFake() *fakeBackend {
-	f := &fakeBackend{values: map[string]string{}, pass: map[string]string{}, unlocked: map[string]bool{}}
+	f := &fakeBackend{unverified: map[string]bool{}, pending: map[string]bool{}, values: map[string]string{}, pass: map[string]string{}, unlocked: map[string]bool{}}
 	return f
 }
 
@@ -56,6 +60,12 @@ func (f *fakeBackend) Snapshot() (Snapshot, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := Snapshot{Keys: append([]Key(nil), f.snap.Keys...)}
+	for i := range s.Keys {
+		if !f.unverified[s.Keys[i].Vault] {
+			s.Keys[i].Verified = true
+		}
+		s.Keys[i].Pending = f.pending[s.Keys[i].Name]
+	}
 	for _, v := range f.snap.Vaults {
 		v.Unlocked = f.unlocked[v.Name]
 		if v.Unlocked {
@@ -136,6 +146,9 @@ func (f *fakeBackend) Set(vault, name string, value []byte, desc *string) error 
 }
 func (f *fakeBackend) Describe(vault, name, text string) error {
 	f.call("describe %s/%s %q", vault, name, text)
+	if err := f.need(vault); err != nil { // index entries are sealed: a change needs the key
+		return err
+	}
 	for i, k := range f.snap.Keys {
 		if k.Vault == vault && k.Name == name {
 			f.snap.Keys[i].Description = text
@@ -145,6 +158,9 @@ func (f *fakeBackend) Describe(vault, name, text string) error {
 }
 func (f *fakeBackend) Tag(vault, name string, add, remove []string) error {
 	f.call("tag %s/%s add=%v rm=%v", vault, name, add, remove)
+	if err := f.need(vault); err != nil {
+		return err
+	}
 	for i, k := range f.snap.Keys {
 		if k.Vault == vault && k.Name == name {
 			var out []string

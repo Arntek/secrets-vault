@@ -80,6 +80,11 @@ type Vault struct {
 	// Verify is true when the error is a verification failure (exit code 5:
 	// tampered, substituted, rolled back, behind a state code).
 	Verify bool
+	// IndexState is how far the index can be trusted without unlocking:
+	// "verified", "pending-changes" (the folder changed since this Mac last
+	// verified it), "unverified" (never verified here), "private" or
+	// "legacy". Empty means unknown.
+	IndexState string
 }
 
 // Key is one index entry. It never holds a value.
@@ -90,4 +95,9 @@ type Key struct {
 	Tags        []string
 	Updated     time.Time
 	UpdatedBy   string
+	// Verified is false for an entry only the folder claims (not checked
+	// with the vault key yet); Pending means the folder holds a different
+	// entry than the verified one shown. Both clear after an unlock.
+	Verified bool
+	Pending  bool
 }

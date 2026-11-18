@@ -15,7 +15,7 @@ $ vault unlock personal
 $ vault run -k EXAMPLE_API_KEY -- python sync.py
 ```
 
-> **Status: pre-release (Phase 1 in progress).** Release packaging (GoReleaser and a Homebrew formula) is in place but nothing is published yet. Build from source to try it (see [Building from source](#building-from-source)). Commands marked *(coming)* are designed but not built yet.
+> **Status: pre-release (Phases 1 and 2 built).** Release packaging (GoReleaser and a Homebrew formula) is in place but nothing is published yet. Build from source to try it (see [Building from source](#building-from-source)). `vault backup` is designed but not built yet.
 
 ## Contents
 
@@ -140,8 +140,8 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 | Command | What it does |
 |---|---|
 | `vault set NAME [--vault V] [--desc TEXT]` | Add or update a key (hidden prompt or stdin) |
-| `vault describe NAME "TEXT"` | Change the description only |
-| `vault tag NAME tag1,tag2 [--rm]` | Add tags for filtering (or remove them with `--rm`) |
+| `vault describe NAME "TEXT"` | Change the description only (needs the vault unlocked: index entries are sealed with the vault key) |
+| `vault tag NAME tag1,tag2 [--rm]` | Add tags for filtering (or remove them with `--rm`); needs the vault unlocked |
 | `vault mv NAME --to VAULT` | Move a key to another vault |
 | `vault rename OLD NEW` | Rename a key |
 | `vault rm NAME` | Delete (kept in the vault's trash for 30 days) |
@@ -177,8 +177,6 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 | `vault setup agents [--path DIR] [--remove] [--dry-run] [--force]` | Add the same marked block to a repo's `AGENTS.md` |
 
 **Scripts and terminals:** `--passphrase-stdin` (any command) reads passphrases from stdin instead of the terminal. `rm` needs `--yes` without a terminal; `member rm` also needs `--folder-access-removed`. `member approve` needs a terminal or `--fingerprint FP`; a first use after being added needs a terminal or `--signer-fingerprint FP`. `get -n` omits the trailing newline.
-
-*(coming in Phase 2)*: `vault backup`.
 
 **Exit codes:** `0` ok, `1` error, `2` usage, `3` vault locked and no way to ask for unlock, `4` key not found, `5` the vault failed verification (changed outside secrets-vault, replaced, rolled back, or behind a state code you were given). Scripts and AI agents must treat `5` as "stop and tell the user", never as "key missing". `list --json` includes such a vault as `{"vault": ..., "error": ...}`.
 

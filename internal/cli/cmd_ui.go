@@ -201,14 +201,14 @@ func (b *uiBackend) Snapshot() (tui.Snapshot, error) {
 				snap.Vaults = append(snap.Vaults, tui.Vault{Name: n, Err: errBy[n].Error, Verify: errBy[n].verify})
 			case sumBy[n].Name != "":
 				s := sumBy[n]
-				snap.Vaults = append(snap.Vaults, tui.Vault{Name: n, Keys: s.Keys, Unlocked: s.Unlocked, Expires: s.expires})
+				snap.Vaults = append(snap.Vaults, tui.Vault{Name: n, Keys: s.Keys, Unlocked: s.Unlocked, Expires: s.expires, IndexState: s.IndexState})
 			default:
 				snap.Vaults = append(snap.Vaults, tui.Vault{Name: n, Err: "the index of this vault could not be read (the folder may not be synced yet)"})
 			}
 		}
 		for _, r := range rows {
 			snap.Keys = append(snap.Keys, tui.Key{Name: r.Name, Vault: r.Vault, Description: r.Description,
-				Tags: r.Tags, Updated: r.updatedAt, UpdatedBy: r.UpdatedBy})
+				Tags: r.Tags, Updated: r.updatedAt, UpdatedBy: r.UpdatedBy, Verified: r.Verified, Pending: r.PendingChange})
 		}
 	}
 	return snap, b.end(uiErr(err))

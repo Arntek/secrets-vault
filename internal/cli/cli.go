@@ -17,8 +17,8 @@
 // out of cli: it orchestrates, the packages below decide.
 //
 // The command set is owned by issue rn5. ui (the terminal interface, package
-// tui) is in; out of scope until later in Phase 2: prime, setup, log,
-// doctor, backup and the MCP server.
+// tui), prime, setup, log and doctor are in; out of scope: backup and the
+// MCP server.
 package cli
 
 import (

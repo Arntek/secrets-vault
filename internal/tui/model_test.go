@@ -562,3 +562,31 @@ func TestPanicIsSanitisedAndWipes(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter}) // submit calls ValidateName, which panics
 	t.Fatal("no panic")
 }
+
+func TestIndexStateMarkers(t *testing.T) {
+	f := standard()
+	f.unverified["ebcfo"] = true
+	f.pending["GITHUB_TOKEN"] = true
+	f.snap.Vaults[1].IndexState = "unverified"
+	f.snap.Vaults[0].IndexState = "pending-changes"
+	h := newHarness(t, f)
+	v := h.view()
+	contains(t, v, "ebcfo 🔒 unverified", "~ GitHub CLI token", "? Webhook signing key", "~ the folder changed this entry")
+	h.typ("G")
+	contains(t, h.view(), "? not verified on this Mac yet")
+	h.typ("g")
+	h.typ("j")
+	contains(t, h.view(), "Index     verified")
+}
+
+func TestDescribeAndTagOnLockedVaultAskToUnlock(t *testing.T) {
+	f := standard()
+	h := newHarness(t, f)
+	h.typ("G") // locked ebcfo
+	h.typ("d")
+	h.typ(" more")
+	h.enter()
+	contains(t, h.view(), "Passphrase for 'ebcfo':")
+	h.esc()
+	contains(t, h.view(), "! cancelled")
+}

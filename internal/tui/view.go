@@ -47,7 +47,7 @@ const footerLines = 2
 // layout returns the heights of the panes, bottom box and footer.
 func (m *Model) layout() (panes, bottom, footer int) {
 	footer = footerLines
-	bottom = 5
+	bottom = 6
 	if (m.mode == modePrompt && m.pr != nil) || (m.mode == modeConfirm && m.conf != nil) {
 		bottom = 3 + len(m.dialogNote())
 		if bottom > 9 {
@@ -126,7 +126,19 @@ func (m *Model) lockGlyph(v Vault) string {
 	case m.vaultUnlocked(v):
 		return "🔓 " + timeLeft(v.Expires.Sub(m.now()))
 	}
-	return "🔒"
+	return "🔒" + indexNote(v.IndexState)
+}
+
+// indexNote is the short flag for a locked vault whose index this Mac has
+// not (fully) verified.
+func indexNote(state string) string {
+	switch state {
+	case "unverified":
+		return " unverified"
+	case "pending-changes":
+		return " changed"
+	}
+	return ""
 }
 
 func (m *Model) vaultUnlocked(v Vault) bool {
@@ -253,7 +265,7 @@ func (m *Model) keysBox(w, h int) []string {
 			line = mark + m.st.err("⚠ "+clean(r.vault.Name)+": ") + clean(firstLine(r.vault.Err))
 		} else {
 			k := r.key
-			line = mark + pad(clean(k.Name), nw) + "  " + pad(clean(k.Vault), vw) + "  " + clean(k.Description)
+			line = mark + pad(clean(k.Name), nw) + "  " + pad(clean(k.Vault), vw) + "  " + keyFlag(k) + clean(k.Description)
 		}
 		line = pad(line, iw)
 		if i == m.keySel && m.focus == paneKeys {
@@ -262,6 +274,28 @@ func (m *Model) keysBox(w, h int) []string {
 		lines = append(lines, line)
 	}
 	return box("Keys", lines, w, h, m.focus == paneKeys, m.st)
+}
+
+// keyFlag marks an entry that only the folder vouches for: "? " not
+// verified on this Mac yet, "~ " the folder changed it since.
+func keyFlag(k Key) string {
+	switch {
+	case k.Pending:
+		return "~ "
+	case !k.Verified:
+		return "? "
+	}
+	return ""
+}
+
+func (m *Model) indexLine(k Key) string {
+	switch {
+	case k.Pending:
+		return "~ the folder changed this entry since it was verified here; unlock to check"
+	case !k.Verified:
+		return "? not verified on this Mac yet, so this is only what the folder claims; unlock to check"
+	}
+	return "verified"
 }
 
 func firstLine(s string) string {
@@ -348,6 +382,7 @@ func (m *Model) detailBox(w, h int) []string {
 		"Value     " + val,
 		"Vault     " + pad(clean(k.Vault), 14) + "Tags  " + tags,
 		"Updated   " + upd,
+		"Index     " + m.indexLine(k),
 	}
 	return box(clean(k.Name), lines, w, h, false, m.st)
 }

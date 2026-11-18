@@ -408,3 +408,27 @@ func TestUICommandRunsTheUIOnATerminal(t *testing.T) {
 		t.Fatalf("exit %d called %v", code, called)
 	}
 }
+
+// With index authentication, describe and tag change a sealed index entry,
+// so on a locked vault they ask to unlock inside the UI, like any write.
+func TestUIDescribeAndTagOnLockedVaultNeedUnlock(t *testing.T) {
+	e, _, _ := twoVaults(t)
+	e.set("D_KEY", "work", "v")
+	e.mustRun("lock", "--all")
+	d := newUIDriver(t, e)
+	d.goTo("D_KEY")
+	d.press("d")
+	d.press(" edited")
+	d.enter()
+	d.want("Your personal passphrase:")
+	d.press(testPass)
+	d.enter()
+	d.want("Updated the description.", "test key d_key edited", "Index     verified")
+	d.press("t")
+	d.press(", t1")
+	d.enter()
+	info := decodeJSON[map[string]any](t, e.mustRun("info", "D_KEY", "--json").out)
+	if strings.Join(toStrings(info["tags"]), ",") != "t1" {
+		t.Fatalf("tags %v", info["tags"])
+	}
+}
