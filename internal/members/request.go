@@ -52,6 +52,9 @@ func ParseRequest(data []byte) (JoinRequest, error) {
 	if err != nil {
 		return JoinRequest{}, fmt.Errorf("%w: bad public key", ErrMalformed)
 	}
+	if err := CheckFingerprintFormat(rf.Fingerprint); err != nil {
+		return JoinRequest{}, fmt.Errorf("%w: fingerprint is not in the current three-word format (file from an older version?)", ErrMalformed)
+	}
 	if !FingerprintsEqual(fp, rf.Fingerprint) {
 		return JoinRequest{}, fmt.Errorf("%w: fingerprint does not match the public key", ErrMalformed)
 	}

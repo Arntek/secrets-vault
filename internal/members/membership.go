@@ -171,6 +171,9 @@ func ApproveRequest(vaultDir string, key *crypto.VaultKey, name, confirmedFinger
 	if err != nil {
 		return Member{}, err
 	}
+	if err := CheckFingerprintFormat(confirmedFingerprint); err != nil {
+		return Member{}, fmt.Errorf("%w (%w)", ErrFingerprintMismatch, err)
+	}
 	if !FingerprintsEqual(confirmedFingerprint, req.Identity.Fingerprint) {
 		return Member{}, ErrFingerprintMismatch
 	}

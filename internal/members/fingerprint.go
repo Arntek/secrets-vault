@@ -3,6 +3,7 @@ package members
 import (
 	_ "embed" // wordlist.txt
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -32,27 +33,61 @@ var words = func() []string {
 const (
 	// WordListSize is the number of words: 11 bits each.
 	WordListSize = 2048
-	// FingerprintBits is the entropy of a fingerprint: two words (11 bits
+	// FingerprintBits is the entropy of a fingerprint: three words (11 bits
 	// each) and a four-digit number (log2(10000) = 13.29 bits).
-	FingerprintBits = 22 + 13.29
+	FingerprintBits = 33 + 13.29
 
-	fpDomain = "secrets-vault/v1 member fingerprint\x00"
-	fpSalt   = "secrets-vault/v1 fingerprint salt"
-	// scrypt cost: ~16 MiB and ~30 ms per fingerprint. Only 35 bits long, so
-	// we make each guess expensive: forging a second key with the same
-	// fingerprint takes about 2^35 key generations *and* fingerprints,
-	// which is decades of CPU time instead of days.
-	fpN = 1 << 15
+	// The "v2" strings separate this format from the two-word v1 one, so a
+	// v1 fingerprint can never equal a v2 one for the same key.
+	fpDomain = "secrets-vault/v2 member fingerprint\x00"
+	fpSalt   = "secrets-vault/v2 fingerprint salt"
+	// scrypt cost: ~8 MiB and ~15 ms per fingerprint. At 46 bits, forging a
+	// second key with the same fingerprint takes about 2^46 key generations
+	// and fingerprints: tens of thousands of CPU-years even at this cost.
+	// (v1 used 2^15 because 35 bits needed it; 2^14 keeps listing fast.)
+	fpN = 1 << 14
 	fpR = 8
 	fpP = 1
 )
 
+// ErrFingerprintFormat means a string is not a v2 fingerprint (for example
+// the old two-word form).
+var ErrFingerprintFormat = errors.New("members: a fingerprint is three words and four digits, like MAPLE-RIVER-OTTER-4417; the old two-word form is no longer accepted")
+
+var wordSet = func() map[string]bool {
+	m := make(map[string]bool, len(words))
+	for _, w := range words {
+		m[strings.ToUpper(w)] = true
+	}
+	return m
+}()
+
+// CheckFingerprintFormat reports whether s has the exact shape of a
+// fingerprint: three upper-case words from the word list and four digits.
+// It does not say whether the fingerprint belongs to any key.
+func CheckFingerprintFormat(s string) error {
+	parts := strings.Split(s, "-")
+	if len(parts) != 4 || len(parts[3]) != 4 {
+		return ErrFingerprintFormat
+	}
+	for _, w := range parts[:3] {
+		if !wordSet[w] {
+			return ErrFingerprintFormat
+		}
+	}
+	for i := 0; i < 4; i++ {
+		if parts[3][i] < '0' || parts[3][i] > '9' {
+			return ErrFingerprintFormat
+		}
+	}
+	return nil
+}
+
 // Fingerprint derives the human-readable fingerprint of an age X25519
-// recipient: WORD-WORD-NNNN, e.g. MAPLE-RIVER-4417.
+// recipient: WORD-WORD-WORD-NNNN, e.g. MAPLE-RIVER-OTTER-4417.
 //
-// It is the scrypt hash of the canonical recipient string, split into 11
-// bits (word), 11 bits (word) and a number below 10000, so it carries about
-// 35 bits. That is enough to catch a swapped or mistyped key when two people
+// It is the scrypt hash of the canonical recipient string, split into
+// three 11-bit words and a number below 10000, so it carries about 46 bits. That is enough to catch a swapped or mistyped key when two people
 // read it to each other once, at the moment of approval. It is not a
 // long-term identifier, and the scrypt cost is there so that an attacker who
 // can write to the shared folder cannot grind a lookalike key before the
@@ -109,12 +144,13 @@ func computeFingerprint(recipient string) (string, error) {
 	v := binary.BigEndian.Uint64(dk)
 	w1 := words[v>>53]
 	w2 := words[(v>>42)&0x7ff]
-	n := (v & 0xffffffff) % 10000
-	return fmt.Sprintf("%s-%s-%04d", strings.ToUpper(w1), strings.ToUpper(w2), n), nil
+	w3 := words[(v>>31)&0x7ff]
+	n := (v & 0xffffffff) % 10000 // bits 0-31, disjoint from the word bits
+	return fmt.Sprintf("%s-%s-%s-%04d", strings.ToUpper(w1), strings.ToUpper(w2), strings.ToUpper(w3), n), nil
 }
 
 // NormalizeFingerprint trims space and upper-cases what a person typed, so
-// "maple-river-4417 " compares equal to the real fingerprint. Nothing else
+// "maple-river-otter-4417 " compares equal to the real fingerprint. Nothing else
 // is forgiven: every word and digit must match.
 func NormalizeFingerprint(s string) string {
 	return strings.ToUpper(strings.TrimSpace(s))

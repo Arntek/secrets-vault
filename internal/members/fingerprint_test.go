@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -37,7 +39,7 @@ func TestWordList(t *testing.T) {
 }
 
 func TestFingerprintBits(t *testing.T) {
-	want := 2*math.Log2(WordListSize) + math.Log2(10000)
+	want := 3*math.Log2(WordListSize) + math.Log2(10000)
 	if math.Abs(FingerprintBits-want) > 0.01 {
 		t.Fatalf("FingerprintBits %v, computed %v", FingerprintBits, want)
 	}
@@ -52,7 +54,7 @@ func newRecipient(t testing.TB) string {
 	return id.Recipient().String()
 }
 
-var fpRe = regexp.MustCompile(`^[A-Z]{3,8}-[A-Z]{3,8}-[0-9]{4}$`)
+var fpRe = regexp.MustCompile(`^[A-Z]{3,8}-[A-Z]{3,8}-[A-Z]{3,8}-[0-9]{4}$`)
 
 func TestFingerprint(t *testing.T) {
 	r1, r2 := newRecipient(t), newRecipient(t)
@@ -77,7 +79,7 @@ func TestFingerprint(t *testing.T) {
 // derivation: scrypt parameters, bit split, upper-casing.
 const (
 	knownRecipient   = "age1kcxhuxclcv3a27xa5planrvg5444lzwcchw4d5xeu4zzvj86ts7qsp93hz"
-	knownFingerprint = "DUTCH-PREDICT-1767"
+	knownFingerprint = "EMPLOY-WRITE-LOAD-4806"
 )
 
 func TestFingerprintKnownAnswer(t *testing.T) {
@@ -107,14 +109,14 @@ func TestFingerprintRejectsBadRecipients(t *testing.T) {
 }
 
 func TestFingerprintComparison(t *testing.T) {
-	if NormalizeFingerprint("  maple-river-4417\n") != "MAPLE-RIVER-4417" {
+	if NormalizeFingerprint("  maple-river-otter-4417\n") != "MAPLE-RIVER-OTTER-4417" {
 		t.Fatal("normalize")
 	}
-	if !FingerprintsEqual("MAPLE-RIVER-4417", "MAPLE-RIVER-4417") {
+	if !FingerprintsEqual("MAPLE-RIVER-OTTER-4417", "MAPLE-RIVER-OTTER-4417") {
 		t.Fatal("equal")
 	}
-	for _, other := range []string{"", "MAPLE-RIVER-4418", "MAPLE-RIVER", "MAPLE-RIVER-4417 ", "maple-river-4417", "MAPLE-RIVER-44171"} {
-		if FingerprintsEqual("MAPLE-RIVER-4417", other) {
+	for _, other := range []string{"", "MAPLE-RIVER-OTTER-4418", "MAPLE-RIVER-4417", "MAPLE-RIVER-OTTER", "MAPLE-RIVER-OTTER-4417 ", "maple-river-otter-4417", "MAPLE-RIVER-OTTER-44171"} {
+		if FingerprintsEqual("MAPLE-RIVER-OTTER-4417", other) {
 			t.Errorf("%q equal", other)
 		}
 	}
@@ -136,4 +138,40 @@ func FuzzFingerprint(f *testing.F) {
 			t.Fatal("error echoes input")
 		}
 	})
+}
+
+func TestCheckFingerprintFormat(t *testing.T) {
+	good := "EMPLOY-WRITE-LOAD-4806"
+	if err := CheckFingerprintFormat(good); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", "MAPLE-RIVER-4417", "DUTCH-PREDICT-1767", "maple-river-otter-4417", "MAPLE-RIVER-OTTER-441", "MAPLE-RIVER-OTTER-44a7", "MAPLE-RIVER-ZZZZ-4417", "MAPLE-RIVER-OTTER-4417-1", " MAPLE-RIVER-OTTER-4417"} {
+		if err := CheckFingerprintFormat(bad); !errors.Is(err, ErrFingerprintFormat) {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	// Real fingerprints always pass.
+	fp, _ := Fingerprint(newRecipient(t))
+	if err := CheckFingerprintFormat(fp); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A v1 two-word fingerprint (or request file) is rejected with a clear error.
+func TestOldTwoWordFormatRejected(t *testing.T) {
+	alice, bob := newPerson(t, "alice"), newPerson(t, "bob")
+	dir, key := newSharedVault(t, alice)
+	if err := WriteRequest(dir, bob.pub, t0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ApproveRequest(dir, key, "bob", "DUTCH-PREDICT-1767", "alice")
+	if !errors.Is(err, ErrFingerprintFormat) || !errors.Is(err, ErrFingerprintMismatch) {
+		t.Fatalf("old form on approve: %v", err)
+	}
+	p := filepath.Join(dir, "requests", "bob.json")
+	data, _ := os.ReadFile(p)
+	old := strings.Replace(string(data), bob.pub.Fingerprint, "DUTCH-PREDICT-1767", 1)
+	if _, err := ParseRequest([]byte(old)); !errors.Is(err, ErrMalformed) || !strings.Contains(err.Error(), "three-word") {
+		t.Fatalf("old form in request file: %v", err)
+	}
 }
