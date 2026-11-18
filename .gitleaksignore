@@ -1,0 +1,3 @@
+# False positives reviewed by the coordinator. One fingerprint per line.
+# Test sets SECRETS_VAULT_AGENT_DIR to a dummy relative path, not a secret.
+70885e686243c17880aac8b0601d5ccf119fa7a7:internal/cli/commands_test.go:generic-api-key:850
