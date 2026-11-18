@@ -494,7 +494,7 @@ func (a *app) openKey(v *vaultRef, vf *format.VaultFile, o openOpts) (*crypto.Va
 	}
 	cl := a.client(true)
 	if o.requireAgent && cl == nil {
-		return nil, failf("the unlock agent is not available on this system")
+		return nil, a.agentUnavailableErr()
 	}
 	touchEvery := o.purpose == purposeRead && a.touchEveryRead(v)
 	if cl != nil && !o.forceAuth && !touchEvery {

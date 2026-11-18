@@ -103,10 +103,23 @@ func cmdInit(a *app, p *parsed) error {
 	if err := a.saveConfig(cfg); err != nil {
 		return err
 	}
+	// Leave the new vault unlocked, as 'unlock' would, so the first 'set'
+	// does not ask for the passphrase again. Failing to reach the agent
+	// never fails the init.
+	unlocked := false
+	if cl := a.client(true); cl != nil {
+		if dup, err := keyCopy(key); err == nil {
+			ttl := a.ttlFor(&vaultRef{name: name, entry: cfg.Vaults[name], dir: dir})
+			unlocked = cl.Unlock(vf.ID, dup, ttl) == nil
+		}
+	}
 	if a.asJSON {
-		return a.printJSON(map[string]any{"vault": name, "path": dir, "touchid": touchOn})
+		return a.printJSON(map[string]any{"vault": name, "path": dir, "touchid": touchOn, "unlocked": unlocked})
 	}
 	a.printf("Created vault '%s' at %s\n", name, dir)
+	if !unlocked {
+		a.infof("The vault is locked: the unlock agent could not be reached. Run: %s unlock %s", a.prog, name)
+	}
 	return nil
 }
 

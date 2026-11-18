@@ -58,6 +58,10 @@ var ErrLocked = errors.New("vault is locked")
 // until Phase 2).
 var ErrUnsupported = errors.New("agent: not supported on this platform")
 
+// ErrPathTooLong is returned when the socket path would not fit in a Unix
+// socket address (104 bytes on macOS).
+var ErrPathTooLong = errors.New("agent: socket path too long")
+
 // ErrAlreadyRunning is returned by Serve when a live agent already owns the
 // socket.
 var ErrAlreadyRunning = errors.New("agent: already running")
