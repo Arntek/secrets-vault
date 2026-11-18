@@ -145,6 +145,12 @@ var commands = []command{
 	{name: "identity", group: "Sharing", usage: "identity export|import FILE",
 		summary: "Move your identity to another Mac (passphrase-protected file).", run: cmdIdentity},
 
+	{name: "prime", group: "AI agents", usage: "prime [--json]",
+		summary: "Print the rules for AI agents and which vaults exist and are unlocked. Never prints a value.", run: cmdPrime},
+	{name: "setup", group: "AI agents", usage: "setup claude [--claude-md] | setup agents [--path DIR] [--remove] [--dry-run] [--force]",
+		summary: "Add agent instructions to your setup (additive only). --remove undoes exactly what was added.",
+		flags:   []flagSpec{{name: "claude-md"}, {name: "remove"}, {name: "dry-run"}, {name: "force"}, {name: "path", value: true}}, run: cmdSetup},
+
 	{name: "config", group: "Settings", usage: "config set KEY VALUE [--vault V] | config list",
 		summary: "Change settings: default-ttl, default-vault, touch-every-read, dialog.",
 		flags:   []flagSpec{fVault}, run: cmdConfig},
