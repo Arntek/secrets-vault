@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -71,6 +72,9 @@ func startAgent(opts DialOptions) error {
 	}
 	cmd := exec.Command(exe, args...) // #nosec G204 -- our own executable with a fixed hidden argument (or a test-supplied one)
 	cmd.Env = opts.Env
+	if cmd.Env == nil {
+		cmd.Env = CleanEnv(os.Environ())
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survive the terminal closing
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("agent: start: %w", err)
@@ -190,3 +194,21 @@ func (c *client) Status() ([]VaultStatus, error) {
 
 // Close is a no-op: each call uses its own short connection.
 func (c *client) Close() error { return nil }
+
+// agentEnvAllow lists the only variables the agent inherits. Everything else
+// (notably secrets injected by `vault run`) is dropped, so a value can never
+// linger in the long-lived agent process.
+var agentEnvAllow = map[string]bool{"HOME": true, "PATH": true, "TMPDIR": true, "LANG": true}
+
+// CleanEnv returns environ reduced to the agent allowlist: HOME, PATH, TMPDIR,
+// LANG and the SECRETS_VAULT_* settings.
+func CleanEnv(environ []string) []string {
+	out := make([]string, 0, 8)
+	for _, kv := range environ {
+		k, _, ok := strings.Cut(kv, "=")
+		if ok && (agentEnvAllow[k] || strings.HasPrefix(k, "SECRETS_VAULT_")) {
+			out = append(out, kv)
+		}
+	}
+	return out
+}

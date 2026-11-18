@@ -724,17 +724,14 @@ func cmdAlias(a *app, p *parsed) error {
 				return failf("'%s' is already used by another program on your PATH (%s). Skipped. Use a different name, or: %s alias add %s --force", name, other, a.prog, name)
 			}
 		}
-		if fi, err := os.Lstat(link); err == nil {
+		if _, err := os.Lstat(link); err == nil {
 			if isLinkTo(link, real) {
 				a.recordAlias(cfg, name)
 				return a.aliasDone(name, link, true)
 			}
-			if !p.has("force") || fi.IsDir() {
-				return failf("'%s' already exists in %s and is not a link to this program", name, dir)
-			}
-			if err := os.Remove(link); err != nil {
-				return failf("cannot replace the existing file: %v", pathless(err))
-			}
+			// Never delete another program's file, even with --force: the
+			// only existing file we accept is a link to this program.
+			return failf("%s already exists and is not a link to this program. It was not changed, even with --force. Remove or rename it yourself, or choose another name", link)
 		}
 		target := real
 		if rd, err := filepath.EvalSymlinks(dir); err == nil && filepath.Dir(real) == rd {

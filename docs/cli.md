@@ -48,3 +48,10 @@ The registry remembers each vault's `key_id`. If `vault.json` shows a different 
 ## Testing
 
 `cli.Run` runs in-process. Tests inject a fake terminal, a software "Secure Enclave" and a fake clipboard through `testHook`; the test binary re-executes itself as the agent (`TestMain`), so the agent path is the real one. No test needs a finger.
+
+## Hardening notes
+
+- **Clock:** the agent expires keys on the wall clock, so time the Mac spends asleep counts against the unlock window. If the wall clock moves back by more than 3 minutes, the agent locks everything.
+- **Agent environment:** an auto-started agent gets only `HOME`, `PATH`, `TMPDIR`, `LANG` and `SECRETS_VAULT_*`, never the environment of the command that started it (so a value injected by `vault run` cannot linger in the agent).
+- **Clipboard:** `copy` uses `/usr/bin/pbcopy` and `/usr/bin/pbpaste` (never PATH), sends the value on stdin, and clears the clipboard after 30 seconds only if it still holds that value. Linux and Windows print "not supported yet".
+- **Aliases:** `alias add NAME --force` never deletes anything. It refuses if a file other than a link to this program is at that path, and names the file.

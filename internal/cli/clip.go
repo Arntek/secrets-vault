@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -29,22 +30,25 @@ type clipboard interface {
 
 type sysClipboard struct{}
 
+// Absolute tool paths: never search PATH for something that handles secrets.
+const (
+	pbcopyPath  = "/usr/bin/pbcopy"
+	pbpastePath = "/usr/bin/pbpaste"
+)
+
 func clipTools() (write, read []string, err error) {
 	switch runtime.GOOS {
 	case "darwin":
-		return []string{"pbcopy"}, []string{"pbpaste"}, nil
-	case "linux":
-		for _, c := range []struct{ w, r []string }{
-			{[]string{"wl-copy"}, []string{"wl-paste", "--no-newline"}},
-			{[]string{"xclip", "-selection", "clipboard"}, []string{"xclip", "-selection", "clipboard", "-o"}},
-			{[]string{"xsel", "--clipboard", "--input"}, []string{"xsel", "--clipboard", "--output"}},
-		} {
-			if _, err := exec.LookPath(c.w[0]); err == nil {
-				return c.w, c.r, nil
+		for _, p := range []string{pbcopyPath, pbpastePath} {
+			if fi, e := os.Stat(p); e != nil || !fi.Mode().IsRegular() {
+				return nil, nil, errors.New("the macOS clipboard tools are missing (expected " + p + "); refusing to use any other program")
 			}
 		}
+		return []string{pbcopyPath}, []string{pbpastePath}, nil
+	case "linux":
+		return nil, nil, errors.New("clipboard copy is not supported on Linux yet")
 	}
-	return nil, nil, errors.New("no clipboard tool found on this system (macOS needs pbcopy)")
+	return nil, nil, errors.New("clipboard copy is not supported on this system yet")
 }
 
 func (sysClipboard) Write(value []byte) error {
@@ -107,7 +111,11 @@ func (a *app) runClipClear() int {
 	if d, err := time.ParseDuration(strings.TrimSpace(delayStr)); err == nil && d >= 0 && d <= time.Hour {
 		delay = d
 	}
-	time.Sleep(delay)
+	// Wait on the wall clock in short steps: time.Sleep stops while the Mac
+	// sleeps, which would leave the value on the clipboard too long.
+	for deadline := time.Now().Round(0).Add(delay); time.Now().Round(0).Before(deadline); {
+		time.Sleep(250 * time.Millisecond)
+	}
 	cur, err := a.clip.Read()
 	if err != nil {
 		return ExitError

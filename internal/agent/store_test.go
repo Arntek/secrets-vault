@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -136,5 +137,77 @@ func TestStoreIdleTracking(t *testing.T) {
 	clk.Advance(time.Minute)
 	if got := s.reap(); got != time.Minute {
 		t.Errorf("idle after expiry = %s, want 1m", got)
+	}
+}
+
+// A clock that returns times carrying a monotonic reading must not make the
+// expiry depend on it: stored deadlines are pure wall-clock times.
+func TestStoreExpiryHasNoMonotonicReading(t *testing.T) {
+	s := newStore(time.Now) // real clock: values carry a monotonic reading
+	if err := s.put("v", newKey(t), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(s.keys["v"].expires.String(), "m=") {
+		t.Fatal("expiry still carries a monotonic reading")
+	}
+}
+
+// Simulated sleep: wall time jumps forward (monotonic time would not). The
+// key must be gone on the next request and on the next sweep.
+func TestStoreWallJumpForwardExpires(t *testing.T) {
+	for _, via := range []string{"get", "reap"} {
+		clk := newFakeClock()
+		s := newStore(clk.Now)
+		if err := s.put("v", newKey(t), 4*time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		clk.Advance(14 * time.Hour) // overnight sleep
+		if via == "get" {
+			if _, ok := s.get("v"); ok {
+				t.Fatal("key survived a wall-clock jump past its deadline")
+			}
+		} else {
+			s.reap()
+			if len(s.keys) != 0 {
+				t.Fatal("sweep kept an expired key")
+			}
+		}
+	}
+}
+
+// Moving the clock back by more than the tolerance locks everything.
+func TestStoreClockBackwardsLocksAll(t *testing.T) {
+	clk := newFakeClock()
+	s := newStore(clk.Now)
+	if err := s.put("v", newKey(t), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(-10 * time.Minute)
+	if _, ok := s.get("v"); ok {
+		t.Fatal("key still available after the clock moved back")
+	}
+	// the clock going forward again must not bring anything back
+	clk.Advance(10 * time.Minute)
+	if _, ok := s.get("v"); ok {
+		t.Fatal("key came back")
+	}
+}
+
+func TestStoreSmallClockBackwardsTolerated(t *testing.T) {
+	clk := newFakeClock()
+	s := newStore(clk.Now)
+	if err := s.put("v", newKey(t), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(-time.Minute)
+	if _, ok := s.get("v"); !ok {
+		t.Fatal("a one-minute correction should not lock")
+	}
+	// repeated small steps must not accumulate past the tolerance
+	for i := 0; i < 5; i++ {
+		clk.Advance(-time.Minute)
+	}
+	if _, ok := s.get("v"); ok {
+		t.Fatal("accumulated backwards steps beyond the tolerance should lock")
 	}
 }

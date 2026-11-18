@@ -125,7 +125,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 |---|---|
 | `vault run -k A [-k B] -- CMD ARGS` | Run one command with only those keys set as environment variables. The safest way to use a key |
 | `vault get NAME` | Print one value. Masked on a terminal unless `--reveal`; plain when piped |
-| `vault copy NAME` | Copy to the clipboard, cleared after 30 seconds |
+| `vault copy NAME` | Copy to the clipboard (macOS only for now), cleared after 30 seconds if unchanged |
 
 **Changing keys**
 
@@ -159,7 +159,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 | `vault member approve\|rm\|list\|requests VAULT [NAME]` | Manage who can open a shared vault |
 | `vault identity export\|import FILE` | Move your personal identity to another machine |
 | `vault config set KEY VALUE [--vault V]`, `vault config list` | Settings: `default-ttl` (5m to 24h), `default-vault`, `touch-every-read`, `dialog` *(dialog is used in Phase 2)* |
-| `vault alias add\|rm\|list NAME [--force]` | Manage the short command names |
+| `vault alias add\|rm\|list NAME [--force]` | Manage the short command names. `--force` only skips the "same name elsewhere on PATH" check; it never replaces an existing file |
 
 **Scripts and terminals:** `--passphrase-stdin` (any command) reads passphrases from stdin instead of the terminal. `rm` and `member rm` need `--yes` without a terminal; `member approve` needs a terminal or `--fingerprint FP`. `get -n` omits the trailing newline.
 

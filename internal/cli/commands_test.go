@@ -884,3 +884,54 @@ func TestUnlockShowsRealAgentError(t *testing.T) {
 	}
 	notContains(t, "error", msg, testPass)
 }
+
+// --force never deletes another program's file or link; the message names it.
+func TestAliasForceNeverDeletesOthers(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	bin := filepath.Dir(e.exe)
+	e.path = bin + string(os.PathListSeparator) + "/usr/bin"
+	victim := filepath.Join(bin, "git2")
+	elsewhere := filepath.Join(e.home, "tool")
+	for name, setup := range map[string]func(){
+		"regular": func() { _ = os.WriteFile(victim, []byte("x"), 0o755) },
+		"foreign-link": func() {
+			_ = os.WriteFile(elsewhere, []byte("x"), 0o755)
+			_ = os.Symlink(elsewhere, victim)
+		},
+		"dir": func() { _ = os.Mkdir(victim, 0o755) },
+	} {
+		_ = os.RemoveAll(victim)
+		setup()
+		r := e.run("alias", "add", "git2", "--force")
+		expectCode(t, r, ExitError)
+		if !strings.Contains(r.err, victim) {
+			t.Fatalf("%s: message should name the file in the way: %s", name, r.err)
+		}
+		if _, err := os.Lstat(victim); err != nil {
+			t.Fatalf("%s: file was removed", name)
+		}
+	}
+	_ = os.RemoveAll(victim)
+	// A link to this program is fine to (re)use with --force.
+	e.mustRun("alias", "add", "git2")
+	e.mustRun("alias", "add", "git2", "--force")
+}
+
+func TestClipToolsNeverUsePath(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // a fake pbcopy here must be ignored
+	w, r, err := clipTools()
+	switch runtime.GOOS {
+	case "darwin":
+		if err != nil {
+			t.Skip("no /usr/bin/pbcopy here")
+		}
+		if w[0] != "/usr/bin/pbcopy" || r[0] != "/usr/bin/pbpaste" {
+			t.Fatalf("%v %v", w, r)
+		}
+	case "linux":
+		if err == nil || !strings.Contains(err.Error(), "not supported on Linux yet") {
+			t.Fatalf("%v", err)
+		}
+	}
+}
