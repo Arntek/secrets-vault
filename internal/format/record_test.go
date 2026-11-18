@@ -334,3 +334,29 @@ func TestQuarantineSecretMovesNeverDeletes(t *testing.T) {
 		t.Fatal("accepted a bad name")
 	}
 }
+
+func TestQuarantineSecretRefusesSymlinkedDirs(t *testing.T) {
+	for _, level := range []string{"quarantine", "quarantine/secrets"} {
+		dir, elsewhere := t.TempDir(), t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, "secrets"), 0o700)
+		if err := WriteSecretFile(dir, "STALE", []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(dir, filepath.FromSlash(level))
+		if level == "quarantine/secrets" {
+			_ = os.MkdirAll(filepath.Join(dir, "quarantine"), 0o700)
+		}
+		if err := os.Symlink(elsewhere, link); err != nil {
+			t.Skip("symlinks unavailable")
+		}
+		if _, err := QuarantineSecret(dir, "STALE", testTime); err == nil {
+			t.Fatalf("%s: moved through a symlink", level)
+		}
+		if m, _ := filepath.Glob(filepath.Join(elsewhere, "*")); len(m) != 0 {
+			t.Fatalf("%s: wrote outside the vault: %v", level, m)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "secrets", "STALE.age")); err != nil {
+			t.Fatalf("%s: the file left secrets/ although the move was refused", level)
+		}
+	}
+}

@@ -401,11 +401,20 @@ func QuarantineSecret(vaultDir, name string, now time.Time) (string, error) {
 	if err := checkDir(q, true); err != nil {
 		return "", err
 	}
+	// Both levels must be real directories of ours before and after they
+	// are made: a folder writer can plant a symlink at quarantine/ or
+	// quarantine/secrets to send the file anywhere.
 	qs := filepath.Join(q, SecretsDir)
+	if err := checkDir(qs, true); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(qs, DirMode); err != nil {
 		return "", err
 	}
 	if err := checkDir(q, false); err != nil {
+		return "", err
+	}
+	if err := checkDir(qs, false); err != nil {
 		return "", err
 	}
 	file := name + "." + now.UTC().Format("20060102T150405.000000000Z") + SecretExt

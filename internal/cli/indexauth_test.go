@@ -925,3 +925,29 @@ func TestTombstoneWrittenBackWithFileResurrected(t *testing.T) {
 	forgetSnapshots(t, e)
 	expectCode(t, e.run("get", "B_KEY"), ExitUnverified)
 }
+
+// A symlinked quarantine folder never receives a file, and every command
+// refuses the vault (exit 5) rather than writing through a link.
+func TestQuarantineSymlinkIsRefused(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("API_KEY", "", "v")
+	elsewhere := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "quarantine"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(dir, "quarantine", "secrets")); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	_ = os.WriteFile(filepath.Join(dir, "secrets", "JUNK_FILE.age"), []byte("junk"), 0o600)
+	r := e.runIn(testPass+"\nsecond passphrase\n", "passwd", "main", "--passphrase-stdin")
+	expectCode(t, r, ExitUnverified)
+	if m, _ := filepath.Glob(filepath.Join(elsewhere, "*")); len(m) != 0 {
+		t.Fatalf("a file was written through the link: %v", m)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "secrets", "JUNK_FILE.age")); err != nil {
+		t.Fatal("the junk file was moved")
+	}
+}
