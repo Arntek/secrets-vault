@@ -4,18 +4,23 @@
 //
 //   - Downloads the release whose version equals this package's version,
 //     over HTTPS only, from GitHub Releases (or a mirror you name).
-//   - Verifies the archive's SHA-256 against checksums.txt from the same
-//     place. Any mismatch, missing entry or error stops the install: it
-//     fails closed and installs nothing.
+//   - Verifies the archive's SHA-256 against the value PINNED INSIDE THIS
+//     npm package (checksums.json, written at publish time from the
+//     release's checksums.txt). The download location, GitHub or a mirror,
+//     is never trusted for the hash, so replacing release assets or running
+//     a mirror cannot get a different program installed. Any mismatch,
+//     missing pin or error stops the install: it fails closed.
 //   - No dependencies, no telemetry, no other network calls.
 //
 // Environment:
 //   SECRETS_VAULT_BINARY_PATH  use this existing program, download nothing
 //                              (also read at run time by the launcher)
-//   SECRETS_VAULT_MIRROR       base location holding the archive and
-//                              checksums.txt: an https:// URL or a local
-//                              folder (an offline mirror). The checksum is
-//                              still verified.
+//   SECRETS_VAULT_MIRROR       base location holding the archive: an
+//                              https:// URL or a local folder (an offline
+//                              mirror). The pinned checksum is still
+//                              verified; checksums.txt is not used.
+//   Both name the program that will receive your passphrases and values:
+//   never take them from an untrusted environment (CI config, .env files).
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -77,13 +82,25 @@ async function fetchFile(base, name) {
   return fs.readFileSync(file);
 }
 
-// checksums.txt lines look like "<64 hex>  <file name>".
-function expectedHash(text, name) {
-  for (const line of text.split(/\r?\n/)) {
-    const m = /^([0-9a-fA-F]{64})[ \t]+\*?(.+?)\s*$/.exec(line);
-    if (m && m[2] === name) return m[1].toLowerCase();
+// The pinned hashes shipped in this package: { version, archives: {name: sha256} }.
+function loadPins(root) {
+  let j;
+  try {
+    j = JSON.parse(fs.readFileSync(path.join(root, 'checksums.json'), 'utf8'));
+  } catch {
+    throw fail('this package has no pinned checksums (checksums.json); install it from the npm registry');
   }
-  return null;
+  if (!j || typeof j !== 'object' || typeof j.version !== 'string' || !j.archives || typeof j.archives !== 'object') {
+    throw fail('checksums.json is malformed');
+  }
+  return j;
+}
+
+function pinnedHash(pins, version, name) {
+  if (pins.version !== version) throw fail(`pinned checksums are for ${pins.version}, not ${version}`);
+  const h = Object.prototype.hasOwnProperty.call(pins.archives, name) ? pins.archives[name] : undefined;
+  if (typeof h !== 'string' || !/^[0-9a-fA-F]{64}$/.test(h)) throw fail(`no pinned checksum for ${name}`);
+  return h.toLowerCase();
 }
 
 async function install(opts = {}) {
@@ -104,12 +121,10 @@ async function install(opts = {}) {
     throw fail(`this package has no release version (${version}); install it from the npm registry`);
   }
   const name = archiveName(version, t);
+  const want = pinnedHash(opts.pins || loadPins(root), version, name); // before any download
   const base = env.SECRETS_VAULT_MIRROR || `${DEFAULT_BASE}/v${version}`;
   log(`secrets-vault: fetching ${name}`);
 
-  const sums = (await fetchFile(base, 'checksums.txt')).toString('utf8');
-  const want = expectedHash(sums, name);
-  if (!want) throw fail(`checksums.txt has no entry for ${name}`);
   const archive = await fetchFile(base, name);
   const got = crypto.createHash('sha256').update(archive).digest('hex');
   if (got !== want) throw fail(`checksum mismatch for ${name}: refusing to install`);
@@ -137,4 +152,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { install, expectedHash, get };
+module.exports = { install, loadPins, pinnedHash, get };

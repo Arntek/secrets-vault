@@ -11,7 +11,7 @@
 // Prefer `secrets-vault run -k NAME -- your-command` when you can: then the
 // script never holds the value. Use this when it must.
 
-const { execFile, execFileSync } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -30,35 +30,47 @@ class SecretsVaultNotInstalledError extends SecretsVaultError {}
 const EXE = 'secrets-vault';
 const MAX_STDERR = 500;
 const MAX_VALUE = 2 * 1024 * 1024;
+const NOT_INSTALLED = 'the secrets-vault program was not found; install it (brew or npm install -g secrets-vault) or set SECRETS_VAULT_BINARY_PATH';
 
 function badName(s) {
   return typeof s !== 'string' || s === '' || s.startsWith('-') || /[\0\r\n]/.test(s);
 }
 
-// Finds the real program. npm's Windows shim is a .cmd that execFile cannot
-// run, so look for the .exe it wraps.
-function findExecutable(opts = {}, env = process.env) {
+// Finds the real program. npm's Windows shim is a .cmd that cannot be run
+// without a shell, so look for the .exe it wraps. On Windows the result is
+// always an absolute path found on PATH (absolute entries only, never the
+// current folder) or the npm global folder; a bare name would let
+// CreateProcess pick up a secrets-vault.exe lying in the current folder.
+function findExecutable(opts = {}, env = process.env, platform = process.platform) {
   if (opts.executable) return opts.executable;
   if (env.SECRETS_VAULT_BINARY_PATH) return env.SECRETS_VAULT_BINARY_PATH;
-  try {
-    const { target, vendorPath } = require(require.resolve('secrets-vault/lib/platform.js'));
-    const p = vendorPath(target(), path.dirname(require.resolve('secrets-vault/package.json')));
-    if (fs.existsSync(p)) return p;
-  } catch {
-    // secrets-vault is not an npm dependency here; use PATH.
-  }
-  if (process.platform === 'win32') {
-    for (const d of (env.PATH || '').split(path.delimiter)) {
-      const p = path.join(d, `${EXE}.exe`);
-      if (d && fs.existsSync(p)) return p;
-    }
-    if (env.APPDATA) {
-      const p = path.join(env.APPDATA, 'npm', 'node_modules', 'secrets-vault', 'vendor', `${EXE}.exe`);
+  if (platform !== 'win32') {
+    try {
+      const { target, vendorPath } = require(require.resolve('secrets-vault/lib/platform.js'));
+      const p = vendorPath(target(), path.dirname(require.resolve('secrets-vault/package.json')));
       if (fs.existsSync(p)) return p;
+    } catch {
+      // secrets-vault is not an npm dependency here; use PATH.
     }
-    return `${EXE}.exe`;
+    return EXE;
   }
-  return EXE;
+  try {
+    const { vendorPath, target } = require(require.resolve('secrets-vault/lib/platform.js'));
+    const p = vendorPath(target(), path.dirname(require.resolve('secrets-vault/package.json')));
+    if (path.win32.isAbsolute(p) && fs.existsSync(p)) return p;
+  } catch {
+    // not an npm dependency here
+  }
+  for (const d of (env.PATH || '').split(';')) {
+    if (!d || !path.win32.isAbsolute(d)) continue; // "" and "." mean the current folder
+    const p = path.win32.join(d, `${EXE}.exe`);
+    if (fs.existsSync(p)) return p;
+  }
+  if (env.APPDATA && path.win32.isAbsolute(env.APPDATA)) {
+    const p = path.win32.join(env.APPDATA, 'npm', 'node_modules', 'secrets-vault', 'vendor', `${EXE}.exe`);
+    if (fs.existsSync(p)) return p;
+  }
+  throw new SecretsVaultNotInstalledError(NOT_INSTALLED);
 }
 
 function buildArgs(name, opts) {
@@ -73,9 +85,7 @@ function buildArgs(name, opts) {
 function mapFailure(name, opts, code, stderr, spawnCode, timedOut) {
   if (timedOut) return new SecretsVaultError('secrets-vault timed out');
   if (spawnCode === 'ENOENT') {
-    return new SecretsVaultNotInstalledError(
-      'the secrets-vault program was not found; install it (brew or npm install -g secrets-vault) or set SECRETS_VAULT_BINARY_PATH'
-    );
+    return new SecretsVaultNotInstalledError(NOT_INSTALLED);
   }
   if (typeof code !== 'number') return new SecretsVaultError(`could not run secrets-vault (${spawnCode || 'error'})`);
   const detail = String(stderr || '').replace(/\r/g, '').trim().slice(0, MAX_STDERR);
@@ -93,39 +103,60 @@ function execOptions(opts) {
 
 // getSecret(name, { vault, executable, timeout (ms), interactive }) -> Promise<string>
 // interactive: false (default) never prompts, so a locked vault rejects with
-// VaultLockedError. true lets the program ask for the passphrase on the
-// terminal (its prompt goes to stderr, which is then passed through).
+// VaultLockedError. true gives the program your terminal (stdin and stderr
+// are inherited, so it can show its prompt and read the passphrase); only
+// stdout, the value, is captured.
 function getSecret(name, opts = {}) {
   return new Promise((resolve, reject) => {
     let args;
-    try { args = buildArgs(name, opts); } catch (e) { return reject(e); }
-    let piped = false;
-    const child = execFile(findExecutable(opts), args, { ...execOptions(opts) }, (err, stdout, stderr) => {
-      if (piped) { process.stdin.unpipe(child.stdin); process.stdin.pause(); }
-      if (!err) {
+    let exe;
+    try {
+      args = buildArgs(name, opts);
+      exe = findExecutable(opts);
+    } catch (e) {
+      return reject(e);
+    }
+    const interactive = Boolean(opts.interactive);
+    const child = spawn(exe, args, {
+      stdio: interactive ? ['inherit', 'pipe', 'inherit'] : ['ignore', 'pipe', 'pipe'],
+      windowsHide: !interactive,
+      shell: false,
+    });
+    const out = [];
+    const err = [];
+    let outLen = 0;
+    let timedOut = false;
+    let overflow = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, opts.timeout ?? 60000);
+    child.stdout.on('data', (c) => {
+      outLen += c.length;
+      if (outLen > MAX_VALUE) { overflow = true; child.kill(); return; }
+      out.push(c);
+    });
+    if (child.stderr) child.stderr.on('data', (c) => { if (err.length < 64) err.push(c); });
+    child.on('error', (e) => { clearTimeout(timer); reject(mapFailure(name, opts, null, '', e.code, false)); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) return reject(mapFailure(name, opts, null, '', null, true));
+      if (overflow) return reject(new SecretsVaultError('the value is larger than expected'));
+      if (code === 0) {
         try {
-          return resolve(new TextDecoder('utf-8', { fatal: true }).decode(stdout));
+          return resolve(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(out)));
         } catch {
           return reject(new SecretsVaultError(`the value of key '${name}' is not valid UTF-8 text`, 0));
         }
       }
-      reject(mapFailure(name, opts, typeof err.code === 'number' ? err.code : null, stderr && stderr.toString('utf8'), err.code, err.killed && err.signal));
+      reject(mapFailure(name, opts, code, Buffer.concat(err).toString('utf8'), null, false));
     });
-    if (opts.interactive) {
-      // Let the program read the passphrase from the terminal and show its prompt.
-      if (process.stdin.isTTY) { process.stdin.pipe(child.stdin); piped = true; }
-      child.stderr.pipe(process.stderr);
-    } else {
-      child.stdin.end();
-    }
   });
 }
 
 // Same, blocking. Not interactive.
 function getSecretSync(name, opts = {}) {
   const args = buildArgs(name, opts);
+  const exe = findExecutable(opts);
   try {
-    const out = execFileSync(findExecutable(opts), args, { ...execOptions(opts), stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = execFileSync(exe, args, { ...execOptions(opts), stdio: ['ignore', 'pipe', 'pipe'] });
     try {
       return new TextDecoder('utf-8', { fatal: true }).decode(out);
     } catch {
@@ -138,6 +169,7 @@ function getSecretSync(name, opts = {}) {
 }
 
 module.exports = {
+  findExecutable,
   getSecret,
   getSecretSync,
   SecretsVaultError,

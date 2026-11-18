@@ -18,18 +18,32 @@
   },
   "scripts": {
     "postinstall": "node lib/install.js",
-    "test": "node --test test/install.test.js test/launch.test.js"
+    "test": "node --test test/install.test.js test/launch.test.js test/pin.test.js"
   },
   "files": [
     "bin/",
     "lib/",
+    "checksums.json",
     "README.md",
     "LICENSE"
   ],
   "engines": {
     "node": ">=18"
   },
-  "os": ["darwin", "linux", "win32"],
-  "cpu": ["x64", "arm64"],
-  "keywords": ["secrets", "vault", "cli", "api-keys", "touch-id"]
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "keywords": [
+    "secrets",
+    "vault",
+    "cli",
+    "api-keys",
+    "touch-id"
+  ]
 }

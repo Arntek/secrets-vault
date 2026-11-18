@@ -12,6 +12,7 @@ Prefer ``secrets-vault run -k NAME -- your-command`` when you can: then the
 script never holds the value at all. Use this helper when it must.
 """
 
+import ntpath
 import os
 import shutil
 import subprocess
@@ -54,25 +55,37 @@ class SecretsVaultNotInstalledError(SecretsVaultError):
     """The secrets-vault program could not be found."""
 
 
-def _find_executable(executable=None):
+_NOT_INSTALLED = (
+    "the secrets-vault program was not found; install it (brew or npm install -g secrets-vault) "
+    "or set SECRETS_VAULT_BINARY_PATH"
+)
+
+
+def _find_executable(executable=None, env=None, os_name=None):
+    env = os.environ if env is None else env
+    os_name = os.name if os_name is None else os_name
     if executable:
         return executable
-    override = os.environ.get("SECRETS_VAULT_BINARY_PATH")
+    override = env.get("SECRETS_VAULT_BINARY_PATH")
     if override:
         return override
-    if os.name == "nt":
+    if os_name == "nt":
         # npm installs a .cmd shim that cannot be run without a shell; the
-        # real program is the .exe next to it.
-        for d in os.environ.get("PATH", "").split(os.pathsep):
-            p = os.path.join(d, _EXE + ".exe")
-            if d and os.path.isfile(p):
-                return p
-        appdata = os.environ.get("APPDATA")
-        if appdata:
-            p = os.path.join(appdata, "npm", "node_modules", "secrets-vault", "vendor", _EXE + ".exe")
+        # real program is the .exe. Always return an absolute path found on
+        # PATH (absolute entries only) or in npm's global folder, never a
+        # bare name: CreateProcess would look in the current folder first and
+        # could run a secrets-vault.exe planted there.
+        for d in env.get("PATH", "").split(";"):
+            if d and ntpath.isabs(d):
+                p = ntpath.join(d, _EXE + ".exe")
+                if os.path.isfile(p):
+                    return p
+        appdata = env.get("APPDATA")
+        if appdata and ntpath.isabs(appdata):
+            p = ntpath.join(appdata, "npm", "node_modules", "secrets-vault", "vendor", _EXE + ".exe")
             if os.path.isfile(p):
                 return p
-        return _EXE + ".exe"
+        raise SecretsVaultNotInstalledError(_NOT_INSTALLED)
     return shutil.which(_EXE) or _EXE
 
 
@@ -96,7 +109,7 @@ def get_secret(name, vault=None, *, executable=None, timeout=60, interactive=Fal
     if vault is not None and (not isinstance(vault, str) or not vault or vault.startswith("-") or any(c in vault for c in "\0\r\n")):
         raise ValueError("invalid vault name")
 
-    exe = _find_executable(executable)
+    exe = _find_executable(executable)  # raises SecretsVaultNotInstalledError
     # -n: no trailing newline, so the value comes back exactly as stored.
     cmd = [exe, "get", name, "-n"]
     if vault is not None:
@@ -113,10 +126,7 @@ def get_secret(name, vault=None, *, executable=None, timeout=60, interactive=Fal
     try:
         proc = subprocess.run(cmd, timeout=timeout, check=False, **kwargs)  # noqa: S603 - no shell, fixed argv
     except FileNotFoundError:
-        raise SecretsVaultNotInstalledError(
-            "the secrets-vault program was not found; install it (brew or npm install -g secrets-vault) "
-            "or set SECRETS_VAULT_BINARY_PATH"
-        ) from None
+        raise SecretsVaultNotInstalledError(_NOT_INSTALLED) from None
     except subprocess.TimeoutExpired:
         raise SecretsVaultError("secrets-vault timed out") from None
     except OSError as e:

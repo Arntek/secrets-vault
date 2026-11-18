@@ -51,7 +51,7 @@ TAGFLAG := $(if $(strip $(TAGS)),-tags '$(strip $(TAGS))')
 TOOLBIN := $(shell $(GO) env GOPATH)/bin
 tool = $(or $(shell command -v $(1) 2>/dev/null),$(TOOLBIN)/$(1))
 
-.PHONY: all build snapshot cross test-packaging touchid-lib touchid-manual test test-short lint fmt fmt-check vet staticcheck gosec vulncheck gitleaks actionlint fuzz tools clean
+.PHONY: all build snapshot cross test-packaging npm-pin touchid-lib touchid-manual test test-short lint fmt fmt-check vet staticcheck gosec vulncheck gitleaks actionlint fuzz tools clean
 
 all: lint test build
 
@@ -69,6 +69,13 @@ test-packaging:
 	cd packaging/npm && npm test
 	cd helpers/node && npm test
 	python3 -I -m unittest discover -s helpers/python -p "test_*.py"
+
+# Pin the release archives' SHA-256 values into the npm package before
+# publishing (the npm-publish job does the same):
+#   make npm-pin PIN_VERSION=0.1.0 CHECKSUMS=dist/checksums.txt
+npm-pin:
+	@test -n "$(PIN_VERSION)" -a -n "$(CHECKSUMS)" || { echo "usage: make npm-pin PIN_VERSION=0.1.0 CHECKSUMS=dist/checksums.txt"; exit 2; }
+	node scripts/npm-pin-checksums.js "$(PIN_VERSION)" "$(CHECKSUMS)"
 
 # Local dry run of the release build (no upload). macOS only; needs goreleaser.
 snapshot:

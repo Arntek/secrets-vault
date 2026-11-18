@@ -92,6 +92,31 @@ class GetSecret(unittest.TestCase):
         self.assertNotIn("377", str(cm.exception))
 
 
+class WindowsLookup(unittest.TestCase):
+    def test_never_a_bare_name_or_the_current_folder(self):
+        d = tempfile.mkdtemp(prefix="svpy-win-")
+        with open(os.path.join(d, "secrets-vault.exe"), "w") as f:
+            f.write("x")
+        old = os.getcwd()
+        os.chdir(d)  # a secrets-vault.exe sits in the current folder
+        try:
+            for path in ["", ".", ";;", "relative\\dir;.", "C:\\definitely\\not\\here"]:
+                with self.assertRaises(sv.SecretsVaultNotInstalledError, msg=path):
+                    sv._find_executable(None, {"PATH": path}, "nt")
+            self.assertEqual(sv._find_executable("X:\\mine.exe", {}, "nt"), "X:\\mine.exe")
+            self.assertEqual(sv._find_executable(None, {"SECRETS_VAULT_BINARY_PATH": "X:\\e.exe"}, "nt"), "X:\\e.exe")
+        finally:
+            os.chdir(old)
+
+    @unittest.skipUnless(os.name == "nt", "needs real Windows paths")
+    def test_finds_absolute_path_entry(self):
+        d = tempfile.mkdtemp(prefix="svpy-win-")
+        p = os.path.join(d, "secrets-vault.exe")
+        with open(p, "w") as f:
+            f.write("x")
+        self.assertEqual(sv._find_executable(None, {"PATH": ".;" + d}, "nt"), p)
+
+
 class Validation(unittest.TestCase):
     def test_bad_names_rejected_before_running_anything(self):
         for bad in ["", "-x", "a\nb", "a\0b", None, 5]:

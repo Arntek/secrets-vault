@@ -67,7 +67,7 @@ npm (macOS, Linux, Windows):
 npm install -g secrets-vault
 ```
 
-The npm package contains no program of its own: on install it downloads the build for your machine from the GitHub Release with the same version, over HTTPS only, and checks its SHA-256 against the release's `checksums.txt` (any mismatch stops the install). No telemetry. For offline or corporate installs see [packaging/npm/README.md](packaging/npm/README.md) (`SECRETS_VAULT_MIRROR`, `SECRETS_VAULT_BINARY_PATH`).
+The npm package contains no program of its own: on install it downloads the build for your machine from the GitHub Release with the same version, over HTTPS only, and checks its SHA-256 against a hash pinned inside the npm package (any mismatch stops the install). No telemetry. For offline or corporate installs see [packaging/npm/README.md](packaging/npm/README.md) (`SECRETS_VAULT_MIRROR`, `SECRETS_VAULT_BINARY_PATH`).
 
 **Windows** builds are passphrase-only for now: there is no unlock agent, so each command that needs a key asks for the passphrase (or exits with code `3` when there is no console to ask on), and there is no Touch ID or Windows Hello yet. The config lives in `%LOCALAPPDATA%\vault`. File permissions work differently there: the program does not check Windows folder permissions (ACLs), so keep your config folder and any vault folder in places only you (and the people you share with) can read. Folders under your user profile are private by default.
 
