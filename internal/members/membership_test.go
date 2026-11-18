@@ -975,3 +975,23 @@ func TestClassifyOwnerOnlyHistory(t *testing.T) {
 		}
 	}
 }
+
+// A folder rolled back to just before this machine's own latest records
+// (nothing in their place) is a rollback, not a lost race, whether or not
+// this machine wrote everything before (ue1.11 follow-up).
+func TestOwnRecordsRolledBackIsRollback(t *testing.T) {
+	alice, bob, carol := newPerson(t, "alice"), newPerson(t, "bob"), newPerson(t, "carol")
+	v := newVault(t, alice)
+	own := []format.LogEntry{v.c.LastEntry()}
+	for _, p := range []*person{bob, carol} {
+		v.join(t, alice, p)
+		own = append(own, v.c.LastEntry())
+	}
+	before := v.c
+	v.remove(t, alice, "carol")
+	for _, pin := range []*Pin{pinOf(v.c, append(own, v.c.LastEntry())...), pinOf(v.c, v.c.LastEntry())} {
+		if got := Classify(before, pin); got.Outcome != Rollback {
+			t.Fatalf("own %d: rolled back to before the removal = %v", len(pin.Own), got.Outcome)
+		}
+	}
+}

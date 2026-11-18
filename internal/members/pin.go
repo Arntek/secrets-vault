@@ -261,6 +261,11 @@ func Classify(c *Chain, pin *Pin) Classification {
 	if len(own) == 0 {
 		return Classification{Outcome: Rollback, Reason: "the pinned state is missing"}
 	}
+	// A real race has another member's record where ours was. If ours are
+	// simply gone (the folder stops at d), it is a rollback, not a race.
+	if n-1 <= d {
+		return Classification{Outcome: Rollback, Reason: "this machine's latest changes are missing from the folder"}
+	}
 	// N1: the winning branch must not be able to weaken our ops. Every
 	// winning record must be signed by someone our ops don't remove, add
 	// no member, and add or replace no passphrase.

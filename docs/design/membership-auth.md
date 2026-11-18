@@ -336,3 +336,4 @@ A member running an outdated build is protected because it refuses newer vaults,
 - **Exit code 5** (ue1.10): any refusal because a vault failed verification exits 5, so a script or agent can't mistake it for "key not found" (4). `list --json` names such vaults with an error.
 - **First pin in `--json`**: `state_code_checked` and `first_pin` (state, signer, members with fingerprints) are part of the JSON result, not only stderr.
 - **`vault doctor --quarantine-staging`** moves a staging folder that can't be used (planted, or for a key the vault never had) to `quarantine/`, after verification; it never deletes.
+- **Lost-race detection** (ue1.11): the divergence point is the newest of this machine's own records that the folder still has (an owner who wrote every record no longer gets a false rollback). A race needs another member's record in place of ours: if our records are simply missing and nothing replaced them, it is a rollback (hard refusal), not a race.
