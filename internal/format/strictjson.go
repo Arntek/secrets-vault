@@ -38,8 +38,6 @@ func decodeStrictMax(data []byte, maxSize int, v any) error {
 }
 
 // checkJSONShape walks the token stream once without decoding values.
-func checkJSONShape(data []byte) error { return checkJSONShapeMax(data, MaxFileSize) }
-
 func checkJSONShapeMax(data []byte, maxSize int) error {
 	if len(data) > maxSize {
 		return fmt.Errorf("%w: larger than %d bytes", ErrTooLarge, maxSize)

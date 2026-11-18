@@ -598,10 +598,9 @@ func TestClassifyRaces(t *testing.T) {
 	// N1: carol (still a member in base) races with an add-member of her
 	// second identity.
 	w, _ := crypto.NewMemberWrapper("mallory", mallory.pub.Recipient)
-	u, _ := w.Wrap(v.key) // any key: structure only
 	m := format.Member{Name: "mallory", Recipient: mallory.pub.Recipient, SignKey: mallory.pub.SignKey, Role: RoleMember}
 	baseKey, _ := openAs(t, snapshot, alice)
-	u, _ = w.Wrap(baseKey)
+	u, _ := w.Wrap(baseKey)
 	evil, err := base.Append(carol.un, Change{Op: format.OpAddMember, Member: &m, KeyID: baseKey.ID(), Unlockers: append(slices.Clone(base.File.Unlockers), u)})
 	if err != nil {
 		t.Fatal(err)

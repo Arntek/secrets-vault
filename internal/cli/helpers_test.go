@@ -288,11 +288,6 @@ func (e *testEnv) initVault(name string) string {
 	return dir
 }
 
-func (e *testEnv) hasIdentity() bool {
-	_, err := os.Stat(filepath.Join(e.home, "config", "identity", "identity.json"))
-	return err == nil
-}
-
 func (e *testEnv) unlock(name string) {
 	e.t.Helper()
 	e.mustRunIn(testPass+"\n", "unlock", name, "--passphrase-stdin")

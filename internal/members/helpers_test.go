@@ -78,15 +78,6 @@ func newVault(t testing.TB, owner *person) *testVault {
 	return &testVault{dir: dir, c: c, key: key}
 }
 
-func (v *testVault) reload(t testing.TB) {
-	t.Helper()
-	c, _, err := Load(v.dir, v.c.File.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v.c = c
-}
-
 // join files p's request and has approver approve it with the right
 // fingerprint.
 func (v *testVault) join(t testing.TB, approver, p *person) {
