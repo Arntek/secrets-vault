@@ -10,7 +10,7 @@ Covers `ue1.1` (planted unlockers) and the findings with the same root cause, th
 |---|---|---|
 | N1 (must-fix) | 8b, 10 | Auto-rebase only when the winning branch can't weaken our ops: every record signed by someone still a member after our ops, no member added, no passphrase added or replaced. Anything else is a hard refusal. A lost rotation's files are re-sealed to the **re-applied rotation's new key**, never the winner's. |
 | S1 | 8 | State code has 66 bits (seq + six words); `--expect` also takes the full head hash. |
-| S2 | 7 | A first pin is never silent: always show head seq, time, signer and members, and recommend `--expect` with the code from another machine. Named in the residual risks. |
+| S2 | 7 | A first pin is never silent: show head seq, time, signer and members, and ask for the state code from another machine (Enter to skip; `--expect` for scripts). Named in the residual risks. |
 | S3 | 10 | Pending rotation keys are deleted on `detach` and on `--accept-rollback`. |
 | M3 note | Migration | "Unlocked via the passphrase" means a fresh passphrase unwrap in this command, never an agent-cached key. |
 | M4 note | 6 | Every write re-reads and re-verifies the exact `vault.json` bytes it replaces (compare-and-swap). |
@@ -164,7 +164,7 @@ Nothing in the vault folder is written, renamed or deleted, and no key is used, 
 
 A machine with no pin for the registered id can't know the history, so a person confirms the first pin:
 
-- **The record that added me was signed by me** (my vault, or my second Mac after `identity import`): no fingerprint question, because nobody else holds my signing key (this includes genesis by me). **But never a silent pin** (S2): a removed member could present the chain cut off before their removal, which still contains my own genesis. So the first pin always prints the head (`team@12, 2026-11-20 10:02, signed by alice`) and the members with fingerprints, and recommends comparing with `vault status` on another member's machine or passing `--expect CODE` (8). With `--expect`, a head that doesn't match or extend the code is refused.
+- **The record that added me was signed by me** (my vault, or my second Mac after `identity import`): no fingerprint question, because nobody else holds my signing key (this includes genesis by me). **But never a silent pin** (S2): a removed member could present the chain cut off before their removal, which still contains my own genesis. So the first pin always prints the head (`team@12, 2026-11-20 10:02, signed by alice`) and the members with fingerprints, then **asks for the state code**: "Type the state code from `vault status` on another member's machine (or press Enter to trust what's shown):". A typed code that the head doesn't match or extend is refused. `--expect CODE` gives it non-interactively. Without a terminal and without `--expect`, the head is printed and pinned (scripts), as the residual risk says.
 - **Added by someone else:** "You were added to 'team' by alice. Type alice's fingerprint as alice reads it to you:" and pin only if it matches exactly (case and separators ignored). `--signer-fingerprint FP` for scripts. `member approve` prints the approver's own fingerprint so they can read it out: the check is mutual.
 - **Passphrase-only user** (not a member): pin on first successful unlock and print the members with fingerprints. Weaker; documented.
 - **Approve** (G4): `member approve` also requires the requester's fingerprint to be **typed**, not y/N. `--fingerprint FP` stays for scripts and agents (accepted risk in the threat model).
@@ -286,7 +286,7 @@ Not touched: `internal/agent`, and the CLI's run/copy/alias code (ue1.3/ue1.5 ar
 
 - The stale-writer gap, exactly as stated under Threat 4.
 - A machine offline across a removal, with no newer pin, can follow a removed member's fork (8c then fires on its next contact with the honest chain).
-- **First pin of a member's own vault on a new Mac** (S2): a removed member can present the chain cut off before their removal, which the new Mac would pin because it contains the owner's own genesis. Mitigated by always showing the head and recommending `--expect`; not prevented without it.
+- **First pin of a member's own vault on a new Mac** (S2): a removed member can present the chain cut off before their removal, which the new Mac would pin because it contains the owner's own genesis. Mitigated by always showing the head and asking for the state code; not prevented if the person skips it.
 - First use is TOFU behind a typed fingerprint; a passphrase-only user has no fingerprint to check.
 - A lost rotation race whose loser never returns leaves that member's moved files unreadable to others (10).
 - Denial of service: any folder writer can corrupt or delete `vault.json`. We fail closed with a clear message; Dropbox/Box version history is the remedy.
