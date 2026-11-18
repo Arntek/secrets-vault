@@ -147,7 +147,7 @@ func cmdDoctor(a *app, p *parsed) error {
 	if a.asJSON {
 		cs := []string{}
 		for _, c := range conflicts {
-			cs = append(cs, c.Path)
+			cs = append(cs, displayName(c.Path))
 		}
 		sort.Strings(unlisted)
 		return a.printJSON(map[string]any{
@@ -166,23 +166,23 @@ func cmdDoctor(a *app, p *parsed) error {
 	}
 	for _, c := range conflicts {
 		if merged, ok := indexCopies[c.Path]; ok && merged {
-			a.printf("Sync conflict copy: %s (its entries are already in the index; safe to delete)\n", c.Path)
+			a.printf("Sync conflict copy: %s (its entries are already in the index; safe to delete)\n", displayName(c.Path))
 			continue
 		}
-		a.printf("Sync conflict copy: %s (resolve it by hand, keeping the right version)\n", c.Path)
+		a.printf("Sync conflict copy: %s (resolve it by hand, keeping the right version)\n", displayName(c.Path))
 	}
 	for _, r := range rows {
 		if r.Moved != "" {
-			a.printf("Key-rotation folder %s: moved aside to %s (nothing deleted)\n", r.KeyID, r.Moved)
+			a.printf("Key-rotation folder %s: moved aside to %s (nothing deleted)\n", displayName(r.KeyID), displayName(r.Moved))
 		} else {
-			a.printf("Key-rotation folder %s: %s\n", r.KeyID, r.Status)
+			a.printf("Key-rotation folder %s: %s\n", displayName(r.KeyID), r.Status)
 		}
 	}
 	for _, pr := range problems {
-		a.printf("Key %s: %s\n", pr.Key, pr.Problem)
+		a.printf("Key %s: %s\n", displayName(pr.Key), pr.Problem)
 	}
 	for _, n := range unlisted {
-		a.printf("File %s has no signed entry in the index, so it is not trusted. If it is yours: %s doctor %s --adopt %s\n", n, a.prog, v.name, n)
+		a.printf("File %s has no signed entry in the index, so it is not trusted. If it is yours: %s doctor %s --adopt %s\n", displayName(n), a.prog, v.name, displayName(n))
 	}
 	if dropped > 0 {
 		a.printf("%s in the index failed verification and are ignored.\n", plural(dropped, "entry"))

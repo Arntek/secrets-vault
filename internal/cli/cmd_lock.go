@@ -274,7 +274,7 @@ func cmdStatus(a *app, p *parsed) error {
 		case r.Removed:
 			note = "you are no longer a member; ask a member to add you again" + sep(note)
 		case r.Expecting != "":
-			note = "waiting for state " + r.Expecting + " (the folder doesn't match it): run 'trust " + r.Vault + " --expect CODE' with the right code, or 'trust " + r.Vault + " --accept-rollback --signer-fingerprint FP'" + sep(note)
+			note = "waiting for state " + r.Expecting + " (the folder doesn't match it): run 'trust " + r.Vault + " --expect CODE' with the right code" + sep(note)
 		}
 		t.row(r.Vault, state, left, code, note)
 	}

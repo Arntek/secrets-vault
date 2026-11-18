@@ -430,12 +430,12 @@ func (a *app) noteRotation(v *vaultRef, skipped *[]string, dropped *int) {
 		}
 		if len(moved) > 0 {
 			a.warnf("warning: %s in '%s' could not be re-sealed (they did not open under the vault key: stale copies from an older key, copies under another name, or damaged files) and %s set aside in quarantine/ in the vault folder, not deleted: %s",
-				plural(len(moved), "file"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], strings.Join(moved, ", "))
+				plural(len(moved), "file"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], displayNames(moved, ", "))
 		}
 		if len(left) > 0 {
 			a.warnf("warning: %s in '%s' could not be opened and %s left as %s (they can't be read): %s",
 				plural(len(left), "file"), v.name, map[bool]string{true: "is", false: "are"}[len(left) == 1],
-				map[bool]string{true: "it was", false: "they were"}[len(left) == 1], strings.Join(left, ", "))
+				map[bool]string{true: "it was", false: "they were"}[len(left) == 1], displayNames(left, ", "))
 		}
 	}
 	if dropped != nil && *dropped > 0 {
@@ -478,7 +478,7 @@ func (a *app) setAsideConflicts(v *vaultRef, key *crypto.VaultKey) error {
 		if c.Kind == format.ConflictSyncCopy && c.Original == format.VaultFileName && v.chain != nil {
 			if vf, raw, err := format.ReadVaultFileCopy(v.dir, c.Path); err == nil {
 				if cc, err := members.Verify(vf, raw, v.chain.File.ID); err == nil && cc.Head().Seq > v.chain.Head().Seq {
-					return verifyErrf("vault '%s': %v. A copy of vault.json (%s) verifies with a newer state", v.name, members.ErrNewerState, c.Path)
+					return verifyErrf("vault '%s': %v. A copy of vault.json (%s) verifies with a newer state", v.name, members.ErrNewerState, displayName(c.Path))
 				}
 			}
 		}
@@ -493,18 +493,19 @@ func (a *app) setAsideConflicts(v *vaultRef, key *crypto.VaultKey) error {
 				}
 			}
 		}
-		to, err := format.QuarantineConflict(v.dir, c.Path, a.now())
+		_, err := format.QuarantineConflict(v.dir, c.Path, a.now())
 		if err != nil {
-			return failf("cannot set aside %s in '%s' before changing the vault key: %v", c.Path, v.name, vaultErr(err))
+			return failf("cannot set aside %s in '%s' before changing the vault key: %v", displayName(c.Path), v.name, vaultErr(err))
 		}
-		moved = append(moved, c.Path+" -> "+to)
+		moved = append(moved, c.Path)
 		a.quarantined = append(a.quarantined, c.Path)
 	}
 	if len(moved) > 0 {
 		a.warnf("warning: %s in '%s' would have blocked the key change and %s set aside in quarantine/conflicts/ (not deleted): %s",
-			plural(len(moved), "unexpected file"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], strings.Join(moved, "; "))
+			plural(len(moved), "unexpected file"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], displayNames(moved, ", "))
 	}
 	for _, p := range review {
+		p = displayName(p)
 		a.warnf("review: %s opens under this vault's key, so a member may have made a real edit in it; compare it with the current key and set the value again if it is newer", p)
 	}
 	return nil
@@ -520,10 +521,10 @@ func (a *app) setAsideBadFolders(v *vaultRef) {
 	moved, failed := format.SetAsideBadDirs(v.dir, a.now())
 	if len(moved) > 0 {
 		a.warnf("warning: %s in '%s' %s not a real folder of yours (a link, or owned by someone else) and %s renamed to quarantine-bad-... in the vault folder, not followed or deleted: %s",
-			plural(len(moved), "folder"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], map[bool]string{true: "was", false: "were"}[len(moved) == 1], strings.Join(moved, ", "))
+			plural(len(moved), "folder"), v.name, map[bool]string{true: "was", false: "were"}[len(moved) == 1], map[bool]string{true: "was", false: "were"}[len(moved) == 1], displayNames(moved, ", "))
 		a.quarantined = append(a.quarantined, moved...)
 	}
 	if len(failed) > 0 {
-		a.warnf("warning: could not move aside %s in '%s'; leaving them: %s", plural(len(failed), "bad folder"), v.name, strings.Join(failed, ", "))
+		a.warnf("warning: could not move aside %s in '%s'; leaving them: %s", plural(len(failed), "bad folder"), v.name, displayNames(failed, ", "))
 	}
 }

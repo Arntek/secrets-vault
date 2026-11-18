@@ -203,8 +203,8 @@ func (a *app) applyExpect(v *vaultRef, code string) (bool, error) {
 func (a *app) expectRefusal(v *vaultRef, c *members.Chain, exp *members.Expectation) error {
 	if exp.Seq < len(c.File.Log) {
 		return verifyErrf("vault '%s' (expected %s%s): that code doesn't match this vault's history at entry %d. It may have been mistyped, or this folder's history differs from the one the code came from. Nothing was read or written. "+
-			"Run '%s trust %s --expect CODE' again with the exact code from the member (it replaces this one), or, if you are sure this folder is right, '%s trust %s --accept-rollback --signer-fingerprint FINGERPRINT'",
-			v.name, c.File.Name, exp, exp.Seq, a.prog, v.name, a.prog, v.name)
+			"Run '%s trust %s --expect CODE' again with the exact code from the member (it replaces this one), or check with the member who gave you the code",
+			v.name, c.File.Name, exp, exp.Seq, a.prog, v.name)
 	}
 	return verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, exp, members.ErrBehindCode)
 }
