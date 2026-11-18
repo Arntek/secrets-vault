@@ -1,10 +1,21 @@
 # Design: authenticated membership (issue ue1.1)
 
-Status: **revision 3, awaiting the Security verdict.** No code yet.
+Status: **revision 4, awaiting the Security verdict** (rev 3: M1-M4 hold; this revision fixes N1 and S1-S3). No code yet.
 
 Covers `ue1.1` (planted unlockers) and the findings with the same root cause, the CLI trusting the shared folder: `ue1.2` (rollback by a removed member), `ue1.4` (recovery before verification, symlinked folders) and `ue1.6` (passphrase survives removal; `passwd` doesn't rotate).
 
-## Changes since revision 2 (37e4d18)
+## Changes in revision 4 (Security review of 002638e)
+
+| Item | Where | Change |
+|---|---|---|
+| N1 (must-fix) | 8b, 10 | Auto-rebase only when the winning branch can't weaken our ops: every record signed by someone still a member after our ops, no member added, no passphrase added or replaced. Anything else is a hard refusal. A lost rotation's files are re-sealed to the **re-applied rotation's new key**, never the winner's. |
+| S1 | 8 | State code has 66 bits (seq + six words); `--expect` also takes the full head hash. |
+| S2 | 7 | A first pin is never silent: always show head seq, time, signer and members, and recommend `--expect` with the code from another machine. Named in the residual risks. |
+| S3 | 10 | Pending rotation keys are deleted on `detach` and on `--accept-rollback`. |
+| M3 note | Migration | "Unlocked via the passphrase" means a fresh passphrase unwrap in this command, never an agent-cached key. |
+| M4 note | 6 | Every write re-reads and re-verifies the exact `vault.json` bytes it replaces (compare-and-swap). |
+
+## Changes in revision 3 (since 37e4d18)
 
 | Item | Where | Change |
 |---|---|---|
@@ -145,7 +156,7 @@ Nothing in the vault folder is written, renamed or deleted, and no key is used, 
 3. Read-only commands (`info`, `list`, `get`, `member list`, `status`) **never write** to the vault folder: no recovery, no purge. The only thing they write is the local pin advance.
 4. Unlock (9) using unlockers of the **verified** head only, then check the key against the verified `key_id`. Only then is the key handed to the agent, which caches it under the registered id.
 5. Then, for writing commands, `crypto.RecoverRotation(dir, key)` (moved from format to crypto so it can use the key). It acts on a staging folder only if its key id is the verified head's `key_id` **and** that key id was introduced by a verified `rotate`/`remove-member` record. Every MANIFEST entry must be a regular file and **open under `key` with its own name** before anything is renamed. Staging folders for any other key id are left alone; `doctor` reports them, and the write guard (Threat 4) treats an unknown one as evidence.
-6. Write guard (Threat 4), then the write.
+6. Write guard (Threat 4), then the write. Every write of `vault.json` is a compare-and-swap: immediately before the rename, re-read the file and require the **exact bytes** that were verified in step 2; if they changed, verify the new file from scratch (step 2 onwards) and rebuild the change on top, or stop.
 
 `format.CommitStaged` keeps the file moves and gains the regular-file and directory checks.
 
@@ -153,7 +164,7 @@ Nothing in the vault folder is written, renamed or deleted, and no key is used, 
 
 A machine with no pin for the registered id can't know the history, so a person confirms the first pin:
 
-- **The record that added me was signed by me** (my vault, or my second Mac after `identity import`): pin silently. Nobody else holds my signing key. This includes genesis by me.
+- **The record that added me was signed by me** (my vault, or my second Mac after `identity import`): no fingerprint question, because nobody else holds my signing key (this includes genesis by me). **But never a silent pin** (S2): a removed member could present the chain cut off before their removal, which still contains my own genesis. So the first pin always prints the head (`team@12, 2026-11-20 10:02, signed by alice`) and the members with fingerprints, and recommends comparing with `vault status` on another member's machine or passing `--expect CODE` (8). With `--expect`, a head that doesn't match or extend the code is refused.
 - **Added by someone else:** "You were added to 'team' by alice. Type alice's fingerprint as alice reads it to you:" and pin only if it matches exactly (case and separators ignored). `--signer-fingerprint FP` for scripts. `member approve` prints the approver's own fingerprint so they can read it out: the check is mutual.
 - **Passphrase-only user** (not a member): pin on first successful unlock and print the members with fingerprints. Weaker; documented.
 - **Approve** (G4): `member approve` also requires the requester's fingerprint to be **typed**, not y/N. `--fingerprint FP` stays for scripts and agents (accepted risk in the threat model).
@@ -164,9 +175,14 @@ A machine with no pin for the registered id can't know the history, so a person 
 When the folder's chain doesn't simply extend the pin, the client classifies it (G2):
 
 - **(a) Extension:** the record at `pin.seq` hashes to `pin.head`. Advance the pin. No prompt.
-- **(b) Lost race:** the chains diverge at some seq d < pin.seq, and **every** pinned record after d is in `own` (written by this machine, never extended by anyone else). That is two honest writers at once, with one sync copy winning. The client verifies the winning branch from d, then **re-applies its own ops on top**, re-signed: an `add-member` still pending, a `remove-member` of someone still present, an unlocker change. Ops that no longer apply are dropped and reported ("dan was already added by bob"). A lost rotation is handled by 10. No prompt; one line of output.
+- **(b) Lost race:** the chains diverge at some seq d < pin.seq, and **every** pinned record after d is in `own` (written by this machine, never extended by anyone else). This is treated as two honest writers at once **only if the winning branch (records after d) cannot weaken our ops** (N1):
+  - every winning record is signed by someone who is **still a member after our own ops are re-applied** (so not anyone our lost ops removed);
+  - no winning record adds a member;
+  - no winning record adds or replaces a passphrase unlocker (`set-unlocker` of a passphrase, or a rotation with `"passphrase": "replaced"`).
+
+  If all three hold, verify the winning branch from d and **re-apply our own ops on top**, re-signed (an `add-member` still pending, a `remove-member` of someone still present, an unlocker change). Ops that no longer apply are dropped and reported ("dan was already added by bob"). A lost rotation is handled by 10. No prompt; one line of output. **If any check fails, it is case (c)**, and the refusal shows both branches. That covers the N1 attack: carol, being removed by alice, signs a race branch adding her second identity. Two honest members happening to change the passphrase and remove someone at the same moment also get (c); that's rare, and safer than guessing.
 - **(c) Anything else:** a lower head seq than the pin, divergence that includes records this machine didn't write, or a chain without the pinned head. **Hard refusal:** "vault.json for 'team' is older than, or different from, what this Mac has already verified. Nothing was read or written. Someone may have restored an old copy of the folder. Check with the other members." There's no flag on normal commands. The separate path is `vault trust team --accept-rollback`. It shows both branches (heads, signers, members, and which members each branch removed), requires typing the fingerprint of the folder branch's head signer, lists every secret that may have been exposed, and then re-pins. The error message doesn't mention it; the docs do.
-- **`vault trust team --expect CODE`** (state code, coordinator (c)): `member rm` and `passwd` print the new head as `team@5 CANDLE-ORBIT-SWIFT` (seq plus three words from the head hash, 33 bits). Another member runs `--expect` with it: if the verified folder head is that state or extends it, the pin moves there; if the folder is behind it or doesn't contain it, a hard refusal. This is the out-of-band signal for members who were offline.
+- **`vault trust team --expect CODE`** (state code, coordinator (c)): `member rm` and `passwd` print the new head as `team@5 CANDLE-ORBIT-SWIFT-MAPLE-RIVER-OTTER`: seq plus **six** BIP-39 words from the head hash (66 bits, S1). At 33 bits an ex-member could grind a matching record of their own in about an hour; 66 bits puts that out of reach. `--expect` also accepts the full hex head hash (`vault status --full`). Another member runs `--expect` with it: if the verified folder head is that state or extends it, the pin moves there; if the folder is behind it or doesn't contain it, a hard refusal. It's also accepted on `attach` and first unlock (7). This is the out-of-band signal for members who were offline.
 - `unlock --accept-key-change` is removed. A key change is either a verified record or a refusal.
 
 ### 9. Touch ID and the unlock chain
@@ -184,7 +200,9 @@ Two members rotating at once (`member rm`, `passwd`) produce two rotation record
 
 - **Lease:** before rotating, write `secrets/.sv-rotate.lease` (signed by the rotator: `vault_id`, base seq, new key id, time). If a valid lease by someone else, under 15 minutes old, exists for the current head, refuse: "bob started changing the vault key at 10:02; try again shortly". It's removed after the moves. It's advisory, so it narrows the race but can't close it.
 - **Re-check before moving:** after writing `vault.json`, re-read it; if our record is no longer the head's ancestor, don't move files.
-- **Loser re-encrypts:** until its rotation is seen extended in the verified chain, the rotator keeps its new key in `~/.config/vault/pending/<vault id>-<key id>.age`, age-encrypted to its **own identity recipient** (same protection as the identity; deleted once confirmed). When a lost race is detected (8b), the client unlocks the winner's key (it's a member of the winning state, so it can) and re-seals every file sealed under its own losing key to the winner's key. Then it re-applies its op (for `member rm`: a new rotation removing that person, if they're still present).
+- **Loser re-encrypts:** until its rotation is seen extended in the verified chain, the rotator keeps its new key in `~/.config/vault/pending/<vault id>-<key id>.age`, age-encrypted to its **own identity recipient** (same protection as the identity; deleted once confirmed, and also deleted on `detach` and on `vault trust --accept-rollback`, S3). A lost race (8b, only when the winning branch passed the N1 checks) is resolved like this:
+  - If our lost op was a rotation (`member rm`, `passwd`), we re-apply it as a **new** rotation on top of the winning head, with a fresh key K4 wrapped for the head's members after our op. Files the winner sealed are re-encrypted from the winner's key to K4 by that rotation as usual. Files we moved under our losing key K3 are re-sealed **from K3 straight to K4, never to the winner's key** (N1). The winner's key can be held by people our removal was meant to cut off, so nothing of ours is ever sealed to it.
+  - If our lost op wasn't a rotation, there are no files under a key of ours to fix.
 - If a member whose rotation lost never comes back, its moved files stay sealed under a key only it held. `doctor` and the write guard report them by name; recovery is that member's machine. Documented.
 
 ### 11. Passphrase unlocker on removal and `passwd` (`ue1.6`)
@@ -239,7 +257,7 @@ Rejected: a commitment in the rotation the old key can't forge (carol deletes th
 - **Personal v1 vault** (no member unlockers). Upgraded on first unlock **only if all of these hold**:
   - no v2 pin exists for the registered id;
   - the v1 `key_id` equals the registry's legacy `key_id` pin, if one exists;
-  - the vault was unlocked with the **v1 passphrase unlocker**, never a v1 Touch ID unlocker. A folder writer can wrap a key to this Mac's public Secure Enclave key but can't produce a passphrase unlocker the user opens.
+  - the vault was unlocked with a **fresh unwrap of the v1 passphrase unlocker in this command**, never a v1 Touch ID unlocker and never a key cached in the agent. A folder writer can wrap a key to this Mac's public Secure Enclave key but can't produce a passphrase unlocker the user opens.
 
   The upgrade writes a genesis signed by the user's identity (created first if needed), keeps the passphrase unlocker, replaces v1 Touch ID unlockers with a member unlocker (Touch ID now lives on the identity), and pins. If any check fails, refuse: "this folder holds an older vault format than this Mac has seen: possible downgrade".
 - **Shared v1 vault** (has member unlockers): refused outright, "made by a pre-release build; create a new vault and share it again". No `member reset`.
@@ -268,6 +286,7 @@ Not touched: `internal/agent`, and the CLI's run/copy/alias code (ue1.3/ue1.5 ar
 
 - The stale-writer gap, exactly as stated under Threat 4.
 - A machine offline across a removal, with no newer pin, can follow a removed member's fork (8c then fires on its next contact with the honest chain).
+- **First pin of a member's own vault on a new Mac** (S2): a removed member can present the chain cut off before their removal, which the new Mac would pin because it contains the owner's own genesis. Mitigated by always showing the head and recommending `--expect`; not prevented without it.
 - First use is TOFU behind a typed fingerprint; a passphrase-only user has no fingerprint to check.
 - A lost rotation race whose loser never returns leaves that member's moved files unreadable to others (10).
 - Denial of service: any folder writer can corrupt or delete `vault.json`. We fail closed with a clear message; Dropbox/Box version history is the remedy.
@@ -281,7 +300,7 @@ Not touched: `internal/agent`, and the CLI's run/copy/alias code (ue1.3/ue1.5 ar
   - 6 is poc3 plus symlinked `secrets/`, `.trash`, `requests/` and staging;
   - 7: the old passphrase opens nothing after `member rm` or `passwd`, `--keep-passphrase` is recorded, a forged `passphrase` field fails.
 - **M1:** fresh-id substitution of a pinned vault. **M2:** an attacker genesis "adding" the victim, on a second Mac with an imported identity. **M3:** v1 downgrade of a pinned v2 vault; v1 opened via Touch ID is not migrated. **M4:** a planted staging folder for an unverified key id is never touched, and the agent never receives a key before verification.
-- **G1:** an entry with a `mac` field, or extra auth fields, is malformed. **G2:** extension (no prompt), lost race (auto-rebase, including a dropped op), rollback (hard refusal), `--accept-rollback` requires the typed fingerprint. **G3:** record 4097 is refused. **G4:** a mistyped fingerprint fails. **G6:** a concurrent rotation is resolved without data loss, the lease refuses, and rotation can't proceed without the folder-access confirmation. **G7:** wrong `vault_id` in a request; re-adding a removed key needs `--readd`.
+- **G1:** an entry with a `mac` field, or extra auth fields, is malformed. **N1:** a removal race where the winning branch adds a member signed by the removed person → hard refusal, and nothing is re-sealed to the winning key; an honest lost rotation is re-sealed from K3 to the re-applied key K4. **S1:** the state code has 66 bits, and a full-hash `--expect` works. **S2:** the first pin of one's own vault prints the head, and `--expect` on attach refuses a cut-off chain. **S3:** pending keys are removed on `detach` and `--accept-rollback`. **M4 CAS:** `vault.json` changed between verify and write → no write. **G2:** extension (no prompt), lost race (auto-rebase, including a dropped op), rollback (hard refusal), `--accept-rollback` requires the typed fingerprint. **G3:** record 4097 is refused. **G4:** a mistyped fingerprint fails. **G6:** a concurrent rotation is resolved without data loss, the lease refuses, and rotation can't proceed without the folder-access confirmation. **G7:** wrong `vault_id` in a request; re-adding a removed key needs `--readd`.
 - Touch ID survives `member rm` on a second identity unlocker (fake wrapper).
 - Fuzz targets: record body, log entry, pin file, request v2, identity v2, both digests, lease file.
 - Leak tests over approve/rm/trust/passwd/rebuild with canaries; the existing suites; `make lint`, `make fuzz FUZZTIME=10s`, linux/windows `CGO_ENABLED=0` builds.
