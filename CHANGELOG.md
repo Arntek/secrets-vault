@@ -28,7 +28,7 @@ Phase 2: agents, the terminal UI, an authenticated index, npm and Windows.
 - `make snapshot` builds print the snapshot version the Homebrew formula expects (zjv).
 - `help` gives `ui` and `log` their own headings; "entries" plural; `audit.log` is made private again if its permissions were widened.
 
-- The v0.1.0 known limitation is fixed: a file planted in a shared folder no longer stops `vault member rm` or `vault passwd` from completing (unexpected files are set aside into `quarantine/`, never deleted). A folder writer can still stall changes to a shared vault: it refuses rather than guesses. `vault doctor VAULT` explains why, and `vault doctor VAULT --set-aside-unknown --expect CODE` clears the stall, but only if this Mac's folder is at or past the state code of a member you know is current (not someone being removed), which also proves your copy is current. A removed member who keeps access to the folder can still restore an old copy, so remove folder access before `member rm`.
+- The v0.1.0 known limitation is fixed: a file planted in a shared folder no longer stops `vault member rm` or `vault passwd` from completing (unexpected files are set aside into `quarantine/`, never deleted). A folder writer can still stall changes to a shared vault: it refuses rather than guesses. `vault doctor VAULT` explains why. `vault doctor VAULT --set-aside-unknown` clears the stall only at a terminal, after you type the current state code that a member you know is current reads to you (not someone being removed, not this Mac), and only if this Mac's folder is at or past it; there is no scripted way. A removed member who keeps access to the folder can still restore an old copy, so remove folder access before `member rm`.
 
 ### Security
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
@@ -23,7 +24,7 @@ import (
 // folder. Nothing is deleted (ue1.10). With --adopt NAME it gives a file
 // that has no signed entry one, after showing it and asking.
 func cmdDoctor(a *app, p *parsed) error {
-	if err := p.wantArgs(1, 1, a.prog+" doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown --expect CODE] [--yes]"); err != nil {
+	if err := p.wantArgs(1, 1, a.prog+" doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown] [--yes]"); err != nil {
 		return err
 	}
 	v, err := a.vault(p.args[0])
@@ -322,17 +323,16 @@ func (a *app) explainGuard(v *vaultRef, g *members.FolderReport) {
 	case g.NewerCopy:
 		a.printf("A newer verified vault.json is real evidence and cannot be set aside. Let the folder finish syncing, then run: %s trust %s\n", a.prog, v.name)
 	default:
-		a.printf("Was anyone removed from this vault recently, or did anyone change its key? Ask another member you know is current (for example whoever last removed or added someone, not someone who might have been removed) for the vault's current state code ('%s status' on their machine). A folder that someone restored from an old copy is behind that code, and then these items may be real.\n", a.prog)
-		a.printf("If the folder matches the code and the items are junk, set them aside (moved to quarantine/, never deleted): %s doctor %s --set-aside-unknown --expect CODE\n", a.prog, v.name)
+		a.printf("Was anyone removed from this vault recently, or did anyone change its key? A folder that someone restored from an old copy hides exactly that. A person at a terminal can set these items aside (moved to quarantine/, never deleted) with: %s doctor %s --set-aside-unknown. It asks for the current state code, which a member you know is current reads to you from their Mac.\n", a.prog, v.name)
 	}
 }
 
 // setAsideUnknown moves the items the write guard cannot account for into
-// quarantine/ (a rename, never a delete, never following a link). It needs
-// --expect CODE, a current member's state code, and proceeds only if this
-// Mac's verified folder equals or extends it: that is what shows the copy is
-// current (a typed "I checked" proves nothing). It also refuses when a newer
-// verified vault.json exists. The action goes in the audit log.
+// quarantine/ (a rename, never a delete, never following a link). It needs a
+// person at a terminal to type the current state code another member reads
+// out, and proceeds only if this Mac's verified folder equals or extends it.
+// It also refuses when a newer verified vault.json exists. The action goes in
+// the audit log.
 func (a *app) setAsideUnknown(v *vaultRef, p *parsed, g *members.FolderReport) error {
 	if !g.Blocking() {
 		a.printf("Nothing to set aside: the write guard has no complaint about '%s'.\n", v.name)
@@ -341,18 +341,26 @@ func (a *app) setAsideUnknown(v *vaultRef, p *parsed, g *members.FolderReport) e
 	if g.NewerCopy {
 		return verifyErrf("vault '%s' has a newer verified copy of vault.json, which is real evidence of another member's change and is not set aside. Let the folder finish syncing, then run: %s trust %s", v.name, a.prog, v.name)
 	}
-	// The check that makes this safe: the current state code from a member,
-	// which this Mac's verified copy of the folder must equal or extend. A
-	// folder that is behind it has a newer change somewhere (or was rolled
-	// back), and then the items may be real.
-	if a.expectCode == "" {
-		return usageErrf("ask a vault member for the current state code, then see '%s doctor --help'", a.prog)
+	// A person at a terminal types the current state code that another
+	// member reads to them. It is typed at a prompt, never a flag, and there
+	// is no non-interactive path: a Mac that missed a removal would supply
+	// its own (stale) code, and an unattended agent could do the same.
+	if !a.term.StdinTTY() {
+		return usageErrf("setting these aside needs a person at a terminal")
 	}
-	exp, err := a.parseCodeFor(v, v.chain, a.expectCode)
+	c := v.chain
+	a.infof("Vault '%s' on this Mac is at %s. Members:", v.name, headLine(c))
+	a.printMembers(c)
+	a.infof("Warning: a file sealed under an unknown key is exactly what a removal you have not seen yet looks like. Do not take the code from this Mac or from someone who might have been removed.")
+	line, err := a.ask("Type the state code another member reads to you from their Mac ('status' there), a member you know is current: ")
+	if err != nil {
+		return failf("no code given; nothing was set aside")
+	}
+	exp, err := a.parseCodeFor(v, c, strings.TrimSpace(line))
 	if err != nil {
 		return err
 	}
-	if !exp.Met(v.chain) {
+	if !exp.Met(c) {
 		return verifyErrf("vault '%s' is behind that state code: a newer change exists that this Mac has not got (or the folder was restored from an old copy). Nothing was set aside. Let the folder sync, or check with the member who gave you the code, then try again", v.name)
 	}
 	moved := 0

@@ -47,7 +47,7 @@ func TestDoctorExplainsAndSetsAsideUnknownItems(t *testing.T) {
 	// doctor explains: which items, why, and the two possible causes.
 	d := e.mustRun("doctor", "team").out
 	for _, want := range []string{"refuses changes", "PLANTED_KEY", "a key-rotation folder for a key this vault's history never had",
-		"another member's newer change", "planted", "--set-aside-unknown", "state code", "--expect CODE"} {
+		"another member's newer change", "planted", "--set-aside-unknown", "state code"} {
 		if !strings.Contains(d, want) {
 			t.Fatalf("doctor lacks %q:\n%s", want, d)
 		}
@@ -61,30 +61,40 @@ func TestDoctorExplainsAndSetsAsideUnknownItems(t *testing.T) {
 	}
 
 	code := decodeJSON[map[string]any](t, e.mustRun("trust", "team", "--json").out)["state_code"].(string)
-	// No state code: refused. The refusal does not hand out a bypass.
-	r = e.run("doctor", "team", "--set-aside-unknown")
-	expectCode(t, r, ExitUsage)
-	if !strings.Contains(r.err, "ask a vault member for the current state code") || !strings.Contains(r.err, "doctor --help") || strings.Contains(r.err, "yes") {
-		t.Fatalf("%s", r)
+	// No terminal (an agent, a script): refused, with no hint of how to get
+	// past it, whatever flags are given.
+	for _, args := range [][]string{{"doctor", "team", "--set-aside-unknown"}, {"doctor", "team", "--set-aside-unknown", "--expect", code}} {
+		r = e.run(args...)
+		expectCode(t, r, ExitUsage)
+		if !strings.Contains(r.err, "needs a person at a terminal") || strings.Contains(r.err, "--expect") || strings.Contains(r.err, "status") {
+			t.Fatalf("%v: %s", args, r)
+		}
 	}
-	// The removed "I checked" paths are gone.
-	expectCode(t, e.run("doctor", "team", "--set-aside-unknown", "--yes-checked-with-members", "--expect", code), ExitUsage)
+	if _, err := os.Stat(filepath.Join(dir, "secrets", "PLANTED_KEY.age")); err != nil {
+		t.Fatal("the file moved without a person at a terminal")
+	}
+	atTerminal := func(typed string) result {
+		e.term.stdinTTY = true
+		defer func() { e.term.stdinTTY = false }()
+		return e.runIn(typed+"\n", "doctor", "team", "--set-aside-unknown")
+	}
 	// A code the folder does not reach (a rolled-back or out-of-date folder
-	// is behind the current code): refused, nothing moved.
-	r = e.run("doctor", "team", "--set-aside-unknown", "--expect", "team@99 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE")
-	expectCode(t, r, ExitUnverified)
-	if !strings.Contains(r.err, "behind the state code") {
-		t.Fatalf("%s", r)
-	}
+	// is behind the current code), or one that is not a code: refused,
+	// nothing moved.
+	expectCode(t, atTerminal("team@99 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE"), ExitUnverified)
+	expectCode(t, atTerminal("nonsense"), ExitUsage)
 	if _, err := os.Stat(filepath.Join(dir, "secrets", "PLANTED_KEY.age")); err != nil {
 		t.Fatal("the file moved for a code the folder does not reach")
 	}
-	e.mustRun("trust", "team", "--expect", code) // the right code clears the remembered one
 	expectCode(t, e.runIn("x", "set", "NEW_KEY", "--vault", "team"), ExitUnverified)
 
-	// With the current code (no terminal needed), planted junk on an
+	// The person types the current code another member read out: junk on an
 	// up-to-date folder is set aside.
-	e.mustRun("doctor", "team", "--set-aside-unknown", "--expect", code)
+	r = atTerminal(code)
+	expectCode(t, r, 0)
+	if !strings.Contains(r.err, "exactly what a removal you have not seen yet looks like") {
+		t.Fatalf("the warning is missing: %s", r)
+	}
 	if _, err := os.Stat(filepath.Join(dir, "secrets", "PLANTED_KEY.age")); err == nil {
 		t.Fatal("the planted file is still in secrets/")
 	}
@@ -106,12 +116,12 @@ func TestDoctorExplainsAndSetsAsideUnknownItems(t *testing.T) {
 		t.Fatalf("doctor not healthy after the set-aside:\n%s", e.mustRun("doctor", "team").out)
 	}
 
-	// A second round.
+	// A second round, same gate.
 	if err := crypto.WriteSecretVersion(dir, "PLANTED_TWO", other, []byte("x"), 1); err != nil {
 		t.Fatal(err)
 	}
 	code = decodeJSON[map[string]any](t, e.mustRun("trust", "team", "--json").out)["state_code"].(string)
-	e.mustRun("doctor", "team", "--set-aside-unknown", "--expect", code)
+	expectCode(t, atTerminal(code), 0)
 	e.mustRunIn("again", "set", "ANOTHER_KEY", "--vault", "team")
 }
 
@@ -144,7 +154,9 @@ func TestSetAsideRefusesARolledBackFolder(t *testing.T) {
 	expectCode(t, r, ExitUnverified)
 	// ...and cannot clear the block with the state code alice gave: his
 	// folder is behind it, so nothing is set aside.
-	r = bob.run("doctor", "team", "--set-aside-unknown", "--expect", code)
+	bob.term.stdinTTY = true
+	r = bob.runIn(code+"\n", "doctor", "team", "--set-aside-unknown")
+	bob.term.stdinTTY = false
 	expectCode(t, r, ExitUnverified)
 	if _, err := os.Stat(filepath.Join(vdir, "secrets", "NEW_K2.age")); err != nil {
 		t.Fatal("the newer file was moved from a rolled-back folder")
