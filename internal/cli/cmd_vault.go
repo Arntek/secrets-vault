@@ -187,7 +187,7 @@ func cmdAttach(a *app, p *parsed) error {
 	}
 	res["member"] = member
 	if member || p.has("no-request") {
-		if vf.Version == format.VaultVersion {
+		if vf.Version >= format.LegacyVaultVersion {
 			// Verify it and pin it now (trust on first use, with the checks
 			// of design section 7).
 			if _, err := a.open(ref); err != nil {
@@ -200,7 +200,7 @@ func cmdAttach(a *app, p *parsed) error {
 		a.printf("Registered '%s' (%d keys)\n", name, len(idx.Entries))
 		return nil
 	}
-	if vf.Version != format.VaultVersion {
+	if vf.Version < format.LegacyVaultVersion {
 		return failf("registered '%s', but it was made by a pre-release version: ask its owner to open it once, then attach again", name)
 	}
 

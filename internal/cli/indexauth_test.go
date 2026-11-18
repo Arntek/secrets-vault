@@ -396,7 +396,7 @@ func TestDoctorSaysUnusableStagingCannotBeFinished(t *testing.T) {
 
 // oldMain builds the secrets-vault of commit 773be93 (the build that made
 // format-2 vaults) once per test binary, or skips.
-var oldMainBin string
+var oldMainBin, oldMainDir string
 
 func buildOldMain(t *testing.T) string {
 	t.Helper()
@@ -419,7 +419,7 @@ func buildOldMain(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(src) })
+	oldMainDir = src // removed by TestMain
 	arch := exec.Command("git", "-C", root, "archive", "773be93")
 	untar := exec.Command("tar", "-x", "-C", src)
 	pipe, _ := arch.StdoutPipe()
@@ -587,4 +587,117 @@ func TestUpgradeVaultMadeByMain(t *testing.T) {
 	}
 	r = e.runIn(testPass+"\n", "get", "LEGACY_KEY", "--passphrase-stdin")
 	expectCode(t, r, ExitUnverified)
+}
+
+// A rotation re-seals the index: keys stay readable and verified, and the
+// snapshot follows the new key.
+func TestIndexAuthSurvivesRotation(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("API_KEY", "", "v1")
+	e.set("OTHER_KEY", "", "v2")
+	e.mustRun("rm", "OTHER_KEY", "--yes")
+	e.mustRunIn(testPass+"\nsecond passphrase\n", "passwd", "main", "--passphrase-stdin")
+	e.mustRun("lock", "--all")
+	rows := listRows(t, e)
+	if len(rows) != 1 || !rows[0].Verified || rows[0].IndexState != "verified" || rows[0].Description != "test key api_key" {
+		t.Fatalf("after rotation: %+v", rows)
+	}
+	if got := e.mustRunIn(testPass+"\n", "get", "API_KEY", "--passphrase-stdin").out; got != "v1\n" {
+		t.Fatalf("%q", got)
+	}
+	// The deleted key's tombstone survives while its trashed copy does.
+	b, _ := os.ReadFile(filepath.Join(dir, "index.json"))
+	if !strings.Contains(string(b), `"deleted": true`) {
+		t.Fatalf("tombstone lost at rotation although a trashed copy exists: %s", b)
+	}
+	// An entry made under the previous key (a removed member's) fails.
+}
+
+// IS3 / Security note 1: a snapshot that is not on the verified chain never
+// vouches, and an accepted rollback and a detach both forget it.
+func TestIndexSnapshotAnchoringAndReset(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	dir := e.initVault("main")
+	e.unlock("main")
+	e.set("API_KEY", "", "v")
+	vf, _ := format.ReadVaultFile(dir)
+	snapFile := filepath.Join(snapshotDir(e), vf.ID+".json")
+	good, err := os.ReadFile(snapFile)
+	if err != nil {
+		t.Fatalf("no snapshot was saved: %v", err)
+	}
+	// A snapshot whose pin head is not in the chain is treated as absent:
+	// with the index deleted the key is NOT vouched for.
+	forged := strings.Replace(string(good), `"pin_head": "`, `"pin_head": "0`, 1)
+	forged = strings.Replace(forged, `"pin_head": "0`+string(good[strings.Index(string(good), `"pin_head": "`)+13:][:1]), `"pin_head": "`+strings.Repeat("0", 1), 1)
+	var doc map[string]any
+	_ = json.Unmarshal(good, &doc)
+	doc["pin_head"] = strings.Repeat("0", 64)
+	fb, _ := json.Marshal(doc)
+	_ = os.WriteFile(snapFile, fb, 0o600)
+	_ = os.Remove(filepath.Join(dir, "index.json"))
+	expectCode(t, e.run("get", "API_KEY"), ExitUnverified)
+	r := e.run("list", "--json")
+	if rows := decodeJSON[[]keyRow](t, r.out); len(rows) != 0 {
+		t.Fatalf("a stale snapshot listed keys: %+v", rows)
+	}
+	// The genuine snapshot vouches.
+	_ = os.WriteFile(snapFile, good, 0o600)
+	if got := e.mustRun("get", "API_KEY").out; got != "v\n" {
+		t.Fatalf("%q", got)
+	}
+	// detach forgets it.
+	e.mustRun("detach", "main")
+	if _, err := os.Stat(snapFile); err == nil {
+		t.Fatal("detach left the snapshot")
+	}
+}
+
+// IS8: a name that only unverified entries claim never causes an unlock
+// prompt for a vault the person didn't name.
+func TestUnverifiedResolutionDoesNotPrompt(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	e.initVault("one")
+	e.mustRunIn(testPass+"\n"+testPass+"\n", "init", "two", "--path", filepath.Join(e.home, "vaults", "two"), "--passphrase-stdin")
+	e.mustRun("lock", "--all")
+	forgetSnapshots(t, e)
+	for _, d := range []string{"one", "two"} {
+		editIndex(t, filepath.Join(e.home, "vaults", d), func(s string) string {
+			return strings.Replace(s, `"entries": []`, `"entries": [
+    {"name": "CLAIMED", "updated": "2026-11-20T10:00:00Z", "version": 1, "rev": 1, "mac": "`+strings.Repeat("0", 64)+`"}]`, 1)
+		})
+	}
+	asked := e.term.asked
+	r := e.run("get", "CLAIMED")
+	expectCode(t, r, ExitUsage)
+	if e.term.asked != asked {
+		t.Fatal("asked for a passphrase")
+	}
+	if !strings.Contains(r.err, "--vault") {
+		t.Fatalf("%s", r)
+	}
+}
+
+// The first pin of a format-2 vault says so, so that comparing state codes
+// catches a chain cut off before an upgrade (Security note 3).
+func TestHeadLineNamesLegacyFormat(t *testing.T) {
+	skipWindows(t)
+	old := buildOldMain(t)
+	e := newEnv(t)
+	dir := filepath.Join(e.home, "vaults", "main")
+	if r := e.runOld(old, testPass+"\n"+testPass+"\n", "init", "main", "--path", dir, "--passphrase-stdin", "--as", testUser); r.code != 0 {
+		t.Fatalf("old init: %s", r)
+	}
+	// A second machine attaches: its first pin shows the format.
+	f := newEnv(t)
+	f.mustRunIn(testPass+"\n"+testPass+"\n", "attach", "main", dir, "--passphrase-stdin", "--as", "second")
+	r := f.runIn(testPass+"\n"+testPass+"\n", "unlock", "main", "--passphrase-stdin")
+	if !strings.Contains(r.out+r.err, "format 2 (not upgraded)") {
+		t.Fatalf("%s", r)
+	}
 }

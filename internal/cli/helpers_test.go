@@ -30,7 +30,11 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if oldMainDir != "" {
+		_ = os.RemoveAll(oldMainDir) // the format-2 build, see buildOldMain
+	}
+	os.Exit(code)
 }
 
 // --- fakes ---

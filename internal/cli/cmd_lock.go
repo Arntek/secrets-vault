@@ -180,7 +180,7 @@ func cmdStatus(a *app, p *parsed) error {
 				cl := members.Classify(c, pin)
 				r.Head.Trusted = cl.Outcome == members.Same || cl.Outcome == members.Extension
 			}
-		} else if vf.Version == format.VaultVersion {
+		} else if vf.Version >= format.LegacyVaultVersion {
 			r.Error = "does not verify"
 		}
 		reqs, _, err := members.ListRequests(v.dir, vf.ID)
