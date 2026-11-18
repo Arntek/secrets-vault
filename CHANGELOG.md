@@ -19,6 +19,15 @@ Phase 2: agents, the terminal UI, an authenticated index, npm and Windows.
 - npm install (macOS, Linux, Windows) and passphrase-only Windows builds.
 - Python and Node helpers (`helpers/`) that call the program without exposing values.
 
+### Fixed
+
+- A missing key with one unreadable vault folder (for example macOS blocking a cloud folder) is exit 5 naming the vault and why, never exit 1 or "not found"; text `list` and `search` print the warning after the results (tz0).
+- A mistyped `--expect` state code: the code's format and vault name are checked before anything is remembered, a code that doesn't match the vault's history says so (not "behind"), `vault status` shows the vault as `blocked` with the code it waits for, and the right code replaces the wrong one. `trust --help` lists `--expect` (33p).
+- `attach` for a first-time user with no terminal and no `--as` refuses before registering anything (3zx).
+- A removed member sees "you are no longer a member of 'X'" (exit 5) instead of being told to run `unlock`, and `status` shows `removed`; `status` no longer shows a vault as unlocked once its key was rotated by someone else (b3o).
+- `make snapshot` builds print the snapshot version the Homebrew formula expects (zjv).
+- `help` gives `ui` and `log` their own headings; "entries" plural; `audit.log` is made private again if its permissions were widened.
+
 ### Security
 
 - Unverified index rows show the name only (no description, tags, date or author) in text and `--json`, and descriptions are cleaned of control, bidi and zero-width characters (r1q.6.1).

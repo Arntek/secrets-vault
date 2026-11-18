@@ -216,7 +216,7 @@ Every command accepts `--json`. When a key name exists in only one vault, `--vau
 
 Put the vault folder somewhere you both can reach (a shared Box or Dropbox folder, for example). Each person has their own identity, so nobody shares a passphrase.
 
-1. Your colleague installs secrets-vault and runs `vault attach work <their path to the shared folder>`. The first time, this creates their identity (a name and a personal passphrase) and shows a fingerprint such as `MAPLE-RIVER-OTTER-4417`.
+1. Your colleague installs secrets-vault and runs `vault attach work <their path to the shared folder>`. (In a script, or without a terminal, add `--as NAME`: it names their new identity, and attach refuses before registering anything if it is missing.) The first time, this creates their identity (a name and a personal passphrase) and shows a fingerprint such as `MAPLE-RIVER-OTTER-4417`.
 2. Because they aren't a member yet, this drops a signed join request into the folder.
 3. You see it in `vault status` or `vault member requests work`.
 4. **Call them (phone or video).** They read their fingerprint out; you run `vault member approve work THEIR-NAME` and **type** what they read. Then read them yours, which the command shows.
@@ -230,6 +230,8 @@ To remove someone:
 2. Run `vault member rm work THEIR-NAME`. It asks you to confirm step 1, gives the vault a new key and re-encrypts everything. The vault passphrase stops working (anyone could have known it); set a new one with `vault passwd work`, or keep it with `--keep-passphrase` (recorded in the log).
 3. Rotate any keys they could have seen at the service that issued them; the command lists which.
 4. Send the other members the **state code** it prints. They run `vault trust work --expect CODE`, which makes sure their copy is the new one.
+
+If a member types the code wrong (or the folder really differs), that vault is blocked on their Mac: every command refuses it, and `vault status` shows `blocked` and the code it is waiting for. Run `vault trust work --expect CODE` again with the exact code (it replaces the wrong one). If you are sure the folder is right, accept it with `vault trust work --accept-rollback --signer-fingerprint FINGERPRINT` (the fingerprint of the member who made the latest change).
 
 Keep at least two members on a shared vault (or a member plus a recovery passphrase), so losing one identity never locks everyone out. If the only member's identity is lost, open the vault with its passphrase and run `vault rebuild work`.
 

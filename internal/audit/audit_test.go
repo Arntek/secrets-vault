@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -203,4 +204,24 @@ func TestCallerFindsAParent(t *testing.T) {
 		t.Fatalf("pid %d", pid)
 	}
 	t.Logf("parent: %q", name) // the name is best-effort
+}
+
+func TestLogFileIsTightenedOnWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix permissions")
+	}
+	p := filepath.Join(t.TempDir(), "audit.log")
+	if err := os.WriteFile(p, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewFile(p).Record(Event{Time: time.Now(), Vault: "v", Key: "K", Action: ActionRead}); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(p)
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
 }

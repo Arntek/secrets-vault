@@ -122,7 +122,6 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []
 				msg = ee.msg
 				verify = ee.code == ExitUnverified
 			}
-			a.warnf("%s", msg)
 			errs = append(errs, vaultError{Vault: n, Error: msg, verify: verify})
 			continue
 		}
@@ -135,7 +134,6 @@ func (a *app) collectKeys(vaultFilter, tag string) ([]keyRow, []vaultSummary, []
 				msg = ee.msg
 				verify = ee.code == ExitUnverified
 			}
-			a.warnf("%s", msg)
 			errs = append(errs, vaultError{Vault: n, Error: msg, verify: verify})
 			continue
 		}
@@ -236,11 +234,20 @@ func cmdList(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	defer a.warnVaultErrors(errs)
 	if a.asJSON {
 		return a.printJSON(withErrors(rows, errs))
 	}
 	a.printKeyTable(rows, sums)
 	return nil
+}
+
+// warnVaultErrors prints the vaults that could not be listed to stderr, after
+// the results (so on a terminal they are not buried above the table).
+func (a *app) warnVaultErrors(errs []vaultError) {
+	for _, e := range errs {
+		a.warnf("%s", e.Error)
+	}
 }
 
 func cmdSearch(a *app, p *parsed) error {
@@ -272,6 +279,7 @@ func cmdSearch(a *app, p *parsed) error {
 			out = append(out, r)
 		}
 	}
+	defer a.warnVaultErrors(errs)
 	if a.asJSON {
 		return a.printJSON(withErrors(out, errs))
 	}

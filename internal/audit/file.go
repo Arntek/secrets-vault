@@ -94,6 +94,11 @@ func (f *File) Record(e Event) error {
 	if err != nil {
 		return unwrapPath(err)
 	}
+	// A log someone made group- or world-readable (a chmod, a restore from
+	// backup) is tightened again on the next write.
+	if fi, err := h.Stat(); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		_ = h.Chmod(0o600)
+	}
 	if _, err := h.Write(line); err != nil {
 		_ = h.Close()
 		return unwrapPath(err)

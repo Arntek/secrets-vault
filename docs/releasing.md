@@ -10,7 +10,7 @@ A release is a `v*` tag. Pushing the tag runs `.github/workflows/release.yml`, w
 | linux/amd64, linux/arm64 | `CGO_ENABLED=0` | no |
 | windows/amd64, windows/arm64 | `CGO_ENABLED=0`, `.zip` archive (`secrets-vault.exe`) | no (passphrase only; no unlock agent, no Windows Hello yet) |
 
-Each gets a `secrets-vault_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows; binary, LICENSE, README) and a shared `checksums.txt`. The CLI's `version` command prints the tag (`-X .../internal/cli.Version={{ .Tag }}`). An SBOM is not part of releases yet. The npm installer depends on these exact archive names, and `scripts/npm-pin-checksums.js` pins their hashes from `checksums.txt` at publish time, so don't rename them.
+Each gets a `secrets-vault_<version>_<os>_<arch>.tar.gz` (`.zip` on Windows; binary, LICENSE, README) and a shared `checksums.txt`. The CLI's `version` command prints the tag (`-X .../internal/cli.Version=v{{ .Version }}`: a release prints `v0.2.0`, a `make snapshot` build prints `v0.0.0-SNAPSHOT-<sha>`, the same version the Homebrew formula and `brew test` expect). An SBOM is not part of releases yet. The npm installer depends on these exact archive names, and `scripts/npm-pin-checksums.js` pins their hashes from `checksums.txt` at publish time, so don't rename them.
 
 The macOS job runs on a GitHub macOS runner so Xcode and the Swift SDK are present; `scripts/swift-env.sh` hands their paths to the cgo link flags.
 

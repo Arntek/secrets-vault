@@ -108,10 +108,21 @@ func (a *app) open(v *vaultRef) (*format.VaultFile, error) {
 	// refuse until it has (ue1.9).
 	expectMet := false
 	if pin != nil && pin.Expect != nil {
-		if !pin.Expect.Met(c) {
-			return nil, verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, pin.Expect, members.ErrBehindCode)
+		switch {
+		case pin.Expect.Met(c):
+			expectMet = true
+		case a.expectCode != "" && a.codeMet(v, c, a.expectCode):
+			// A new, correct code replaces one that was mistyped or that the
+			// folder had not reached: the person just gave it, out of band.
+			cleared := *pin
+			cleared.Expect = nil
+			if err := ts.Save(&cleared); err != nil {
+				return nil, err
+			}
+			pin = &cleared
+		default:
+			return nil, a.expectRefusal(v, c, pin.Expect)
 		}
-		expectMet = true
 	}
 	cl := members.Classify(c, pin)
 	v.chain, v.pin, v.class = c, pin, cl
@@ -164,12 +175,9 @@ func (a *app) open(v *vaultRef) (*format.VaultFile, error) {
 // command refuses the vault until the folder reaches it (ue1.9).
 func (a *app) applyExpect(v *vaultRef, code string) (bool, error) {
 	c := v.chain
-	if !strings.Contains(code, "@") {
-		code = c.File.Name + "@" + code
-	}
-	exp, err := members.ParseStateCode(code)
+	exp, err := a.parseCodeFor(v, c, code)
 	if err != nil {
-		return false, usageErrf("%v", err)
+		return false, err
 	}
 	if exp.Met(c) {
 		return true, nil
@@ -184,7 +192,44 @@ func (a *app) applyExpect(v *vaultRef, code string) (bool, error) {
 		}
 		v.pin = &pending
 	}
-	return false, verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, exp, members.ErrBehindCode)
+	return false, a.expectRefusal(v, c, exp)
+}
+
+// expectRefusal is the refusal for a state code the folder does not meet.
+// A code whose entry exists in this folder with a different hash does not
+// match this vault's history (a typo, or a folder whose history differs from
+// the code's author's): "behind" would mislead. A code beyond the folder's
+// last entry is a folder that is behind.
+func (a *app) expectRefusal(v *vaultRef, c *members.Chain, exp *members.Expectation) error {
+	if exp.Seq < len(c.File.Log) {
+		return verifyErrf("vault '%s' (expected %s%s): that code doesn't match this vault's history at entry %d. It may have been mistyped, or this folder's history differs from the one the code came from. Nothing was read or written. "+
+			"Run '%s trust %s --expect CODE' again with the exact code from the member (it replaces this one), or, if you are sure this folder is right, '%s trust %s --accept-rollback --signer-fingerprint FINGERPRINT'",
+			v.name, c.File.Name, exp, exp.Seq, a.prog, v.name, a.prog, v.name)
+	}
+	return verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, exp, members.ErrBehindCode)
+}
+
+// parseCodeFor parses a state code for v: the vault name in it (or none) must
+// be this vault's, so a code meant for another vault never gets pinned.
+func (a *app) parseCodeFor(v *vaultRef, c *members.Chain, code string) (*members.Expectation, error) {
+	if i := strings.IndexByte(code, '@'); i < 0 {
+		code = c.File.Name + "@" + code
+	} else if name := strings.TrimSpace(code[:i]); name != c.File.Name && name != v.name {
+		return nil, usageErrf("that state code is for a different vault than '%s'", v.name)
+	} else {
+		code = c.File.Name + code[i:]
+	}
+	exp, err := members.ParseStateCode(code)
+	if err != nil {
+		return nil, usageErrf("%v", err)
+	}
+	return exp, nil
+}
+
+// codeMet reports whether code is valid for v and the folder meets it.
+func (a *app) codeMet(v *vaultRef, c *members.Chain, code string) bool {
+	exp, err := a.parseCodeFor(v, c, code)
+	return err == nil && exp.Met(c)
 }
 
 // firstPinInfo is the --json record of a first-use pin.

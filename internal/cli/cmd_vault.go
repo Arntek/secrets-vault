@@ -171,6 +171,12 @@ func cmdAttach(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	// A first-time attach that must file a join request needs a name for the
+	// new identity: refuse before registering anything, so a retry works.
+	if _, ok := a.myIdentity(); !ok && !a.identityNeedsUpgrade() && !p.has("no-request") &&
+		vf.Version >= format.LegacyVaultVersion && p.str("as") == "" && !a.term.StdinTTY() {
+		return usageErrf("this is your first time: run attach in a terminal, or pass --as NAME (a-z, 0-9, - and _). Nothing was registered")
+	}
 	cfg.Vaults[name] = &VaultEntry{Path: dir, Description: p.str("desc"), ID: vf.ID}
 	if cfg.DefaultVault == "" {
 		cfg.DefaultVault = name

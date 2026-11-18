@@ -22,7 +22,7 @@ builds:
     tags: [touchid]
     flags: [-trimpath]
     ldflags:
-      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version={{ .Tag }}
+      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version=v{{ .Version }}
     env:
       - CGO_ENABLED=1
       - MACOSX_DEPLOYMENT_TARGET=13.0
@@ -35,7 +35,7 @@ builds:
     tags: [touchid]
     flags: [-trimpath]
     ldflags:
-      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version={{ .Tag }}
+      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version=v{{ .Version }}
     env:
       - CGO_ENABLED=1
       - MACOSX_DEPLOYMENT_TARGET=13.0
@@ -48,7 +48,7 @@ builds:
     goarch: [amd64, arm64]
     flags: [-trimpath]
     ldflags:
-      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version={{ .Tag }}
+      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version=v{{ .Version }}
     env:
       - CGO_ENABLED=0
 
@@ -61,7 +61,7 @@ builds:
     goarch: [amd64, arm64]
     flags: [-trimpath]
     ldflags:
-      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version={{ .Tag }}
+      - -s -w -X github.com/Arntek/secrets-vault/internal/cli.Version=v{{ .Version }}
     env:
       - CGO_ENABLED=0
 

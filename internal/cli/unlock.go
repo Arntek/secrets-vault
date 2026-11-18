@@ -422,7 +422,41 @@ func (a *app) authenticate(v *vaultRef, vf *format.VaultFile) (*crypto.VaultKey,
 			return k, err
 		}
 	}
+	if v.chain != nil && a.removedFrom(v.chain) {
+		return nil, a.notMemberErr(v.name)
+	}
 	return nil, a.lockedErr(v.name)
+}
+
+// removedFrom reports whether this person's identity was a member of the
+// vault in some earlier state and is not in the current one.
+func (a *app) removedFrom(c *members.Chain) bool {
+	id, ok := a.myIdentity()
+	if !ok || c == nil || len(c.States) == 0 {
+		return false
+	}
+	has := func(s *members.State) bool {
+		for _, m := range s.Members {
+			if m.Recipient == id.Recipient && m.SignKey == id.SignKey {
+				return true
+			}
+		}
+		return false
+	}
+	if has(c.Head()) {
+		return false
+	}
+	for i := range c.States {
+		if has(&c.States[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// notMemberErr is exit 5 with no way to loop: asking to unlock cannot help.
+func (a *app) notMemberErr(vault string) error {
+	return verifyErrf("you are no longer a member of '%s'. Ask a current member to add you again (%s attach %s DIR files a new join request)", vault, a.prog, vault)
 }
 
 // identityNeedsUpgrade reports whether an identity exists that was made by

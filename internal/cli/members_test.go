@@ -68,7 +68,7 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 		t.Fatalf("attach output: %s", r)
 	}
 	stranger := newEnv(t)
-	expectCode(t, stranger.run("attach", "team", vdir), ExitError)
+	expectCode(t, stranger.run("attach", "team", vdir), ExitUsage) // no terminal and no --as: refused before registering
 	expectCode(t, dan.runIn(personalPass+"\n", "get", "EXAMPLE_TEAM_KEY", "--passphrase-stdin"), ExitError)
 
 	fp := owner.requestFingerprint("team", "dan")
@@ -154,6 +154,17 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 		t.Fatalf("a removed member must not read: %s", r)
 	}
 	notContains(t, "removed member's output", r.out+r.err, "team-secret-value")
+	// b3o: a removed member is told so (exit 5, no "run unlock" loop), and
+	// status says "removed" rather than "unlocked".
+	r = dan.runIn(personalPass+"\n", "unlock", "team", "--passphrase-stdin")
+	expectCode(t, r, ExitUnverified)
+	if !strings.Contains(r.err, "no longer a member of 'team'") || strings.Contains(r.err, "Run:") {
+		t.Fatalf("removed member's unlock: %s", r)
+	}
+	notContains(t, "removed member's unlock", r.out+r.err, "team-secret-value", vdir)
+	if st := dan.mustRun("status"); !strings.Contains(st.out, "removed") || strings.Contains(st.out, "unlocked") {
+		t.Fatalf("status for a removed member: %s", st)
+	}
 	expectCode(t, dan.run("unlock", "team", "--accept-key-change"), ExitUsage) // that flag is gone
 }
 
@@ -448,7 +459,7 @@ func TestTrustAndRebuild(t *testing.T) {
 	// refuses the vault until it is met, or the rollback is accepted.
 	r = e.run("trust", "main", "--expect", "main@0 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE")
 	expectCode(t, r, ExitUnverified)
-	if !strings.Contains(r.err, "behind the state code you were given") {
+	if !strings.Contains(r.err, "doesn't match this vault's history") {
 		t.Fatalf("%s", r)
 	}
 	expectCode(t, e.run("get", "K"), ExitUnverified)

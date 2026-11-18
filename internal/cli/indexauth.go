@@ -273,7 +273,7 @@ func (a *app) openQuiet(v *vaultRef) (*members.Chain, *format.VaultFile, error) 
 		return nil, nil, verifyErrf("vault '%s': %v", v.name, members.ErrRollback)
 	}
 	if pin != nil && pin.Expect != nil && !pin.Expect.Met(c) {
-		return nil, nil, verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, pin.Expect, members.ErrBehindCode)
+		return nil, nil, a.expectRefusal(v, c, pin.Expect)
 	}
 	if members.Classify(c, pin).Outcome == members.Rollback {
 		return nil, nil, verifyErrf("vault '%s': %v", v.name, members.ErrRollback)

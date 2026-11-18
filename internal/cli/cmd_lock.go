@@ -6,6 +6,7 @@ import (
 
 	"github.com/Arntek/secrets-vault/internal/agent"
 	"github.com/Arntek/secrets-vault/internal/audit"
+	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
 	"github.com/Arntek/secrets-vault/internal/members"
 )
@@ -182,7 +183,12 @@ func cmdStatus(a *app, p *parsed) error {
 		Requests    []req  `json:"join_requests"`
 		Head        *head  `json:"head,omitempty"`
 		Error       string `json:"error,omitempty"`
-		left        time.Duration
+		// Removed: this identity was a member and no longer is.
+		Removed bool `json:"removed,omitempty"`
+		// Expecting is a state code this machine was given that the folder
+		// has not met; every command refuses the vault until it does.
+		Expecting string `json:"expecting,omitempty"`
+		left      time.Duration
 	}
 	rows := []row{}
 	for _, n := range names {
@@ -197,7 +203,7 @@ func cmdStatus(a *app, p *parsed) error {
 			rows = append(rows, r)
 			continue
 		}
-		if st := states[vf.ID]; st.Unlocked {
+		if st := states[vf.ID]; st.Unlocked && a.heldKeyCurrent(vf) {
 			r.Unlocked = true
 			r.left = time.Until(st.Expires)
 			r.SecondsLeft = int(r.left.Seconds())
@@ -210,6 +216,13 @@ func cmdStatus(a *app, p *parsed) error {
 				pin, _ := ts.Load(c.File.ID)
 				cl := members.Classify(c, pin)
 				r.Head.Trusted = cl.Outcome == members.Same || cl.Outcome == members.Extension
+				if pin != nil && pin.Expect != nil && !pin.Expect.Met(c) {
+					r.Expecting = c.File.Name + pin.Expect.String()
+					r.Unlocked = false // blocked until the code is met
+				}
+			}
+			if a.removedFrom(c) {
+				r.Removed, r.Unlocked = true, false
 			}
 		} else if vf.Version >= format.LegacyVaultVersion {
 			r.Error = "does not verify"
@@ -238,6 +251,10 @@ func cmdStatus(a *app, p *parsed) error {
 			if r.Error == "unavailable" {
 				state = "unavailable"
 			}
+		case r.Removed:
+			state = "removed"
+		case r.Expecting != "":
+			state = "blocked"
 		case r.Unlocked:
 			state, left = "unlocked", timeLeft(r.left)+" left"
 		}
@@ -253,8 +270,37 @@ func cmdStatus(a *app, p *parsed) error {
 				note += " " + q.Name + " (" + q.Fingerprint + ")"
 			}
 		}
+		switch {
+		case r.Removed:
+			note = "you are no longer a member; ask a member to add you again" + sep(note)
+		case r.Expecting != "":
+			note = "waiting for state " + r.Expecting + " (the folder doesn't match it): run 'trust " + r.Vault + " --expect CODE' with the right code, or 'trust " + r.Vault + " --accept-rollback --signer-fingerprint FP'" + sep(note)
+		}
 		t.row(r.Vault, state, left, code, note)
 	}
 	t.flush()
 	return nil
+}
+
+func sep(note string) string {
+	if note == "" {
+		return ""
+	}
+	return "; " + note
+}
+
+// heldKeyCurrent reports whether the key the agent holds for this vault still
+// opens it: after another member rotated the key, the held one is stale and
+// the vault is effectively locked, whatever the agent's timer says.
+func (a *app) heldKeyCurrent(vf *format.VaultFile) bool {
+	cl := a.client(false)
+	if cl == nil {
+		return false
+	}
+	k, err := cl.Key(vf.ID)
+	if err != nil {
+		return false
+	}
+	defer k.Destroy()
+	return crypto.CheckKey(vf, k) == nil
 }

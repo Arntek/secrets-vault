@@ -383,6 +383,38 @@ type keyRef struct {
 // findKey locates a key by name. With vaultName empty every registered vault
 // is searched: not found is exit 4, and a name in several vaults needs
 // --vault. Names that fail validation are not echoed.
+// keyNotFoundWithFailures is the answer when no readable vault has the key
+// and at least one vault could not be used. Never "not found" (exit 4), and
+// never a plain error (exit 1): the key may be in the vault that could not
+// be used, so the answer is exit 5 and names each such vault and why. A
+// single vault that failed verification keeps its own message.
+func (a *app) keyNotFoundWithFailures(failed []error) error {
+	if len(failed) == 1 {
+		var ee *exitErr
+		if errors.As(failed[0], &ee) && ee.code == ExitUnverified {
+			return failed[0]
+		}
+	}
+	var reasons []string
+	unreadable := false
+	for _, e := range failed {
+		msg := e.Error()
+		var ee *exitErr
+		if errors.As(e, &ee) {
+			msg = ee.msg
+			if ee.code != ExitUnverified {
+				unreadable = true
+			}
+		}
+		reasons = append(reasons, msg)
+	}
+	msg := "key not found in the readable vaults, but " + plural(len(failed), "vault") + " could not be used, so it may be there: " + strings.Join(reasons, "; ")
+	if unreadable {
+		msg += ". If macOS blocked access to a cloud folder, see 'operation not permitted' in the README (Unlocking and Touch ID)"
+	}
+	return verifyErrf("%s", msg)
+}
+
 func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 	if err := format.ValidateKeyName(name); err != nil {
 		return nil, usageErrf("%v", err)
@@ -440,14 +472,8 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 			}
 		}
 	}
-	switch {
-	case len(found) == 0 && len(failed) == 1:
-		return nil, failed[0]
-	case len(found) == 0 && len(failed) > 1:
-		for _, e := range failed {
-			a.warnf("%v", e)
-		}
-		return nil, verifyErrf("that key was not found, and %d vaults failed verification, so it may be in one of them", len(failed))
+	if len(found) == 0 && len(failed) > 0 {
+		return nil, a.keyNotFoundWithFailures(failed)
 	}
 	for _, e := range failed {
 		a.warnf("warning: %v", e)
