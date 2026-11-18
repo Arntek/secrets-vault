@@ -564,7 +564,7 @@ func TestLockedView(t *testing.T) {
 	e := newEnv(t)
 	s := e.session(nil)
 	snap := e.set(s, "AAA", "a", "verified label")
-	lv, err := Locked(e.dir, false, snap)
+	lv, err := Locked(e.dir, vid, false, snap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,14 +573,14 @@ func TestLockedView(t *testing.T) {
 	}
 	// Relabelled in the folder: the snapshot's label is shown, flagged pending.
 	e.writeIndexRaw(strings.Replace(string(e.indexBytes()), "verified label", "attacker label", 1))
-	lv, _ = Locked(e.dir, false, snap)
+	lv, _ = Locked(e.dir, vid, false, snap)
 	if lv.State != StatePending || lv.PendingChanges != 1 || lv.Rows[0].Entry.Description != "verified label" || !lv.Rows[0].Pending {
 		t.Fatalf("%+v", lv)
 	}
 	// A name the folder adds: unverified.
 	e.writeIndexRaw(strings.Replace(string(e.indexBytes()), `"entries": [`, `"entries": [
     {"name": "NEW", "description": "claimed", "updated": "2026-11-20T10:00:00Z", "version": 1, "rev": 1, "mac": "`+strings.Repeat("2", 64)+`"},`, 1))
-	lv, _ = Locked(e.dir, false, snap)
+	lv, _ = Locked(e.dir, vid, false, snap)
 	var found bool
 	for _, r := range lv.Rows {
 		if r.Entry.Name == "NEW" {
@@ -594,7 +594,7 @@ func TestLockedView(t *testing.T) {
 		t.Fatal("new name not listed")
 	}
 	// No snapshot: everything unverified.
-	lv, _ = Locked(e.dir, false, nil)
+	lv, _ = Locked(e.dir, vid, false, nil)
 	if lv.State != StateNever {
 		t.Fatalf("state = %s", lv.State)
 	}
@@ -605,7 +605,7 @@ func TestLockedView(t *testing.T) {
 	}
 	// Deleted index with a snapshot: still listed from the snapshot.
 	_ = os.Remove(filepath.Join(e.dir, "index.json"))
-	lv, _ = Locked(e.dir, false, snap)
+	lv, _ = Locked(e.dir, vid, false, snap)
 	if !lv.Damaged || len(lv.Rows) != 1 || !lv.Rows[0].Verified {
 		t.Fatalf("%+v", lv)
 	}
@@ -618,7 +618,7 @@ func TestLockedDuplicateUnverified(t *testing.T) {
     {"name": "X", "updated": "2026-11-20T10:00:00Z", "version": 1, "rev": 1, "mac": "` + strings.Repeat("3", 64) + `"},
     {"name": "X", "updated": "2026-11-20T10:00:00Z", "version": 1, "rev": 2, "mac": "` + strings.Repeat("4", 64) + `"}]}`
 	e.writeIndexRaw(dup)
-	lv, _ := Locked(e.dir, false, nil)
+	lv, _ := Locked(e.dir, vid, false, nil)
 	if len(lv.Rows) != 0 {
 		t.Fatalf("%+v", lv.Rows)
 	}
@@ -655,7 +655,7 @@ func TestPrivateSnapshotHasNoLabels(t *testing.T) {
 		t.Fatalf("private rollback: %d", k.Status)
 	}
 	// And locked listing shows nothing.
-	if lv, _ := Locked(e.dir, false, snap); lv.State != StatePrivate || len(lv.Rows) != 0 {
+	if lv, _ := Locked(e.dir, vid, false, snap); lv.State != StatePrivate || len(lv.Rows) != 0 {
 		t.Fatalf("%+v", lv)
 	}
 }

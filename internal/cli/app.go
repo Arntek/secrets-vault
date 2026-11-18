@@ -197,6 +197,9 @@ func (a *app) infof(format string, args ...any) { fmt.Fprintf(a.errOut, format+"
 type exitErr struct {
 	code int
 	msg  string
+	// indexDamaged marks a refusal because a vault's index is missing or
+	// damaged: `set` can still write a new key then (it is the repair).
+	indexDamaged bool
 }
 
 func (e *exitErr) Error() string { return e.msg }

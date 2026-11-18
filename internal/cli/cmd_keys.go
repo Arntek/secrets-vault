@@ -494,7 +494,7 @@ func cmdSet(a *app, p *parsed) error {
 		v, vf = k.v, k.vf
 	} else {
 		var ee *exitErr
-		if !errors.As(err, &ee) || ee.code != ExitNotFound {
+		if !errors.As(err, &ee) || (ee.code != ExitNotFound && !ee.indexDamaged) {
 			return err
 		}
 		if v, err = a.defaultVault(p.str("vault")); err != nil {

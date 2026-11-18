@@ -83,7 +83,11 @@ func (a *app) lockedView(v *vaultRef, c *members.Chain) (*index.LockedView, erro
 	if err != nil {
 		return nil, err
 	}
-	return index.Locked(v.dir, legacyChain(c), snap)
+	id := ""
+	if c != nil {
+		id = c.File.ID
+	}
+	return index.Locked(v.dir, id, legacyChain(c), snap)
 }
 
 // vindex is the authenticated index of one verified, unlocked vault for the
@@ -251,6 +255,14 @@ func (a *app) openQuiet(v *vaultRef) (*members.Chain, *format.VaultFile, error) 
 	ts, err := a.trustStore()
 	if err != nil {
 		return nil, nil, err
+	}
+	if v.entry.ID == "" {
+		// Same rule as open: a registry that lost the vault ID never falls
+		// back to first-use trust (ue1.8).
+		if old, err := ts.FindByPath(v.dir); err != nil || old != nil {
+			return nil, nil, verifyErrf("this machine has lost its record of which vault '%s' is (an older secrets-vault may have rewritten its settings). "+
+				"Nothing was read or written. To register it again, run: %s detach %s, then %s attach %s DIR", v.name, a.prog, v.name, a.prog, v.name)
+		}
 	}
 	pin, err := ts.Load(c.File.ID)
 	if err != nil {

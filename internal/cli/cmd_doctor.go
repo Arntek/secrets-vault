@@ -118,8 +118,11 @@ func cmdDoctor(a *app, p *parsed) error {
 			return err
 		}
 		dropped = vi.view.Dropped
+		if vi.view.Damaged {
+			a.warnf("warning: the index of '%s' is missing or damaged; each key is rebuilt by writing it again, or adopted with --adopt NAME", v.name)
+		}
 		for _, k := range vi.view.Problems() {
-			if k.Status == index.StatusUnlisted {
+			if k.Status == index.StatusUnlisted || k.Status == index.StatusDamaged {
 				unlisted = append(unlisted, k.Name)
 				continue
 			}
@@ -216,7 +219,7 @@ func (a *app) adopt(v *vaultRef, vi *vindex, key *crypto.VaultKey, name string, 
 	if vi == nil {
 		return failf("vault '%s' must be upgraded first: %s upgrade %s", v.name, a.prog, v.name)
 	}
-	if k, ok := vi.view.Key(name); !ok || k.Status != index.StatusUnlisted {
+	if k, ok := vi.view.Key(name); !ok || (k.Status != index.StatusUnlisted && k.Status != index.StatusDamaged) {
 		return failf("%s is not an unlisted file in '%s'", name, v.name)
 	}
 	val, ver, err := crypto.ReadSecretVersion(v.dir, name, key)

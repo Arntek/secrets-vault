@@ -401,6 +401,7 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 	}
 	var found []*keyRef
 	var failed []error
+	var damaged []string
 	for _, n := range names {
 		v, err := a.vault(n)
 		if err != nil {
@@ -420,6 +421,9 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 			continue
 		}
 		a.noteIndexState(v, lv)
+		if lv.Damaged {
+			damaged = append(damaged, v.name)
+		}
 		for _, r := range lv.Rows {
 			if r.Entry.Name == name {
 				found = append(found, &keyRef{v: v, vf: vf, entry: r.Entry, verified: r.Verified || lv.State == index.StateLegacy})
@@ -440,6 +444,11 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 	}
 	switch len(found) {
 	case 0:
+		if len(damaged) > 0 {
+			// Not "not found": the index that would list it is gone or damaged (IM1).
+			return nil, &exitErr{code: ExitUnverified, indexDamaged: true,
+				msg: fmt.Sprintf("that key was not found, but the index of '%s' is missing or damaged, so it may be there. Nothing can be trusted from it until it is repaired: %s doctor %s", strings.Join(damaged, "', '"), a.prog, damaged[0])}
+		}
 		return nil, notFoundErr("key not found. Try: %s search WORDS", a.prog)
 	case 1:
 		return found[0], nil

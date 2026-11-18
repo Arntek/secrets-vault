@@ -49,7 +49,7 @@ type LockedView struct {
 // Locked builds the view without a key. snap must already be anchored (nil
 // if none). legacy comes from the verified chain (format 2): the old index
 // is shown as it always was, flagged legacy.
-func Locked(dir string, legacy bool, snap *Snapshot) (*LockedView, error) {
+func Locked(dir, vaultID string, legacy bool, snap *Snapshot) (*LockedView, error) {
 	lv := &LockedView{State: StateNever}
 	var folder []format.IndexEntry
 	private := false
@@ -60,7 +60,9 @@ func Locked(dir string, legacy bool, snap *Snapshot) (*LockedView, error) {
 		damaged = true
 	default:
 		idx, _, err := format.ParseIndexTolerant(raw)
-		if err != nil {
+		if err != nil || (!legacy && (idx.Version != format.IndexVersion || (idx.VaultID != "" && idx.VaultID != vaultID))) {
+			// Not a current index for this vault (IM1): in a format-3 vault
+			// nothing is believed from it.
 			damaged = true
 		} else {
 			folder, private = idx.Entries, idx.Private
