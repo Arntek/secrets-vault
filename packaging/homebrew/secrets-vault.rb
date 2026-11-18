@@ -43,20 +43,21 @@ class SecretsVault < Formula
     # Homebrew doesn't know about, which dangle after an upgrade or uninstall.)
     #
     # "sv" is always linked. "vault" is linked only when no other program
-    # called vault is already visible, because HashiCorp Vault uses that name.
+    # called vault is in Homebrew's or the system's bin folders, because
+    # HashiCorp Vault uses that name.
     bin.install_symlink "secrets-vault" => "sv"
     bin.install_symlink "secrets-vault" => "vault" unless other_vault
   end
 
-  # Another program called `vault`: one on the user's own PATH (Homebrew's
-  # build PATH is filtered, so read the original) or already in Homebrew's bin.
+  # Another program called `vault` in Homebrew's bin or a standard system bin
+  # folder. Homebrew runs `install` with a filtered PATH and doesn't pass on
+  # the user's own, so a vault in some personal folder can't be seen here.
   # A `vault` that resolves to a secrets-vault binary is ours (an earlier
   # version, on upgrade) and doesn't count.
   def other_vault
-    dirs = ENV.fetch("HOMEBREW_PATH", ENV.fetch("PATH", "")).split(File::PATH_SEPARATOR)
-    dirs << (HOMEBREW_PREFIX/"bin").to_s
-    dirs.reject(&:empty?).uniq.each do |d|
-      path = File.join(d, "vault")
+    dirs = [HOMEBREW_PREFIX/"bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"]
+    dirs.each do |d|
+      path = File.join(d.to_s, "vault")
       next if File.directory?(path) || !File.executable?(path)
       return path if File.basename(File.realpath(path)) != "secrets-vault"
     end
@@ -67,10 +68,12 @@ class SecretsVault < Formula
     <<~EOS
       Commands: secrets-vault (always), sv, and vault.
       The `vault` short name is only added when no other `vault` program is
-      installed, because HashiCorp Vault uses that name. If it was skipped
-      you will see `sv` only; to take the name anyway, run:
+      in Homebrew's or the system's bin folders, because HashiCorp Vault uses
+      that name. A `vault` kept in a personal folder can't be seen during
+      install: check with `which -a vault`, and if another program is now
+      hidden, give the name back with `sv alias rm vault`.
+      If `vault` was skipped you have `sv`; to take the name anyway, run:
         sv alias add vault --force
-      To give `vault` back to another program later: sv alias rm vault
       Scripts that must work everywhere should call `secrets-vault`.
 
       secrets-vault does not provide shell completions yet.

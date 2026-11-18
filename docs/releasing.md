@@ -28,7 +28,7 @@ The macOS job runs on a GitHub macOS runner so Xcode and the Swift SDK are prese
 
 The formula lives in `packaging/homebrew/secrets-vault.rb`. Its version and sha256 lines are placeholders that `scripts/render-formula.sh FORMULA VERSION checksums.txt [BASE_URL]` fills from a release's `checksums.txt`.
 
-Design of the short names: the formula links `sv` always, and `vault` only when no other program called `vault` is on the installer's PATH or in Homebrew's bin. The links are made in `install`, so Homebrew tracks, upgrades and removes them. `post_install` running `alias add` was rejected: it runs in Homebrew's sandbox, edits the user's config during an install, and its links aren't tracked by Homebrew (they dangle after upgrade or uninstall). Caveats explain `sv alias add vault --force` and `sv alias rm vault`.
+Design of the short names: the formula links `sv` always, and `vault` only when no other program called `vault` is in Homebrew's bin, `/usr/local/bin`, `/opt/local/bin` or `/usr/bin`. Homebrew runs `install` with a filtered PATH and hides the user's own, so a `vault` in a personal folder is not detected; caveats tell the user to check `which -a vault` and run `sv alias rm vault` if needed. The links are made in `install`, so Homebrew tracks, upgrades and removes them. `post_install` running `alias add` was rejected: it runs in Homebrew's sandbox, edits the user's config during an install, and its links aren't tracked by Homebrew (they dangle after upgrade or uninstall). Caveats explain `sv alias add vault --force` and `sv alias rm vault`.
 
 Test locally (needs up-to-date Command Line Tools, or Homebrew refuses to install unbottled formulae):
 
@@ -44,7 +44,7 @@ brew install local/svtest/secrets-vault && brew test local/svtest/secrets-vault
 brew uninstall secrets-vault && brew untap local/svtest
 ```
 
-To check the skipped-`vault` case, put an executable file named `vault` earlier on PATH before `brew install`.
+To check the skipped-`vault` case, put an executable file named `vault` in `/opt/homebrew/bin` before `brew install` (and remove it afterwards).
 
 ## Publishing to the tap (not yet enabled)
 
