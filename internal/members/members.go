@@ -11,15 +11,16 @@
 //   - Fingerprints: three words and a number (e.g. MAPLE-RIVER-OTTER-4417) derived
 //     from the public key, easy to read aloud for out-of-band checks.
 //   - Join requests written to <vault>/requests/ by non-members.
-//   - Approve: add a format.Unlocker of type "member" wrapping the vault key
-//     to the requester's public key (rewrites vault.json only), after the
-//     caller confirms the fingerprint the user checked.
-//   - Remove: rotate the vault key, re-wrap it for the remaining unlockers,
-//     and list the keys the removed member could have read.
+//   - The signed membership log in vault.json (log.go): every change is a
+//     record signed by a member of the state before it; Verify replays the
+//     log from genesis and is the only way a vault.json is trusted.
+//   - Trust pins (pin.go): the last verified head, kept per user outside
+//     the shared folder; Classify tells extension, lost race and rollback
+//     apart.
+//   - Approve, Remove (with key rotation), Passwd: each appends a signed
+//     record and re-wraps keys only for verified members.
 //
-// Authority: membership is whatever vault.json says. The members.json file
-// next to it (who added whom, roles) is display metadata only and is never
-// used for a security decision.
+// See docs/design/membership-auth.md.
 //
 // Dependency rule: members imports crypto, format and audit. It does not
 // import cli or agent; the CLI passes in an unlocked VaultKey.
@@ -36,7 +37,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
 )
 
@@ -57,6 +57,9 @@ var (
 	ErrFingerprintMismatch = errors.New("members: fingerprint does not match the request; do not approve")
 	ErrPassphraseRequired  = errors.New("members: this vault has a passphrase unlocker; supply its passphrase wrapper so it survives the key rotation")
 	ErrLastUnlocker        = errors.New("members: removing this member would leave the vault with no way to open it")
+	ErrIdentityUpgrade     = errors.New("members: this identity was made by an older version; unlock it once to upgrade it")
+	ErrPreviouslyRemoved   = errors.New("members: this key was removed from the vault before; re-adding it needs --readd and the fingerprint typed again")
+	ErrNotRotation         = errors.New("members: the vault key was not introduced by a verified rotation")
 )
 
 // MaxNameLen is the longest member name.
@@ -82,20 +85,18 @@ func ValidateMemberName(name string) error {
 	return nil
 }
 
-// Role of a member in a vault.
-type Role string
-
-// Member roles.
+// Member roles (as stored in vault.json).
 const (
-	RoleOwner  Role = "owner"
-	RoleMember Role = "member"
+	RoleOwner  = format.RoleOwner
+	RoleMember = format.RoleMember
 )
 
 // Identity is a person's public identity. Safe to share.
 type Identity struct {
 	Name        string
 	Recipient   string // age X25519 recipient (public key)
-	Fingerprint string // e.g. MAPLE-RIVER-OTTER-4417
+	SignKey     string // Ed25519 public key, lower-case hex
+	Fingerprint string // e.g. MAPLE-RIVER-OTTER-4417, over both keys
 }
 
 // JoinRequest is a request file written by a non-member.
@@ -107,29 +108,7 @@ type JoinRequest struct {
 // Member is one entry of `vault member list`.
 type Member struct {
 	Identity Identity
-	Role     Role
+	Role     string
 	Added    time.Time
 	AddedBy  string
-}
-
-// Approve wraps key for req's identity and returns the unlocker to add to
-// vault.json. It checks that the request's fingerprint belongs to its key.
-// Most callers want ApproveRequest, which also confirms the fingerprint with
-// what the user checked, updates the vault and removes the request.
-func Approve(key *crypto.VaultKey, req JoinRequest) (format.Unlocker, error) {
-	if err := ValidateMemberName(req.Identity.Name); err != nil {
-		return format.Unlocker{}, err
-	}
-	fp, err := Fingerprint(req.Identity.Recipient)
-	if err != nil {
-		return format.Unlocker{}, err
-	}
-	if fp != req.Identity.Fingerprint {
-		return format.Unlocker{}, ErrFingerprintMismatch
-	}
-	w, err := crypto.NewMemberWrapper(req.Identity.Name, req.Identity.Recipient)
-	if err != nil {
-		return format.Unlocker{}, ErrInvalidRecipient
-	}
-	return w.Wrap(key)
 }

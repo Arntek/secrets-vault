@@ -13,9 +13,12 @@ import (
 )
 
 // Join request files: <vault>/requests/<name>.json, written by someone who
-// is not yet a member. They hold public information only.
+// is not yet a member. They hold public information only, and are signed
+// by the requester's own signing key over a body that names the vault, so
+// a request can't be edited, moved to another vault, or pair someone else's
+// keys with a name (design Threat 5, G7).
 const (
-	requestVersion = 1
+	requestVersion = 2
 	// MaxRequestSize bounds a request file.
 	MaxRequestSize = 4 << 10
 	maxRequests    = 1000
@@ -23,44 +26,53 @@ const (
 )
 
 type requestFile struct {
-	Version     int       `json:"version"`
-	Name        string    `json:"name"`
-	Recipient   string    `json:"recipient"`
-	Fingerprint string    `json:"fingerprint"`
-	Created     time.Time `json:"created"`
+	Version int    `json:"version"`
+	Body    []byte `json:"body"`
+	Sig     []byte `json:"sig"`
 }
 
-// ParseRequest strictly parses a request file. Beyond the usual strictness
-// it checks that the name is valid, the key is a canonical age X25519
-// recipient, and the stated fingerprint is the one derived from that key,
-// so a request edited in the shared folder is rejected.
-func ParseRequest(data []byte) (JoinRequest, error) {
+type requestBody struct {
+	VaultID   string    `json:"vault_id"`
+	Name      string    `json:"name"`
+	Recipient string    `json:"recipient"`
+	SignKey   string    `json:"sign_key"`
+	Created   time.Time `json:"created"`
+}
+
+// ParseRequest strictly parses a request file for the vault vaultID.
+// Beyond the usual strictness it checks the name, both public keys and the
+// requester's signature, and that the request names this vault.
+func ParseRequest(data []byte, vaultID string) (JoinRequest, error) {
 	var rf requestFile
 	if err := decodeStrict(data, MaxRequestSize, &rf); err != nil {
 		return JoinRequest{}, err
 	}
 	if rf.Version != requestVersion {
-		return JoinRequest{}, fmt.Errorf("%w: unsupported request version", ErrMalformed)
+		return JoinRequest{}, fmt.Errorf("%w: request from an older version; ask the person to run attach again", ErrMalformed)
 	}
-	if err := ValidateMemberName(rf.Name); err != nil {
+	var b requestBody
+	if err := decodeStrict(rf.Body, MaxRequestSize, &b); err != nil {
+		return JoinRequest{}, err
+	}
+	if b.VaultID != vaultID {
+		return JoinRequest{}, fmt.Errorf("%w: request is for another vault", ErrMalformed)
+	}
+	if err := ValidateMemberName(b.Name); err != nil {
 		return JoinRequest{}, fmt.Errorf("%w: bad name", ErrMalformed)
 	}
-	if rf.Created.IsZero() {
+	if b.Created.IsZero() {
 		return JoinRequest{}, fmt.Errorf("%w: no created time", ErrMalformed)
 	}
-	fp, err := Fingerprint(rf.Recipient)
+	fp, err := Fingerprint(b.Recipient, b.SignKey)
 	if err != nil {
 		return JoinRequest{}, fmt.Errorf("%w: bad public key", ErrMalformed)
 	}
-	if err := CheckFingerprintFormat(rf.Fingerprint); err != nil {
-		return JoinRequest{}, fmt.Errorf("%w: fingerprint is not in the current three-word format (file from an older version?)", ErrMalformed)
-	}
-	if !FingerprintsEqual(fp, rf.Fingerprint) {
-		return JoinRequest{}, fmt.Errorf("%w: fingerprint does not match the public key", ErrMalformed)
+	if !verifySig(b.SignKey, requestDomain, rf.Body, rf.Sig) {
+		return JoinRequest{}, fmt.Errorf("%w: request signature does not match", ErrMalformed)
 	}
 	return JoinRequest{
-		Identity: Identity{Name: rf.Name, Recipient: rf.Recipient, Fingerprint: fp},
-		Created:  rf.Created.UTC(),
+		Identity: Identity{Name: b.Name, Recipient: b.Recipient, SignKey: b.SignKey, Fingerprint: fp},
+		Created:  b.Created.UTC(),
 	}, nil
 }
 
@@ -79,25 +91,20 @@ type BadRequest struct {
 	Err  error
 }
 
-// WriteRequest files a join request for id in the vault folder. The folder
-// must hold a vault. It refuses a name already used by a member or a
-// pending request (ErrDuplicateName), a key that is already a member
-// (ErrAlreadyMember) and a key that already has a request (ErrRequestPending).
-// The write is atomic, so Dropbox and Box only ever see a whole file.
+// WriteRequest files a join request for me in the vault folder, signed by
+// me. The folder must hold a vault. It refuses a name already used by a
+// member or a pending request (ErrDuplicateName), a key that is already a
+// member (ErrAlreadyMember) and a key that already has a request
+// (ErrRequestPending). The write is atomic, so Dropbox and Box only ever
+// see a whole file. The member check reads vault.json's member list without
+// verifying it: it only saves a pointless request, and approval verifies.
 //
 // The duplicate check and the write are not atomic across machines: two
 // people filing the same name at the same moment can overwrite each other;
 // the approver sees whichever file is there and checks its fingerprint.
-func WriteRequest(vaultDir string, id Identity, created time.Time) error {
-	if err := ValidateMemberName(id.Name); err != nil {
+func WriteRequest(vaultDir string, me *Unlocked, created time.Time) error {
+	if err := ValidateMemberName(me.Name); err != nil {
 		return err
-	}
-	fp, err := Fingerprint(id.Recipient)
-	if err != nil {
-		return err
-	}
-	if !FingerprintsEqual(fp, id.Fingerprint) {
-		return ErrFingerprintMismatch
 	}
 	if created.IsZero() {
 		created = time.Now()
@@ -106,56 +113,61 @@ func WriteRequest(vaultDir string, id Identity, created time.Time) error {
 	if err != nil {
 		return err
 	}
-	for _, u := range vf.UnlockersOf(format.UnlockerMember) {
-		if u.Recipient == id.Recipient {
+	for _, m := range vf.Members {
+		if m.Recipient == me.Recipient || m.SignKey == me.SignKey {
 			return ErrAlreadyMember
 		}
-		if u.Label == id.Name {
+		if m.Name == me.Name {
 			return ErrDuplicateName
 		}
 	}
 	dir := filepath.Join(vaultDir, format.RequestsDir)
-	if fi, err := os.Lstat(dir); err == nil && !fi.IsDir() {
-		return fmt.Errorf("%w: requests is not a folder", ErrMalformed)
+	if err := format.CheckVaultDirs(vaultDir); err != nil {
+		return err
 	}
-	pending, _, err := ListRequests(vaultDir)
+	pending, _, err := ListRequests(vaultDir, vf.ID)
 	if err != nil {
 		return err
 	}
 	for _, p := range pending {
-		if p.Identity.Name == id.Name {
+		if p.Identity.Name == me.Name {
 			return ErrDuplicateName
 		}
-		if p.Identity.Recipient == id.Recipient {
+		if p.Identity.Recipient == me.Recipient {
 			return ErrRequestPending
 		}
 	}
-	path, err := RequestPath(vaultDir, id.Name)
+	path, err := RequestPath(vaultDir, me.Name)
 	if err != nil {
 		return err
 	}
 	if _, err := os.Lstat(path); err == nil {
 		return ErrDuplicateName // an unreadable file already holds the name
 	}
-	data, err := json.MarshalIndent(requestFile{
-		Version:     requestVersion,
-		Name:        id.Name,
-		Recipient:   id.Recipient,
-		Fingerprint: fp,
-		Created:     created.UTC().Round(0),
-	}, "", "  ")
+	body, err := json.Marshal(requestBody{VaultID: vf.ID, Name: me.Name, Recipient: me.Recipient, SignKey: me.SignKey, Created: created.UTC().Round(0)})
+	if err != nil {
+		return err
+	}
+	sig, err := me.Sign(requestDomain, body)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(requestFile{Version: requestVersion, Body: body, Sig: sig}, "", "  ")
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(dir, format.DirMode); err != nil {
 		return err
 	}
+	if err := format.CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
 	return format.WriteFileAtomic(path, append(data, '\n'), format.FileMode)
 }
 
-// ReadRequest reads and parses requests/NAME.json. A missing request returns
-// ErrNoRequest.
-func ReadRequest(vaultDir, name string) (JoinRequest, error) {
+// ReadRequest reads and parses requests/NAME.json for the vault vaultID. A
+// missing request returns ErrNoRequest.
+func ReadRequest(vaultDir, vaultID, name string) (JoinRequest, error) {
 	path, err := RequestPath(vaultDir, name)
 	if err != nil {
 		return JoinRequest{}, err
@@ -167,7 +179,7 @@ func ReadRequest(vaultDir, name string) (JoinRequest, error) {
 		}
 		return JoinRequest{}, err
 	}
-	req, err := ParseRequest(data)
+	req, err := ParseRequest(data, vaultID)
 	if err != nil {
 		return JoinRequest{}, err
 	}
@@ -180,7 +192,7 @@ func ReadRequest(vaultDir, name string) (JoinRequest, error) {
 // ListRequests returns the pending join requests, oldest first, and the
 // files in requests/ that were rejected. Sync-conflict copies, temp files
 // and OS litter are skipped silently.
-func ListRequests(vaultDir string) ([]JoinRequest, []BadRequest, error) {
+func ListRequests(vaultDir, vaultID string) ([]JoinRequest, []BadRequest, error) {
 	dir := filepath.Join(vaultDir, format.RequestsDir)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -207,7 +219,7 @@ func ListRequests(vaultDir string) ([]JoinRequest, []BadRequest, error) {
 			}
 			continue
 		}
-		req, err := ReadRequest(vaultDir, name)
+		req, err := ReadRequest(vaultDir, vaultID, name)
 		if err != nil {
 			bad = append(bad, BadRequest{File: displayName(file), Err: err})
 			continue
@@ -234,6 +246,9 @@ func looksLikeConflictCopy(file string) bool {
 func DeleteRequest(vaultDir, name string) error {
 	path, err := RequestPath(vaultDir, name)
 	if err != nil {
+		return err
+	}
+	if err := format.CheckVaultDirs(vaultDir); err != nil {
 		return err
 	}
 	fi, err := os.Lstat(path)

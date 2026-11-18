@@ -355,3 +355,56 @@ func secretNameFromFile(file string) (string, bool) {
 	}
 	return name, true
 }
+
+// LeaseFileName is the rotation lease at the vault root (package members
+// writes and checks it).
+const LeaseFileName = "rotation.lease"
+
+// maxLeaseSize bounds the lease file.
+const maxLeaseSize = 8 << 10
+
+// ReadLease returns the raw rotation lease, or an error wrapping
+// fs.ErrNotExist if there is none.
+func ReadLease(vaultDir string) ([]byte, error) {
+	return readRegular(filepath.Join(vaultDir, LeaseFileName), maxLeaseSize)
+}
+
+// WriteLease writes the rotation lease atomically.
+func WriteLease(vaultDir string, data []byte) error {
+	if len(data) > maxLeaseSize {
+		return ErrTooLarge
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
+	return WriteFileAtomic(filepath.Join(vaultDir, LeaseFileName), data, FileMode)
+}
+
+// RemoveLease deletes the rotation lease if present.
+func RemoveLease(vaultDir string) error {
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
+	err := os.Remove(filepath.Join(vaultDir, LeaseFileName))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// ReadVaultFileCopy reads and parses a sync-conflict copy of vault.json
+// (rel as reported by FindConflicts), and returns its bytes too.
+func ReadVaultFileCopy(vaultDir, rel string) (*VaultFile, []byte, error) {
+	if strings.Contains(rel, "/") || strings.Contains(rel, `\`) || rel == "" || rel == "." || rel == ".." {
+		return nil, nil, fmt.Errorf("%w: not a file in the vault root", ErrMalformed)
+	}
+	data, err := readRegular(filepath.Join(vaultDir, rel), MaxVaultFileSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	vf, err := ParseVaultFile(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return vf, data, nil
+}
