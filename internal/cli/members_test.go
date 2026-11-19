@@ -659,15 +659,25 @@ func TestPlantedStagingNeverOverwrites(t *testing.T) {
 	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age")); string(after) != string(before) {
 		t.Fatal("API_KEY changed")
 	}
-	// A staging folder for a key the chain never had blocks writes, and
-	// doctor moves that aside too.
-	_ = os.MkdirAll(filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab"), 0o700)
+	// A staging folder for a key the chain never had blocks writes. It is
+	// what a restored old copy leaves behind, so --quarantine-staging does
+	// not move it (ue1.18): only the human gate does.
+	unknown := filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab")
+	_ = os.MkdirAll(unknown, 0o700)
 	r = e.runIn("new", "set", "OTHER")
 	expectCode(t, r, ExitUnverified)
-	if !strings.Contains(r.err, "newer state") || !strings.Contains(r.err, "--quarantine-staging") {
+	if !strings.Contains(r.err, "newer state") || !strings.Contains(r.err, "doctor main") {
 		t.Fatalf("%s", r)
 	}
-	e.mustRun("doctor", "main", "--quarantine-staging")
+	r = e.mustRun("doctor", "main", "--quarantine-staging")
+	if _, err := os.Stat(unknown); err != nil || !strings.Contains(r.out, "--set-aside-unknown") {
+		t.Fatalf("--quarantine-staging moved a staging folder for an unknown key:\n%s", r)
+	}
+	code := decodeJSON[map[string]any](t, e.mustRun("trust", "main", "--json").out)["state_code"].(string)
+	e.term.stdinTTY = true
+	r = e.runIn(code+"\n", "doctor", "main", "--set-aside-unknown")
+	e.term.stdinTTY = false
+	expectCode(t, r, 0)
 	e.mustRunIn("newer", "set", "OTHER")
 	// A symlinked secrets folder is refused.
 	elsewhere := t.TempDir()

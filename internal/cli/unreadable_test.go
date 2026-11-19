@@ -146,3 +146,35 @@ func TestFolderWriterStringsNeverReachTextOutputRaw(t *testing.T) {
 	check("passwd", e.runIn(testPass+"\nnew passphrase two\n", "passwd", "team", "--passphrase-stdin"))
 	check("list after passwd", e.run("list"))
 }
+
+// r1q.6.6: a passphrase and a value never come from the same stream. set
+// refuses --passphrase-stdin outright (no matter whether the vault is
+// unlocked), so a passphrase line can never be saved as part of a value.
+func TestSetNeverTakesAPassphraseFromTheValueStream(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	e.initVault("team")
+	e.unlock("team")
+	canary := "canary-pass-" + testPass
+	for _, locked := range []bool{false, true} {
+		if locked {
+			e.mustRun("lock", "--all")
+		}
+		r := e.runIn(canary+"\nthe-value", "set", "KEY1", "--vault", "team", "--passphrase-stdin")
+		expectCode(t, r, ExitUsage)
+		if strings.Contains(r.out+r.err, canary) || !strings.Contains(r.err, "cannot also read a passphrase") {
+			t.Fatalf("locked=%v: %s", locked, r)
+		}
+	}
+	e.unlock("team")
+	if got := e.run("get", "KEY1"); got.code == 0 {
+		t.Fatalf("something was saved: %s", got)
+	}
+	// The documented pattern: unlock with the passphrase, then pipe only the value.
+	e.mustRun("lock", "--all")
+	e.unlock("team")
+	e.mustRunIn("the-value", "set", "KEY1", "--vault", "team")
+	if got := e.mustRun("get", "KEY1").out; got != "the-value\n" {
+		t.Fatalf("%q", got)
+	}
+}

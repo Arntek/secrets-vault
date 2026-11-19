@@ -89,6 +89,12 @@ func cmdDoctor(a *app, p *parsed) error {
 			}
 		case !p.has("quarantine-staging"):
 			r.Status = "not part of this vault's history (planted, or another member's rotation still syncing)"
+		case !v.chain.KnowsKey(id):
+			// A folder for a key this vault's history never had is what the
+			// write guard counts as a newer state: it can be another
+			// member's rotation, or the leftover of a rollback. It moves only
+			// through the gate that asks a person for a current state code.
+			r.Status = "for a key this vault's history never had (another member's rotation still syncing, something planted, or the leftover of a restored old copy). A person at a terminal can set it aside with: " + a.prog + " doctor " + v.name + " --set-aside-unknown"
 		case current:
 			if _, err := crypto.RecoverRotation(v.dir, key); err == nil {
 				r.Status = "finished the interrupted rotation"

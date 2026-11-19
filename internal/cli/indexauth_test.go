@@ -515,6 +515,9 @@ func TestUpgradeVaultMadeByMain(t *testing.T) {
 	before := fileHashes(t, dir)
 	for _, args := range [][]string{{"set", "NEW_KEY"}, {"rm", "LEGACY_KEY", "--yes"}, {"describe", "LEGACY_KEY", "x"}, {"passwd", "main"}} {
 		r := e.runIn(testPass+"\nnew passphrase\nnew passphrase\n", append(args, "--passphrase-stdin")...)
+		if args[0] == "set" { // set cannot take a passphrase on stdin: the vault is unlocked from the reads above
+			r = e.runIn("x", args...)
+		}
 		if r.code == 0 || !strings.Contains(r.err, "upgrade main") || !strings.Contains(r.err, "brew upgrade secrets-vault") {
 			t.Fatalf("%v on a format-2 vault: %s", args, r)
 		}
@@ -1208,7 +1211,8 @@ func TestRefusedRotationMeansRefusedWrites(t *testing.T) {
 				t.Errorf("%v: exit %d, want %d: %s", args, r.code, ExitUnverified, r)
 			}
 		}
-		if r := e.runIn(testPass+"\nn", "set", "NEW_KEY", "--passphrase-stdin"); r.code != ExitUnverified {
+		e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin") // set cannot take the passphrase on stdin
+		if r := e.runIn("n", "set", "NEW_KEY"); r.code != ExitUnverified {
 			t.Errorf("set: exit %d, want %d: %s", r.code, ExitUnverified, r)
 		}
 		if r := e.runIn(testPass+"\nnew passphrase\n", "passwd", "main", "--passphrase-stdin"); r.code != ExitUnverified {

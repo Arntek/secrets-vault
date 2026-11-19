@@ -28,7 +28,10 @@ Phase 2: agents, the terminal UI, an authenticated index, npm and Windows.
 - `make snapshot` builds print the snapshot version the Homebrew formula expects (zjv).
 - `help` gives `ui` and `log` their own headings; "entries" plural; `audit.log` is made private again if its permissions were widened.
 
-- The v0.1.0 known limitation is fixed: a file planted in a shared folder no longer stops `vault member rm` or `vault passwd` from completing (unexpected files are set aside into `quarantine/`, never deleted). A folder writer can still stall changes to a shared vault: it refuses rather than guesses. `vault doctor VAULT` explains why. `vault doctor VAULT --set-aside-unknown` clears the stall only at a terminal, after you type the current state code that a member you know is current reads to you (not someone being removed, not this Mac), and only if this Mac's folder is at or past it; there is no scripted way. A removed member who keeps access to the folder can still restore an old copy, so remove folder access before `member rm`.
+- The v0.1.0 known limitation is fixed: a file planted in a shared folder no longer stops `vault member rm` or `vault passwd` from completing (unexpected files are set aside into `quarantine/`, never deleted). A folder writer can still stall changes to a shared vault: it refuses rather than guesses. `vault doctor VAULT` explains why. `vault doctor VAULT --set-aside-unknown` clears the stall only at a terminal, after you type the current state code that a member you know is current reads to you (not someone being removed, not this Mac), and only if this Mac's folder is at or past it; there is no flag or script path (it is a human step, backed by the exit-5 rule for agents). A removed member who keeps access to the folder can still restore an old copy, so remove folder access before `member rm`.
+
+- `set` refuses `--passphrase-stdin`: a passphrase and a value never come from one stream, so a passphrase line can no longer be saved as part of a value when the vault is already unlocked. Unlock first, then pipe only the value (r1q.6.6).
+- `doctor --quarantine-staging` no longer moves aside a rotation folder for a key the vault's history never had (the write guard counts it as evidence of a newer state); that goes through `--set-aside-unknown` (ue1.18).
 
 ### Security
 

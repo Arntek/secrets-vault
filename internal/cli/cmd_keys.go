@@ -577,6 +577,12 @@ func cmdSet(a *app, p *parsed) error {
 	if err := p.wantArgs(1, 1, usage); err != nil {
 		return err
 	}
+	if a.passStdin {
+		// A passphrase and a value must never come from one stream: when the
+		// vault is already unlocked no prompt reads the passphrase line, and
+		// it would be saved as part of the value (r1q.6.6).
+		return usageErrf("set takes the value on stdin, so it cannot also read a passphrase there (--passphrase-stdin). Unlock first (%s unlock VAULT --passphrase-stdin), then pipe only the value", a.prog)
+	}
 	name := p.args[0]
 	var desc *string
 	if p.has("desc") {
