@@ -289,7 +289,11 @@ func (a *app) unlockIdentityNow() (*members.Unlocked, error) {
 	if !s.Exists() {
 		return nil, failf("you have no identity yet. Run: %s attach NAME DIR", a.prog)
 	}
-	if tw := a.touchWrapper(""); tw != nil {
+	// With --passphrase-stdin the caller scripts the lines in a fixed order
+	// (identity passphrase first), so Touch ID is skipped: if it opened the
+	// identity, the scripted identity line would be read by the next prompt
+	// (a new vault passphrase, say).
+	if tw := a.touchWrapper(""); tw != nil && !a.passStdin {
 		if un, err := s.Unlock(tw); err == nil {
 			return un, nil
 		}

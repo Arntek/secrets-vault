@@ -425,7 +425,7 @@ func TestTouchIDOnIdentity(t *testing.T) {
 	}
 	e.mustRun("unlock", "main") // Touch ID, no passphrase
 	e.set("K", "", "touch-value")
-	e.mustRunIn("rotated passphrase\n", "passwd", "main", "--passphrase-stdin")
+	e.mustRunIn(testPass+"\nrotated passphrase\n", "passwd", "main", "--passphrase-stdin") // identity line first: --passphrase-stdin skips Touch ID
 	e.mustRun("lock", "--all")
 	before := e.touch.unwraps
 	if got := e.mustRun("get", "K").out; got != "touch-value\n" {

@@ -178,3 +178,22 @@ func TestSetNeverTakesAPassphraseFromTheValueStream(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+// With --passphrase-stdin the identity passphrase is always the first line,
+// even on a Mac where Touch ID could open the identity: otherwise that line
+// would be read by the next prompt (the new vault passphrase in passwd).
+func TestPassphraseStdinSkipsTouchID(t *testing.T) {
+	skipWindows(t)
+	e := newEnv(t)
+	e.touch.avail = true
+	e.initVault("main")
+	e.mustRunIn(testPass+"\n", "touchid", "on", "--passphrase-stdin")
+	e.mustRun("lock", "--all")
+	before := e.touch.unwraps
+	e.mustRunIn(testPass+"\nnew vault passphrase\n", "passwd", "main", "--passphrase-stdin")
+	if e.touch.unwraps != before {
+		t.Fatalf("Touch ID was used with --passphrase-stdin (%d unwraps)", e.touch.unwraps-before)
+	}
+	// The identity line was read as the identity passphrase (the command
+	// succeeded), so the next line is the new vault passphrase.
+}

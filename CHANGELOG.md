@@ -33,6 +33,8 @@ Phase 2: agents, the terminal UI, an authenticated index, npm and Windows.
 - `set` refuses `--passphrase-stdin`: a passphrase and a value never come from one stream, so a passphrase line can no longer be saved as part of a value when the vault is already unlocked. Unlock first, then pipe only the value (r1q.6.6).
 - `doctor --quarantine-staging` no longer moves aside a rotation folder for a key the vault's history never had (the write guard counts it as evidence of a newer state); that goes through `--set-aside-unknown` (ue1.18).
 
+- `--passphrase-stdin` skips Touch ID for the identity, so scripted passphrase lines are always read in the same order (identity passphrase first). Scripts that relied on Touch ID opening the identity must now pass that line.
+
 ### Security
 
 - Unverified index rows show the name only (no description, tags, date or author) in text and `--json`, and descriptions are cleaned of control, bidi and zero-width characters (r1q.6.1).
