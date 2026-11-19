@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 (unreleased)
+## v0.2.0 (2026-11-19)
 
 Phase 2: agents, the terminal UI, an authenticated index, npm and Windows.
 
