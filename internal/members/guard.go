@@ -32,6 +32,9 @@ type FolderReport struct {
 	// Unknown lists secrets (and trash entries) sealed under keys this
 	// chain never had: evidence of a newer state.
 	Unknown []string
+	// UnknownFiles are the same files as vault-relative paths
+	// ("secrets/NAME.age", "secrets/.trash/FILE"), for setting them aside.
+	UnknownFiles []string
 	// UnknownStaging lists rotation staging folders for keys the chain
 	// never had.
 	UnknownStaging []string
@@ -53,7 +56,7 @@ func (r *FolderReport) Blocking() bool {
 func CheckFolder(vaultDir string, c *Chain, ignore ...string) (*FolderReport, error) {
 	r := &FolderReport{}
 	head := c.Head().KeyID
-	check := func(name string, ct []byte) {
+	check := func(name, rel string, ct []byte) {
 		id, err := crypto.KeyIDOf(ct)
 		if err != nil || id == head || slices.Contains(ignore, id) {
 			return // damaged files are reported when read
@@ -61,6 +64,7 @@ func CheckFolder(vaultDir string, c *Chain, ignore ...string) (*FolderReport, er
 		seq, _, ok := c.KeyIntroducedAt(id)
 		if !ok {
 			r.Unknown = append(r.Unknown, name)
+			r.UnknownFiles = append(r.UnknownFiles, rel)
 			return
 		}
 		e := Exposed{Name: name, KeyID: id}
@@ -84,7 +88,7 @@ func CheckFolder(vaultDir string, c *Chain, ignore ...string) (*FolderReport, er
 		if err != nil {
 			continue
 		}
-		check(s.Name, ct)
+		check(s.Name, format.SecretsDir+"/"+s.Name+format.SecretExt, ct)
 	}
 	trash, err := format.ListTrash(vaultDir)
 	if err != nil {
@@ -95,7 +99,7 @@ func CheckFolder(vaultDir string, c *Chain, ignore ...string) (*FolderReport, er
 		if err != nil {
 			continue
 		}
-		check(t.Name+" (in the trash)", ct)
+		check(t.Name+" (in the trash)", format.SecretsDir+"/"+format.TrashDir+"/"+t.File, ct)
 	}
 	staging, err := format.PendingRotations(vaultDir)
 	if err != nil {

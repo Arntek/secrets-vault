@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Arntek/secrets-vault/internal/format"
 )
@@ -101,8 +102,38 @@ func ReadSecret(vaultDir, name string, key *VaultKey) ([]byte, error) {
 	return s.Open(key, ct)
 }
 
-// WriteSecret encrypts value and writes secrets/NAME.age atomically. The
-// index entry is the caller's to update.
+// ReadSecretVersion is ReadSecret that also returns the version in the
+// file's header (0 for a file in the unversioned form).
+func ReadSecretVersion(vaultDir, name string, key *VaultKey) ([]byte, uint32, error) {
+	s, err := NewSealer(name)
+	if err != nil {
+		return nil, 0, err
+	}
+	ct, err := format.ReadSecretFile(vaultDir, name)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s.OpenVersion(key, ct)
+}
+
+// WriteSecretVersion encrypts value as a version-stamped file and writes
+// secrets/NAME.age atomically. The index entry is the caller's to update
+// (package index does both).
+func WriteSecretVersion(vaultDir, name string, key *VaultKey, value []byte, version uint32) error {
+	s, err := NewSealer(name)
+	if err != nil {
+		return err
+	}
+	ct, err := s.SealVersion(key, value, version)
+	if err != nil {
+		return err
+	}
+	return format.WriteSecretFile(vaultDir, name, ct)
+}
+
+// WriteSecret encrypts value in the unversioned form and writes
+// secrets/NAME.age atomically. Format-3 vaults need WriteSecretVersion;
+// this is for format-2 vaults and tests.
 func WriteSecret(vaultDir, name string, key *VaultKey, value []byte) error {
 	s, err := NewSealer(name)
 	if err != nil {
@@ -136,6 +167,20 @@ type RotateOptions struct {
 	ExtraKeys []*VaultKey
 	// NewVaultID lets Next give the vault a new ID (vault rebuild).
 	NewVaultID bool
+	// TrustedEntries are index entries the caller vouches for (the lost-race
+	// loser's own pending entries, from its local snapshot); they are
+	// carried into the new index next to the folder's entries that verify
+	// under the current key. Never pass entries read from the folder.
+	TrustedEntries []format.IndexEntry
+	// SkippedFiles, if set, receives the names of secret files that don't
+	// open under any key Rotate knows: a stale copy from an earlier key, a
+	// copy under another name, a truncated file (ue1.15). Anyone who can write
+	// the folder can make such a file, so none may block a rotation. They are left in place unopened instead of aborting the
+	// rotation; they are unreadable under the new key anyway.
+	SkippedFiles *[]string
+	// IndexDropped, if set, receives how many index entries failed
+	// verification and were left out of the new index.
+	IndexDropped *int
 }
 
 // Rotate replaces the vault key: it creates a new key, re-encrypts every
@@ -201,6 +246,10 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 		return nil, err
 	}
 	keys := append([]*VaultKey{oldKey}, opt.ExtraKeys...)
+	// A rotation into a format-3 vault also stamps unversioned files with
+	// version 1 and stages a re-MAC'd index (a format-2 vault rebuilt into
+	// format 3 gets both from its legacy index).
+	target3 := next.Version == format.VaultVersion
 
 	staging, err := format.BeginStaging(vaultDir, next.KeyID)
 	if err != nil {
@@ -217,7 +266,13 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 		if err != nil {
 			return fail(err)
 		}
-		nct, err := reseal(s.Name, keys, newKey, ct)
+		nct, err := reseal(s.Name, keys, newKey, ct, target3)
+		if errors.Is(err, ErrDecrypt) { // not sealed under a known key, or damaged, or sealed for another name
+			if opt.SkippedFiles != nil {
+				*opt.SkippedFiles = append(*opt.SkippedFiles, s.Name)
+			}
+			continue
+		}
 		if err != nil {
 			return fail(fmt.Errorf("crypto: re-encrypting a secret: %w", err))
 		}
@@ -230,11 +285,36 @@ func Rotate(vaultDir string, oldKey *VaultKey, opt RotateOptions) (*VaultKey, er
 		if err != nil {
 			return fail(err)
 		}
-		nct, err := reseal(t.Name, keys, newKey, ct)
+		nct, err := reseal(t.Name, keys, newKey, ct, target3)
+		if errors.Is(err, ErrDecrypt) {
+			if opt.SkippedFiles != nil {
+				*opt.SkippedFiles = append(*opt.SkippedFiles, t.Name+" (in the trash)")
+			}
+			continue
+		}
 		if err != nil {
 			return fail(fmt.Errorf("crypto: re-encrypting a trashed secret: %w", err))
 		}
 		if err := staging.AddTrashed(t, nct); err != nil {
+			return fail(err)
+		}
+	}
+	if target3 {
+		present, live := map[string]bool{}, map[string]bool{}
+		for _, s := range secrets {
+			present[s.Name], live[s.Name] = true, true
+		}
+		for _, t := range trash {
+			present[t.Name] = true
+		}
+		data, dropped, err := stageIndex(vaultDir, vf.ID, next.ID, vf.Version != format.VaultVersion, oldKey, newKey, opt.TrustedEntries, live, present)
+		if err != nil {
+			return fail(err)
+		}
+		if opt.IndexDropped != nil {
+			*opt.IndexDropped = dropped
+		}
+		if err := staging.AddIndex(data); err != nil {
 			return fail(err)
 		}
 	}
@@ -275,24 +355,8 @@ func RecoverRotation(vaultDir string, key *VaultKey) (bool, error) {
 		if id != key.ID() {
 			continue
 		}
-		files, err := format.StagedFiles(vaultDir, id)
-		if err != nil {
+		if err := VerifyStaged(vaultDir, key); err != nil {
 			return false, err
-		}
-		for _, f := range files {
-			ct, err := format.ReadStagedFile(vaultDir, id, f.Rel)
-			if err != nil {
-				return false, err
-			}
-			s, err := NewSealer(f.Name)
-			if err != nil {
-				return false, err
-			}
-			pt, err := s.Open(key, ct)
-			clear(pt)
-			if err != nil {
-				return false, fmt.Errorf("crypto: a staged file does not open under the vault key: %w", err)
-			}
 		}
 		if err := format.CommitStaged(vaultDir, id); err != nil {
 			return false, err
@@ -302,34 +366,113 @@ func RecoverRotation(vaultDir string, key *VaultKey) (bool, error) {
 	return false, nil
 }
 
+// VerifyStaged checks, without moving anything, that every file staged for
+// key's rotation opens under key with its own name and that the staged
+// index (if any) verifies entirely under key. It is what makes an interrupted
+// rotation safe to finish, and what `doctor` uses to say whether a staging
+// folder can be finished at all.
+func VerifyStaged(vaultDir string, key *VaultKey) error {
+	id := key.ID()
+	files, err := format.StagedFiles(vaultDir, id)
+	if err != nil {
+		return err
+	}
+	vf, verr := format.ReadVaultFile(vaultDir)
+	for _, f := range files {
+		ct, err := format.ReadStagedFile(vaultDir, id, f.Rel)
+		if err != nil {
+			return err
+		}
+		if f.Rel == format.IndexFileName {
+			// A staged index must verify entirely under the new key.
+			if verr != nil {
+				return verr
+			}
+			idx, bad, perr := format.ParseIndexTolerant(ct)
+			if perr != nil || bad != 0 || idx.Version != format.IndexVersion {
+				return errors.New("crypto: the staged index is damaged")
+			}
+			for i := range idx.Entries {
+				if !VerifyEntry(key, vf.ID, &idx.Entries[i]) {
+					return errors.New("crypto: a staged index entry does not verify under the vault key")
+				}
+			}
+			continue
+		}
+		s, err := NewSealer(f.Name)
+		if err != nil {
+			return err
+		}
+		pt, err := s.Open(key, ct)
+		clear(pt)
+		if err != nil {
+			return fmt.Errorf("crypto: a staged file does not open under the vault key: %w", err)
+		}
+	}
+	return nil
+}
+
 // KeyIDOf returns the vault key ID a secret file is sealed under, read from
 // its age header without decrypting anything.
 func KeyIDOf(ciphertext []byte) (string, error) {
+	id, _, err := HeaderOf(ciphertext)
+	return id, err
+}
+
+// VersionOf returns the version stamped in a secret file's header (0 for a
+// file in the unversioned form), read without decrypting anything. The
+// header is authenticated by age's header MAC when the file is opened;
+// callers that act on the value read it with ReadSecretVersion.
+func VersionOf(ciphertext []byte) (uint32, error) {
+	_, v, err := HeaderOf(ciphertext)
+	return v, err
+}
+
+// HeaderOf returns the key ID and version from a secret file's first
+// stanza line, without decrypting. Unauthenticated: for classification
+// only (the write guard, cross-checks), never for trust.
+func HeaderOf(ciphertext []byte) (keyID string, version uint32, err error) {
 	var rest []byte
-	for _, typ := range []string{stanzaType, stanzaTypeV1} {
-		intro := "age-encryption.org/v1\n-> " + typ + " "
+	var typ string
+	for _, t := range []string{stanzaType, stanzaTypeV1, stanzaTypeV3} {
+		intro := "age-encryption.org/v1\n-> " + t + " "
 		if bytes.HasPrefix(ciphertext, []byte(intro)) {
-			rest = ciphertext[len(intro):]
+			rest, typ = ciphertext[len(intro):], t
 			break
 		}
 	}
 	if rest == nil {
-		return "", errBadStanza
+		return "", 0, errBadStanza
 	}
-	end := bytes.IndexAny(rest, " \n")
-	if end < 0 {
-		return "", errBadStanza
+	nl := bytes.IndexByte(rest, '\n')
+	if nl < 0 {
+		return "", 0, errBadStanza
 	}
-	id := string(rest[:end])
-	if format.ValidateKeyID(id) != nil {
-		return "", errBadStanza
+	args := strings.Split(string(rest[:nl]), " ")
+	want := 2
+	if typ == stanzaTypeV3 {
+		want = 3
 	}
-	return id, nil
+	if len(args) != want {
+		return "", 0, errBadStanza
+	}
+	if format.ValidateKeyID(args[0]) != nil {
+		return "", 0, errBadStanza
+	}
+	if typ == stanzaTypeV3 {
+		v, perr := parseVersionArg(args[2])
+		if perr != nil {
+			return "", 0, errBadStanza
+		}
+		version = v
+	}
+	return args[0], version, nil
 }
 
 // reseal opens ct with whichever of keys it is sealed under and seals the
-// plaintext with newKey, zeroing the plaintext before returning.
-func reseal(name string, keys []*VaultKey, newKey *VaultKey, ct []byte) ([]byte, error) {
+// plaintext with newKey (keeping its version; an unversioned file becomes
+// version 1 if stamp), zeroing the plaintext before returning.
+func reseal(name string, keys []*VaultKey, newKey *VaultKey, ct []byte, stamp bool) ([]byte, error) {
 	s, err := NewSealer(name)
 	if err != nil {
 		return nil, err
@@ -347,12 +490,18 @@ func reseal(name string, keys []*VaultKey, newKey *VaultKey, ct []byte) ([]byte,
 	if key == nil {
 		return nil, ErrOtherKey
 	}
-	pt, err := s.Open(key, ct)
+	pt, version, err := s.OpenVersion(key, ct)
 	if err != nil {
 		return nil, err
 	}
 	defer clear(pt)
-	return s.Seal(newKey, pt)
+	if version == 0 {
+		if stamp {
+			return s.SealVersion(newKey, pt, 1)
+		}
+		return s.Seal(newKey, pt)
+	}
+	return s.SealVersion(newKey, pt, version)
 }
 
 // UpgradeSecrets re-seals every live and trashed secret still in the
@@ -378,7 +527,7 @@ func UpgradeSecrets(vaultDir string, key *VaultKey) (int, error) {
 		if !isV1(ct) {
 			continue
 		}
-		nct, err := reseal(s.Name, []*VaultKey{key}, key, ct)
+		nct, err := reseal(s.Name, []*VaultKey{key}, key, ct, false)
 		if err != nil {
 			return n, err
 		}
@@ -399,9 +548,80 @@ func UpgradeSecrets(vaultDir string, key *VaultKey) (int, error) {
 		if !isV1(ct) {
 			continue
 		}
-		nct, err := reseal(t.Name, []*VaultKey{key}, key, ct)
+		nct, err := reseal(t.Name, []*VaultKey{key}, key, ct, false)
 		if err != nil {
 			return n, err
+		}
+		if err := format.WriteTrashedFile(vaultDir, t, nct); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// UpgradeToV3 re-seals every live and trashed secret that is not yet in
+// the versioned form (stanza v1 or v2) under the same key at version 1,
+// one atomic file write each, and returns how many it rewrote. It is part
+// of `vault upgrade` (docs/design/index-auth.md) and is safe to run again.
+func UpgradeToV3(vaultDir string, key *VaultKey) (int, error) {
+	n := 0
+	one := func(name string, ct []byte) ([]byte, bool, error) {
+		v, err := VersionOf(ct)
+		if err != nil {
+			return nil, false, ErrDecrypt
+		}
+		if v != 0 {
+			return nil, false, nil
+		}
+		s, err := NewSealer(name)
+		if err != nil {
+			return nil, false, err
+		}
+		pt, err := s.Open(key, ct)
+		if err != nil {
+			return nil, false, err
+		}
+		defer clear(pt)
+		nct, err := s.SealVersion(key, pt, 1)
+		return nct, err == nil, err
+	}
+	secrets, err := format.ListSecrets(vaultDir)
+	if err != nil {
+		return n, err
+	}
+	for _, s := range secrets {
+		ct, err := format.ReadSecretFile(vaultDir, s.Name)
+		if err != nil {
+			return n, err
+		}
+		nct, changed, err := one(s.Name, ct)
+		if err != nil {
+			return n, err
+		}
+		if !changed {
+			continue
+		}
+		if err := format.WriteSecretFile(vaultDir, s.Name, nct); err != nil {
+			return n, err
+		}
+		n++
+	}
+	trash, err := format.ListTrash(vaultDir)
+	if err != nil {
+		return n, err
+	}
+	for _, t := range trash {
+		ct, err := format.ReadTrashedFile(vaultDir, t)
+		if err != nil {
+			return n, err
+		}
+		nct, changed, err := one(t.Name, ct)
+		if err != nil {
+			return n, err
+		}
+		if !changed {
+			continue
 		}
 		if err := format.WriteTrashedFile(vaultDir, t, nct); err != nil {
 			return n, err

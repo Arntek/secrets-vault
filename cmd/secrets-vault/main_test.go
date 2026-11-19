@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -17,6 +18,9 @@ func TestBinaryLeak(t *testing.T) {
 		t.Skip("builds the binary")
 	}
 	bin := filepath.Join(t.TempDir(), "secrets-vault")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
 	build := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)

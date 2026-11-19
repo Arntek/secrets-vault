@@ -79,3 +79,42 @@ jobs:
           git add Formula/secrets-vault.rb
           git commit -m "secrets-vault ${TAG}"
           git push
+
+  # DISABLED until ENABLE_NPM_PUBLISH is set. Publishing needs an npm account
+  # and token, which is Arnold's to create. To enable: create an npm access
+  # token that can publish "secrets-vault" (an automation / granular token),
+  # store it as the secret NPM_TOKEN, then set the repository variable
+  # ENABLE_NPM_PUBLISH to true. See docs/releasing.md.
+  npm-publish:
+    if: ${{ vars.ENABLE_NPM_PUBLISH == 'true' }}
+    needs: release # the package downloads the GitHub Release, so it must exist first
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: checksums
+          path: checksums
+      - name: Pin the archive checksums into the package (fails unless all six are there)
+        env:
+          TAG: ${{ github.ref_name }}
+        run: node scripts/npm-pin-checksums.js "${TAG#v}" checksums/checksums.txt
+      - name: Set the package version to the tag and publish
+        working-directory: packaging/npm
+        env:
+          TAG: ${{ github.ref_name }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm version "${TAG#v}" --no-git-tag-version
+          cp ../../LICENSE LICENSE
+          npm test
+          npm publish --provenance --access public

@@ -94,6 +94,11 @@ func New(t testing.TB) *Harness {
 	h.dirs = []string{h.HomeDir, h.TempDir}
 	t.Setenv("HOME", h.HomeDir)
 	t.Setenv("TMPDIR", h.TempDir)
+	// Windows reads these instead of HOME and TMPDIR.
+	t.Setenv("USERPROFILE", h.HomeDir)
+	t.Setenv("LOCALAPPDATA", filepath.Join(h.HomeDir, "AppData", "Local"))
+	t.Setenv("TEMP", h.TempDir)
+	t.Setenv("TMP", h.TempDir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h.HomeDir, ".config"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(h.HomeDir, ".local", "state"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(h.HomeDir, ".cache"))

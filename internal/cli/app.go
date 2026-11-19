@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -77,19 +78,21 @@ var passphraseLogN = 0
 
 // app is one invocation of the program.
 type app struct {
-	prog     string
-	in       *bufio.Reader
-	rawStdin io.Reader
-	out      io.Writer
-	errOut   io.Writer
-	term     terminal
-	touch    touchBackend
-	audit    audit.Logger
-	now      func() time.Time
-	getenv   func(string) string
-	environ  func() []string
-	clip     clipboard
-	exePath  func() (string, error)
+	// quarantined lists secret files a rotation moved aside (--json).
+	quarantined []string
+	prog        string
+	in          *bufio.Reader
+	rawStdin    io.Reader
+	out         io.Writer
+	errOut      io.Writer
+	term        terminal
+	touch       touchBackend
+	audit       audit.Logger
+	now         func() time.Time
+	getenv      func(string) string
+	environ     func() []string
+	clip        clipboard
+	exePath     func() (string, error)
 
 	asJSON    bool
 	passStdin bool
@@ -114,11 +117,18 @@ type app struct {
 	// it is not running.
 	dialAgent func(start bool) (agent.Client, error)
 
-	// dialogPassphrase is the Phase 2 hook for a native macOS password
-	// dialog when an agent (no terminal) hits a locked vault. It is nil
-	// today; unlock falls through to "locked, exit 3" when no terminal is
-	// available.
-	dialogPassphrase func(vault string) ([]byte, error)
+	// dialog shows the native password dialog (macOS only; nil elsewhere).
+	// Tests replace it: no test may open a real dialog.
+	dialog   dialogRunner
+	noDialog bool   // --no-dialog
+	goos     string // runtime.GOOS; tests set "darwin" to exercise the dialog
+	// caller reports the program that started this command (the parent
+	// process) and its process ID, for the dialog and the read log.
+	caller func() (string, int)
+	// cmdName is the command being run, for the read log.
+	cmdName string
+	// auditWarned stops a failing read log from warning more than once.
+	auditWarned bool
 }
 
 func newApp(prog string, stdin io.Reader, stdout, stderr io.Writer) *app {
@@ -128,7 +138,9 @@ func newApp(prog string, stdin io.Reader, stdout, stderr io.Writer) *app {
 		errOut:  stderr,
 		term:    osTerminal{in: stdin, out: stdout},
 		touch:   realTouch(),
-		audit:   audit.Nop{},
+		goos:    runtime.GOOS,
+		dialog:  realDialog(),
+		caller:  audit.Caller,
 		now:     time.Now,
 		getenv:  os.Getenv,
 		environ: os.Environ,
@@ -178,6 +190,8 @@ func (a *app) client(start bool) agent.Client {
 func (a *app) agentUnavailableErr() error {
 	err := a.agentErr
 	switch {
+	case errors.Is(err, agent.ErrUnsupported) && runtime.GOOS == "windows":
+		return failf("there is no unlock agent on Windows yet, so a vault cannot stay unlocked between commands. Each command that needs a key asks for the passphrase")
 	case err == nil, errors.Is(err, agent.ErrUnsupported):
 		return failf("the unlock agent is not available on this system")
 	case errors.Is(err, agent.ErrPathTooLong), errors.Is(err, agent.ErrUnsafeDir):
@@ -186,17 +200,24 @@ func (a *app) agentUnavailableErr() error {
 	return failf("the unlock agent cannot start: %v", err)
 }
 
-func (a *app) printf(format string, args ...any) { fmt.Fprintf(a.out, format, args...) }
-func (a *app) warnf(format string, args ...any) {
-	fmt.Fprintf(a.errOut, a.prog+": "+format+"\n", args...)
+func (a *app) printf(format string, args ...any) {
+	fmt.Fprint(a.out, safeLines(fmt.Sprintf(format, args...)))
 }
-func (a *app) infof(format string, args ...any) { fmt.Fprintf(a.errOut, format+"\n", args...) }
+func (a *app) warnf(format string, args ...any) {
+	fmt.Fprint(a.errOut, safeLines(fmt.Sprintf(a.prog+": "+format+"\n", args...)))
+}
+func (a *app) infof(format string, args ...any) {
+	fmt.Fprint(a.errOut, safeLines(fmt.Sprintf(format+"\n", args...)))
+}
 
 // --- errors and exit codes ---
 
 type exitErr struct {
 	code int
 	msg  string
+	// indexDamaged marks a refusal because a vault's index is missing or
+	// damaged: `set` can still write a new key then (it is the repair).
+	indexDamaged bool
 }
 
 func (e *exitErr) Error() string { return e.msg }
@@ -354,16 +375,35 @@ func (a *app) configFile() (string, error) {
 		a.cfgPath = p
 		return p, nil
 	}
-	base := a.getenv("XDG_CONFIG_HOME")
+	base := configBase(runtime.GOOS, a.getenv, a.home())
 	if base == "" {
-		h := a.home()
-		if h == "" {
-			return "", failf("cannot find your home folder; set %s", EnvConfig)
-		}
-		base = filepath.Join(h, ".config")
+		return "", failf("cannot find your home folder; set %s", EnvConfig)
 	}
 	a.cfgPath = filepath.Join(base, "vault", "config.toml")
 	return a.cfgPath, nil
+}
+
+// configBase is the folder that holds the "vault" config folder:
+// XDG_CONFIG_HOME when set, else %LOCALAPPDATA% on Windows (not the roaming
+// profile: the identity and Touch ID/Hello keys belong to this machine),
+// else ~/.config. It returns "" when no home folder can be found.
+func configBase(goos string, getenv func(string) string, home string) string {
+	if x := getenv("XDG_CONFIG_HOME"); x != "" {
+		return x
+	}
+	if goos == "windows" {
+		if l := getenv("LOCALAPPDATA"); l != "" {
+			return l
+		}
+		if home != "" {
+			return filepath.Join(home, "AppData", "Local")
+		}
+		return ""
+	}
+	if home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config")
 }
 
 func (a *app) configDir() (string, error) {
@@ -373,3 +413,6 @@ func (a *app) configDir() (string, error) {
 	}
 	return filepath.Dir(p), nil
 }
+
+// ExitCode lets other packages map an error to the documented exit code.
+func (e *exitErr) ExitCode() int { return e.code }

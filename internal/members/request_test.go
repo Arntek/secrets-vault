@@ -143,8 +143,12 @@ func TestFormatVersionsBumped(t *testing.T) {
 	v := newVault(t, alice)
 	_ = WriteRequest(v.dir, bob.un, t0)
 	for _, p := range []string{format.VaultFilePath(v.dir), filepath.Join(v.dir, "requests", "bob.json"), alice.store.path()} {
-		if !bytes.Contains(mustReadFile(t, p), []byte(`"version": 2`)) {
-			t.Errorf("%s is not written as version 2", filepath.Base(p))
+		want := `"version": 2`
+		if filepath.Base(p) == format.VaultFileName {
+			want = `"version": 3` // the authenticated index (docs/design/index-auth.md)
+		}
+		if !bytes.Contains(mustReadFile(t, p), []byte(want)) {
+			t.Errorf("%s is not written with %s", filepath.Base(p), want)
 		}
 	}
 }

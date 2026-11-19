@@ -113,6 +113,7 @@ func (a *app) acceptRollback(v *vaultRef) error {
 				a.infof("  (%s was removed at %s@%d by %s)", r.Member.Name, c.File.Name, i, c.States[i].By)
 			}
 		}
+		a.infof("This also forgets what this machine verified of the index; keys are checked afresh from the folder's state.")
 		a.infof("Accept this only if every member agrees it is the right state.")
 	}
 	typed := a.signerFP
@@ -135,6 +136,11 @@ func (a *app) acceptRollback(v *vaultRef) error {
 	}
 	if ps, err := a.pendingStore(); err == nil {
 		_ = ps.DeleteAll(c.File.ID)
+	}
+	// What this machine verified of the index belonged to the state it just
+	// gave up: every key reads as first use from here (IS3).
+	if st, err := a.indexStore(); err == nil {
+		_ = st.Delete(c.File.ID)
 	}
 	if rep, err := members.CheckFolder(v.dir, c); err == nil {
 		for _, n := range rep.Unknown {
@@ -164,6 +170,7 @@ func cmdRebuild(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	a.setAsideBadFolders(v)
 	if _, err := a.open(v); err != nil {
 		return err
 	}
@@ -207,10 +214,14 @@ func cmdRebuild(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	if err := a.setAsideConflicts(v, key); err != nil {
+		return err
+	}
 	oldID := v.chain.File.ID
 	newKey, err := crypto.Rotate(v.dir, key, crypto.RotateOptions{
-		Expect:     v.chain.Raw,
-		NewVaultID: true,
+		Expect:         v.chain.Raw,
+		NewVaultID:     true,
+		TrustedEntries: a.trustedEntries(v),
 		Next: func(nk *crypto.VaultKey) (*format.VaultFile, error) {
 			vf, err := crypto.NewVaultFile(v.chain.File.Name, nk, []crypto.KeyWrapper{mw, pw})
 			if err != nil {

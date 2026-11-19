@@ -11,8 +11,12 @@ secrets-vault is one Go binary (`cmd/secrets-vault`) installed as `secrets-vault
 | `internal/touchid` | Touch ID unlocker: Secure Enclave key via a Swift CryptoKit static library linked through cgo (`darwin && cgo && touchid` build tag, set by the Makefile), implementing `crypto.KeyWrapper`. Returns `ErrUnsupported` in every other build. | p1d |
 | `internal/agent` | Memory-only unlock agent (like ssh-agent) and its `Client`: holds unlocked keys per vault with a TTL (default 4h, 5m to 24h) behind a user-only socket. | 244 |
 | `internal/members` | Personal identities (age X25519 + Ed25519 signing key), fingerprints (`MAPLE-RIVER-OTTER-4417`, over both keys), signed join requests, the signed membership log and its verifier, trust pins, approve, remove/passwd with key rotation, lost-race rebase, write guard. | p2h, ue1.1 |
-| `internal/audit` | Local read log (`vault log`). Events hold names only; the type has no field for a value. | Phase 2 (interface fixed now) |
+| `internal/agentsetup` | Additive edits to an AI-agent setup: writes one file it owns (checksum marker on its last line) or one marked block inside CLAUDE.md/AGENTS.md; refuses symlinks and hand-edited content; atomic writes, original permissions kept, dry-run diff; and the agent rules text (`Rules`) printed by `vault prime`. | r1q.1 |
+| `internal/audit` | Local read log (`vault log`). Events hold names only; the type has no field for a value. | r1q.2 |
+| `internal/index` | The authenticated index: per-entry MAC verification, cross-checks against the secret files' versions, the local snapshot, the locked view and the compare-and-swap write loop (docs/design/index-auth.md). | ue1.7 |
 | `internal/cli` | Commands, flags, prompts, `--json`, masking, exit codes, registry (`~/.config/vault/config.toml`), aliases. Orchestrates; holds no business rules. | rn5 |
+| `internal/tui` | Full-screen terminal interface for `vault ui` (Bubble Tea). Imports no other vault package (only `tui/quiet`); talks to the vault only through its `Backend` interface, which `cli` implements with the same operations the commands use. Masking, timed reveal, alternate screen, control-character stripping. | r1q.3 |
+| `internal/testguard` | `Forbid(what)`: panics under `go test`. Called by the code that shows the real macOS password dialog, the Touch ID sheet or touches the system clipboard, so a test that forgets to inject a fake fails loudly instead of popping a dialog on someone's screen. | r1q.2 |
 | `internal/leaktest` | Test-only harness: runs code with canary secrets and fails if one appears in stdout, stderr, logs, temp files or HOME. | ii6 |
 | `internal/arch` | Test-only: enforces the dependency rules below. | ii6 |
 
@@ -23,8 +27,8 @@ Arrows point from importer to imported. Nothing may import "upwards".
 ```
 layer 0  cmd/secrets-vault
 layer 1  internal/cli
-layer 2  internal/members   internal/agent   internal/touchid
-layer 3  internal/crypto    internal/audit
+layer 2  internal/members   internal/agent   internal/touchid   internal/index   internal/tui
+layer 3  internal/crypto    internal/audit    internal/agentsetup   internal/testguard
 layer 4  internal/format
 ```
 
@@ -34,11 +38,14 @@ Allowed internal imports (non-test code), enforced by `internal/arch/arch_test.g
 
 | Package | May import |
 |---|---|
-| `format`, `audit`, `leaktest` | standard library only |
+| `format`, `audit`, `agentsetup`, `testguard`, `leaktest` | standard library only |
 | `crypto` | `format` |
 | `agent` | `crypto`, `format` |
-| `touchid` | `crypto`, `format` |
+| `touchid` | `crypto`, `format`, `testguard` |
 | `members` | `crypto`, `format`, `audit` |
+| `index` | `crypto`, `format` |
+| `tui` | `tui/quiet`, plus Bubble Tea / lipgloss and the standard library |
+| `tui/quiet` | lipgloss only. Its init runs before Bubble Tea's, which would otherwise query the terminal's colours at start-up of every command |
 | `cli` | any internal package except `leaktest` and `arch` |
 | `cmd/secrets-vault` | `cli` |
 
@@ -59,7 +66,7 @@ File layout, parsing rules and the call sequences for these two packages are in 
 - **`members`** (p2h, ue1.1; see [design/membership-auth.md](design/membership-auth.md)): `Load`/`Verify` (the signed log, against the registered vault ID), `Classify` against a `TrustStore` pin, `Chain.Append` (the single `authorise` rule: any current member may sign), `NewVault`, `ApproveRequest`, `Remove`, `Passwd`, `Rebase`, `CheckFolder` (write guard), `PendingStore`, leases, `StateCode`/`MatchStateCode`; personal identity store (`NewStore(dir)`, `Create`, `Unlock`, `AddUnlocker`, `Export`, `Import`; the private key is sealed under an identity key wrapped once per `crypto.KeyWrapper`, so Touch ID is added later with `AddUnlocker`); `Fingerprint` (`MAPLE-RIVER-OTTER-4417`: three BIP-39 words plus four digits, about 46 bits, scrypt-hardened; exact comparison, `CheckFingerprintFormat` rejects the old two-word form); join requests (`WriteRequest`, `ReadRequest`, `ListRequests`, `DeleteRequest`, files `requests/NAME.json`); `Inspect` with warnings. Membership is whatever the verified log says; `members.json` is gone (added_by is derived from the signed records). Names are lower-case `a-z0-9-_`.
 - **`crypto.Sealer`**: `Seal` / `Open` a secret value with a `VaultKey`. Get one from `crypto.NewSealer(name)`: the key name is bound into the encryption. Open failures return `crypto.ErrDecrypt`.
 - **`agent.Client`**: `Unlock(vaultID, key, ttl)`, `Key(vaultID)`, `Lock`, `LockAll`, `Status`, `Close`. Unlocking (Touch ID or passphrase prompt) happens in the CLI process; only the unwrapped key goes to the agent. `agent.ErrLocked` maps to exit code 3.
-- **`audit.Logger`**: `Record(audit.Event) error`. Use `audit.Nop{}` until Phase 2.
+- **`audit.Logger`**: `Record(audit.Event) error`. `audit.File` is the real logger (created on first use in `app.recordEvent`); `audit.Nop{}` is for tests.
 - **`cli.Run(args, stdin, stdout, stderr) int`**: the whole program, testable in-process. Exit codes: 0 ok, 1 error, 2 usage, 3 locked, 4 key not found, 5 vault failed verification (tampered, substituted, rolled back, behind a state code). 3, 4 and 5 are the agent contract: an agent must never treat 5 as a missing key. It also serves the hidden `__agent` and `__clipclear` subcommands, so `cmd/secrets-vault` stays a one-liner. Commands, registry and flags are described in [cli.md](cli.md).
 
 ## Unlock flow

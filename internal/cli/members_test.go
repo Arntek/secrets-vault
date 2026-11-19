@@ -68,7 +68,7 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 		t.Fatalf("attach output: %s", r)
 	}
 	stranger := newEnv(t)
-	expectCode(t, stranger.run("attach", "team", vdir), ExitError)
+	expectCode(t, stranger.run("attach", "team", vdir), ExitUsage) // no terminal and no --as: refused before registering
 	expectCode(t, dan.runIn(personalPass+"\n", "get", "EXAMPLE_TEAM_KEY", "--passphrase-stdin"), ExitError)
 
 	fp := owner.requestFingerprint("team", "dan")
@@ -118,6 +118,9 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 	if len(ml["members"].([]any)) != 2 {
 		t.Fatalf("member list: %v", ml)
 	}
+	if evs := decodeJSON[[]struct{ Action, Member string }](t, owner.mustRun("log", "--json").out); !hasMemberEvent(evs, "member-add", "dan") {
+		t.Fatalf("approving dan must be in the read log: %v", evs)
+	}
 	logOut := owner.mustRun("member", "log", "team").out
 	if !strings.Contains(logOut, "add-member") || !strings.Contains(logOut, "genesis") {
 		t.Fatalf("member log: %s", logOut)
@@ -131,6 +134,9 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 		if !strings.Contains(r.out, want) {
 			t.Errorf("removal output missing %q:\n%s", want, r.out)
 		}
+	}
+	if evs := decodeJSON[[]struct{ Action, Member string }](t, owner.mustRun("log", "--json").out); !hasMemberEvent(evs, "member-remove", "dan") {
+		t.Fatalf("removing dan must be in the read log: %v", evs)
 	}
 	if got := owner.mustRun("get", "EXAMPLE_TEAM_KEY").out; got != "team-secret-value\n" {
 		t.Fatalf("%q", got)
@@ -148,6 +154,17 @@ func TestMembersFlowThroughCLI(t *testing.T) {
 		t.Fatalf("a removed member must not read: %s", r)
 	}
 	notContains(t, "removed member's output", r.out+r.err, "team-secret-value")
+	// b3o: a removed member is told so (exit 5, no "run unlock" loop), and
+	// status says "removed" rather than "unlocked".
+	r = dan.runIn(personalPass+"\n", "unlock", "team", "--passphrase-stdin")
+	expectCode(t, r, ExitUnverified)
+	if !strings.Contains(r.err, "no longer a member of 'team'") || strings.Contains(r.err, "Run:") {
+		t.Fatalf("removed member's unlock: %s", r)
+	}
+	notContains(t, "removed member's unlock", r.out+r.err, "team-secret-value", vdir)
+	if st := dan.mustRun("status"); !strings.Contains(st.out, "removed") || strings.Contains(st.out, "unlocked") {
+		t.Fatalf("status for a removed member: %s", st)
+	}
 	expectCode(t, dan.run("unlock", "team", "--accept-key-change"), ExitUsage) // that flag is gone
 }
 
@@ -408,7 +425,7 @@ func TestTouchIDOnIdentity(t *testing.T) {
 	}
 	e.mustRun("unlock", "main") // Touch ID, no passphrase
 	e.set("K", "", "touch-value")
-	e.mustRunIn("rotated passphrase\n", "passwd", "main", "--passphrase-stdin")
+	e.mustRunIn(testPass+"\nrotated passphrase\n", "passwd", "main", "--passphrase-stdin") // identity line first: --passphrase-stdin skips Touch ID
 	e.mustRun("lock", "--all")
 	before := e.touch.unwraps
 	if got := e.mustRun("get", "K").out; got != "touch-value\n" {
@@ -442,7 +459,7 @@ func TestTrustAndRebuild(t *testing.T) {
 	// refuses the vault until it is met, or the rollback is accepted.
 	r = e.run("trust", "main", "--expect", "main@0 ABLE-ABLE-ABLE-ABLE-ABLE-ABLE")
 	expectCode(t, r, ExitUnverified)
-	if !strings.Contains(r.err, "behind the state code you were given") {
+	if !strings.Contains(r.err, "doesn't match this vault's history") {
 		t.Fatalf("%s", r)
 	}
 	expectCode(t, e.run("get", "K"), ExitUnverified)
@@ -642,15 +659,25 @@ func TestPlantedStagingNeverOverwrites(t *testing.T) {
 	if after, _ := os.ReadFile(filepath.Join(dir, "secrets", "API_KEY.age")); string(after) != string(before) {
 		t.Fatal("API_KEY changed")
 	}
-	// A staging folder for a key the chain never had blocks writes, and
-	// doctor moves that aside too.
-	_ = os.MkdirAll(filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab"), 0o700)
+	// A staging folder for a key the chain never had blocks writes. It is
+	// what a restored old copy leaves behind, so --quarantine-staging does
+	// not move it (ue1.18): only the human gate does.
+	unknown := filepath.Join(dir, "secrets", ".sv-rotate-abababababababababababababababab")
+	_ = os.MkdirAll(unknown, 0o700)
 	r = e.runIn("new", "set", "OTHER")
 	expectCode(t, r, ExitUnverified)
-	if !strings.Contains(r.err, "newer state") || !strings.Contains(r.err, "--quarantine-staging") {
+	if !strings.Contains(r.err, "newer state") || !strings.Contains(r.err, "doctor main") {
 		t.Fatalf("%s", r)
 	}
-	e.mustRun("doctor", "main", "--quarantine-staging")
+	r = e.mustRun("doctor", "main", "--quarantine-staging")
+	if _, err := os.Stat(unknown); err != nil || !strings.Contains(r.out, "--set-aside-unknown") {
+		t.Fatalf("--quarantine-staging moved a staging folder for an unknown key:\n%s", r)
+	}
+	code := decodeJSON[map[string]any](t, e.mustRun("trust", "main", "--json").out)["state_code"].(string)
+	e.term.stdinTTY = true
+	r = e.runIn(code+"\n", "doctor", "main", "--set-aside-unknown")
+	e.term.stdinTTY = false
+	expectCode(t, r, 0)
 	e.mustRunIn("newer", "set", "OTHER")
 	// A symlinked secrets folder is refused.
 	elsewhere := t.TempDir()
@@ -724,7 +751,7 @@ func TestNewerVaultMessage(t *testing.T) {
 	e := newEnv(t)
 	dir := e.initVault("main")
 	data, _ := os.ReadFile(filepath.Join(dir, "vault.json"))
-	data = []byte(strings.Replace(string(data), `"version": 2`, `"version": 3`, 1))
+	data = []byte(strings.Replace(string(data), `"version": 3`, `"version": 4`, 1))
 	_ = os.WriteFile(filepath.Join(dir, "vault.json"), data, 0o600)
 	r := e.runIn(testPass+"\n", "unlock", "main", "--passphrase-stdin")
 	expectCode(t, r, ExitError)
@@ -775,4 +802,13 @@ func TestTamperedVaultNotKeyNotFound(t *testing.T) {
 	if out["state_code_checked"] != false || fp == nil || fp["signed_by"] != testUser || len(fp["members"].([]any)) != 1 {
 		t.Fatalf("attach --json: %v", out)
 	}
+}
+
+func hasMemberEvent(evs []struct{ Action, Member string }, action, member string) bool {
+	for _, e := range evs {
+		if e.Action == action && e.Member == member {
+			return true
+		}
+	}
+	return false
 }

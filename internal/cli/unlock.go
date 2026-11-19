@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -184,6 +185,9 @@ func (a *app) enrolledDevice() *touchid.Device {
 // ensureDevice enrols this Mac's Secure Enclave key if needed.
 func (a *app) ensureDevice() (*touchid.Device, error) {
 	if !a.touch.available() {
+		if runtime.GOOS == "windows" {
+			return nil, failf("Touch ID is a Mac feature and Windows Hello is not supported yet: on Windows, vaults open with a passphrase only")
+		}
 		return nil, failf("Touch ID is not available here (no sensor, an SSH session, or this build lacks it)")
 	}
 	if d := a.enrolledDevice(); d != nil {
@@ -285,7 +289,11 @@ func (a *app) unlockIdentityNow() (*members.Unlocked, error) {
 	if !s.Exists() {
 		return nil, failf("you have no identity yet. Run: %s attach NAME DIR", a.prog)
 	}
-	if tw := a.touchWrapper(""); tw != nil {
+	// With --passphrase-stdin the caller scripts the lines in a fixed order
+	// (identity passphrase first), so Touch ID is skipped: if it opened the
+	// identity, the scripted identity line would be read by the next prompt
+	// (a new vault passphrase, say).
+	if tw := a.touchWrapper(""); tw != nil && !a.passStdin {
 		if un, err := s.Unlock(tw); err == nil {
 			return un, nil
 		}
@@ -418,7 +426,41 @@ func (a *app) authenticate(v *vaultRef, vf *format.VaultFile) (*crypto.VaultKey,
 			return k, err
 		}
 	}
+	if v.chain != nil && a.removedFrom(v.chain) {
+		return nil, a.notMemberErr(v.name)
+	}
 	return nil, a.lockedErr(v.name)
+}
+
+// removedFrom reports whether this person's identity was a member of the
+// vault in some earlier state and is not in the current one.
+func (a *app) removedFrom(c *members.Chain) bool {
+	id, ok := a.myIdentity()
+	if !ok || c == nil || len(c.States) == 0 {
+		return false
+	}
+	has := func(s *members.State) bool {
+		for _, m := range s.Members {
+			if m.Recipient == id.Recipient && m.SignKey == id.SignKey {
+				return true
+			}
+		}
+		return false
+	}
+	if has(c.Head()) {
+		return false
+	}
+	for i := range c.States {
+		if has(&c.States[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// notMemberErr is exit 5 with no way to loop: asking to unlock cannot help.
+func (a *app) notMemberErr(vault string) error {
+	return verifyErrf("you are no longer a member of '%s'. Ask a current member to add you again (%s attach %s DIR files a new join request)", vault, a.prog, vault)
 }
 
 // identityNeedsUpgrade reports whether an identity exists that was made by
@@ -436,16 +478,8 @@ func (a *app) identityNeedsUpgrade() bool {
 // when there is no way to ask (the caller reports "locked").
 func (a *app) promptVaultPassphrase(v *vaultRef, vf *format.VaultFile) (*crypto.VaultKey, error) {
 	if !a.interactive() {
-		if a.dialogPassphrase != nil {
-			// Phase 2: native password dialog for agents.
-			p, err := a.dialogPassphrase(v.name)
-			if err != nil {
-				return nil, nil
-			}
-			defer clear(p)
-			return a.tryPassphrase(vf, p)
-		}
-		return nil, nil
+		// No terminal: the native dialog for agents (macOS), or "locked".
+		return a.dialogUnlockVault(v, vf)
 	}
 	for try := 0; try < maxPassphraseTry; try++ {
 		p, err := a.askHidden("Passphrase for '" + v.name + "': ")

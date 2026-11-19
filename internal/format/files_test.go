@@ -218,7 +218,7 @@ func TestIndexHelpersAndRebuild(t *testing.T) {
 	if e, _ := rebuilt.Get("NEW"); e.Updated.IsZero() {
 		t.Fatal("new entry has no time")
 	}
-	if err := WriteIndex(dir, rebuilt); err != nil {
+	if err := WriteIndex(dir, asV2(rebuilt)); err != nil {
 		t.Fatal(err)
 	}
 	if _, changed, _ := RebuildIndex(dir, rebuilt); changed {

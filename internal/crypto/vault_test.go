@@ -246,16 +246,17 @@ func TestRotateFailureChangesNothing(t *testing.T) {
 	v := newVault(t)
 	_ = WriteSecret(v.dir, "A", v.key, []byte("a"))
 	_ = WriteSecret(v.dir, "B", v.key, []byte("b"))
-	// Corrupt B so it cannot be re-encrypted.
+	// Content a folder writer can make (a corrupt file) is skipped, never a
+	// reason to abort (ue1.15). What does abort is an error that puts honest
+	// data at risk: here B is not a regular file, so it can't be read.
 	pb, _ := format.SecretPath(v.dir, "B")
-	data, _ := os.ReadFile(pb)
-	data[len(data)-1] ^= 1
-	if err := os.WriteFile(pb, data, 0o600); err != nil {
+	_ = os.Remove(pb)
+	if err := os.Symlink(pb+".elsewhere", pb); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(format.VaultFilePath(v.dir))
-	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); !errors.Is(err, ErrDecrypt) {
-		t.Fatalf("rotate over a corrupt file = %v", err)
+	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); err == nil {
+		t.Fatal("rotate over an unreadable file succeeded")
 	}
 	after, _ := os.ReadFile(format.VaultFilePath(v.dir))
 	if !bytes.Equal(before, after) {
@@ -311,6 +312,9 @@ func TestVaultLeak(t *testing.T) {
 		idx, _, err := format.RebuildIndex(dir, nil)
 		if err != nil {
 			t.Fatal(err)
+		}
+		for i := range idx.Entries {
+			idx.Entries[i].Version, idx.Entries[i].Rev, idx.Entries[i].MAC = 1, 1, strings.Repeat("a", 64)
 		}
 		if err := format.WriteIndex(dir, idx); err != nil {
 			t.Fatal(err)
@@ -400,9 +404,24 @@ func TestRotateExtraKeys(t *testing.T) {
 	k3 := mustKey(t)
 	_ = WriteSecret(v.dir, "A", v.key, []byte("a"))
 	_ = WriteSecret(v.dir, "B", k3, []byte("b"))
-	if _, err := Rotate(v.dir, v.key, v.rotateTo(t, v.pw)); !errors.Is(err, ErrOtherKey) {
-		t.Fatalf("rotation over an unknown-key file = %v", err)
+	// A file under a key Rotate doesn't know is left alone and reported
+	// instead of aborting the rotation (ue1.15); the next test shows the
+	// same file re-sealed once its key is given.
+	before, _ := format.ReadSecretFile(v.dir, "B")
+	var skipped []string
+	o0 := v.rotateTo(t, v.pw)
+	o0.SkippedFiles = &skipped
+	nk0, err := Rotate(v.dir, v.key, o0)
+	if err != nil || len(skipped) != 1 || skipped[0] != "B" {
+		t.Fatalf("rotation over an unknown-key file = %v, skipped %v", err, skipped)
 	}
+	if after, _ := format.ReadSecretFile(v.dir, "B"); !bytes.Equal(before, after) {
+		t.Fatal("a skipped file was changed")
+	}
+	if got, err := ReadSecret(v.dir, "A", nk0); err != nil || string(got) != "a" {
+		t.Fatalf("A after the rotation = %q, %v", got, err)
+	}
+	v.key = nk0
 	opt := v.rotateTo(t, v.pw)
 	opt.ExtraKeys = []*VaultKey{k3}
 	nk, err := Rotate(v.dir, v.key, opt)

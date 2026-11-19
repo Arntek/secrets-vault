@@ -31,7 +31,11 @@ static int svtid_parent_name(char *buf) {
 */
 import "C"
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"github.com/Arntek/secrets-vault/internal/testguard"
+)
 
 func init() { platform = swiftEnclave{} }
 
@@ -90,6 +94,7 @@ func (swiftEnclave) publicKey(blob []byte) ([]byte, error) {
 }
 
 func (swiftEnclave) agree(blob, peer []byte, reason string) ([]byte, error) {
+	testguard.Forbid("Touch ID sheet")
 	if len(blob) == 0 || len(peer) != pubKeyLen {
 		return nil, errBadKey
 	}

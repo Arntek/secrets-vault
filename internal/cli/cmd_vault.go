@@ -5,11 +5,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Arntek/secrets-vault/internal/agent"
+	"github.com/Arntek/secrets-vault/internal/audit"
 	"github.com/Arntek/secrets-vault/internal/crypto"
 	"github.com/Arntek/secrets-vault/internal/format"
 	"github.com/Arntek/secrets-vault/internal/members"
@@ -123,7 +125,9 @@ func cmdInit(a *app, p *parsed) error {
 	if pw == nil {
 		a.warnf("warning: '%s' has no recovery passphrase; if your identity is lost it cannot be opened. Add a second trusted member, or set one with: %s passwd %s", name, a.prog, name)
 	}
-	if !unlocked {
+	if !unlocked && runtime.GOOS == "windows" {
+		a.infof("On Windows there is no unlock agent, so every command that needs a key asks for the passphrase. Touch ID and Windows Hello are not supported yet.")
+	} else if !unlocked {
 		a.infof("The vault is locked: the unlock agent could not be reached. Run: %s unlock %s", a.prog, name)
 	}
 	return nil
@@ -167,6 +171,12 @@ func cmdAttach(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	// A first-time attach that must file a join request needs a name for the
+	// new identity: refuse before registering anything, so a retry works.
+	if _, ok := a.myIdentity(); !ok && !a.identityNeedsUpgrade() && !p.has("no-request") &&
+		vf.Version >= format.LegacyVaultVersion && p.str("as") == "" && !a.term.StdinTTY() {
+		return usageErrf("this is your first time: run attach in a terminal, or pass --as NAME (a-z, 0-9, - and _). Nothing was registered")
+	}
 	cfg.Vaults[name] = &VaultEntry{Path: dir, Description: p.str("desc"), ID: vf.ID}
 	if cfg.DefaultVault == "" {
 		cfg.DefaultVault = name
@@ -187,7 +197,7 @@ func cmdAttach(a *app, p *parsed) error {
 	}
 	res["member"] = member
 	if member || p.has("no-request") {
-		if vf.Version == format.VaultVersion {
+		if vf.Version >= format.LegacyVaultVersion {
 			// Verify it and pin it now (trust on first use, with the checks
 			// of design section 7).
 			if _, err := a.open(ref); err != nil {
@@ -200,7 +210,7 @@ func cmdAttach(a *app, p *parsed) error {
 		a.printf("Registered '%s' (%d keys)\n", name, len(idx.Entries))
 		return nil
 	}
-	if vf.Version != format.VaultVersion {
+	if vf.Version < format.LegacyVaultVersion {
 		return failf("registered '%s', but it was made by a pre-release version: ask its owner to open it once, then attach again", name)
 	}
 
@@ -273,6 +283,10 @@ func cmdDetach(a *app, p *parsed) error {
 	// keys of unconfirmed rotations go (S3).
 	if ps, err := a.pendingStore(); err == nil && id != "" {
 		_ = ps.DeleteAll(id)
+	}
+	// What this machine verified of the index goes with the registration.
+	if st, err := a.indexStore(); err == nil && id != "" {
+		_ = st.Delete(id)
 	}
 	delete(cfg.Vaults, v.name)
 	if cfg.DefaultVault == v.name {
@@ -373,6 +387,7 @@ func cmdPasswd(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
+	a.setAsideBadFolders(v)
 	vf, err := a.open(v)
 	if err != nil {
 		return err
@@ -404,7 +419,13 @@ func cmdPasswd(a *app, p *parsed) error {
 	if err != nil {
 		return err
 	}
-	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now()})
+	var skipped []string
+	dropped := 0
+	if err := a.setAsideConflicts(v, key); err != nil {
+		return err
+	}
+	res, err := members.Passwd(v.dir, v.chain, key, un, nw, rotate, members.RotateOptions{Pending: ps, Now: a.now(), TrustedEntries: a.trustedEntries(v), SkippedFiles: &skipped, IndexDropped: &dropped})
+	a.noteRotation(v, &skipped, &dropped)
 	if res != nil && res.NewKey != nil {
 		a.switchKey(v, res.NewKey)
 	}
@@ -416,9 +437,10 @@ func cmdPasswd(a *app, p *parsed) error {
 	if err != nil {
 		return failf("could not change the passphrase of '%s': %v", v.name, vaultErr(err))
 	}
+	a.record(v.name, "", audit.ActionPasswd)
 	code := members.StateCode(v.chain, v.chain.Head().Seq)
 	if a.asJSON {
-		return a.printJSON(map[string]any{"vault": v.name, "changed": true, "rotated": rotate, "state_code": code})
+		return a.printJSON(map[string]any{"vault": v.name, "changed": true, "rotated": rotate, "state_code": code, "quarantined": a.quarantinedList()})
 	}
 	if rotate {
 		a.printf("Passphrase changed for '%s', and the vault key replaced: the old passphrase opens nothing new.\n", v.name)
@@ -431,6 +453,9 @@ func cmdPasswd(a *app, p *parsed) error {
 
 // switchKey hands a rotated key to the agent.
 func (a *app) switchKey(v *vaultRef, k *crypto.VaultKey) {
+	// The rotation re-sealed the index under the new key: verify it and
+	// refresh this machine's record of it.
+	_, _ = a.openIndex(v, k)
 	if cl := a.client(true); cl != nil {
 		if dup, err := crypto.VaultKeyFromBytes(k.Bytes()); err == nil {
 			_ = cl.Unlock(v.chain.File.ID, dup, a.ttlFor(v))
@@ -547,7 +572,7 @@ func cmdConfig(a *app, p *parsed) error {
 			"default_ttl":      orDefault(cfg.DefaultTTL, agent.DefaultTTL.String()),
 			"default_vault":    cfg.DefaultVault,
 			"touch_every_read": cfg.TouchEveryRead,
-			"dialog":           orDefault(cfg.Dialog, "auto"),
+			"dialog":           cfg.Dialog == nil || bool(*cfg.Dialog),
 		}
 		if a.asJSON {
 			return a.printJSON(out)
@@ -631,13 +656,14 @@ func setConfig(cfg *Config, e *VaultEntry, key, val string) error {
 			cfg.TouchEveryRead = b
 		}
 	case "dialog":
-		if val != "auto" && val != "off" {
-			return usageErrf("dialog must be 'auto' or 'off'")
+		b, ok := parseDialogWord(val)
+		if !ok {
+			return usageErrf("dialog must be true or false")
 		}
 		if e != nil {
-			e.Dialog = val
+			e.Dialog = ptrDialog(b)
 		} else {
-			cfg.Dialog = val
+			cfg.Dialog = ptrDialog(b)
 		}
 	case "default-vault":
 		if e != nil {
@@ -676,6 +702,9 @@ func cmdAlias(a *app, p *parsed) error {
 	usage := a.prog + " alias add|rm|list NAME [--force]"
 	if len(p.args) == 0 {
 		return usageErrf("usage: %s", usage)
+	}
+	if runtime.GOOS == "windows" && p.args[0] != "list" {
+		return failf("short names are not made by this command on Windows (links there need special rights). The npm install already provides sv and vault; use sv")
 	}
 	cfg, err := a.loadConfig()
 	if err != nil {
@@ -829,8 +858,36 @@ func (a *app) otherOnPath(name, ourDir string) string {
 		if filepath.Clean(d) == filepath.Clean(ourDir) {
 			return ""
 		}
-		p := filepath.Join(d, name)
-		if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+		if p := a.executableIn(d, name); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+// executableIn returns the path of the program called name in folder d, or
+// "". Windows has no execute bit: a program is a file with a PATHEXT
+// extension (.exe, .cmd, ...), so those names are tried.
+func (a *app) executableIn(d, name string) string {
+	names := []string{name}
+	if runtime.GOOS == "windows" {
+		exts := a.getenv("PATHEXT")
+		if exts == "" {
+			exts = ".COM;.EXE;.BAT;.CMD"
+		}
+		for _, e := range strings.Split(exts, ";") {
+			if e != "" {
+				names = append(names, name+strings.ToLower(e))
+			}
+		}
+	}
+	for _, n := range names {
+		p := filepath.Join(d, n)
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() {
+			continue
+		}
+		if runtime.GOOS == "windows" || fi.Mode()&0o111 != 0 {
 			return p
 		}
 	}

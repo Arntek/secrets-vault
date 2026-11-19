@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +31,11 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	if oldMainDir != "" {
+		_ = os.RemoveAll(oldMainDir) // the format-2 build, see buildOldMain
+	}
+	os.Exit(code)
 }
 
 // --- fakes ---
@@ -127,6 +132,24 @@ func (w *fakeWrapper) Unwrap(u format.Unlocker) (*crypto.VaultKey, error) {
 	return w.inner.Unwrap(u)
 }
 
+// fakeDialog stands in for the macOS password dialog: no test may open a
+// real one. It hands out scripted answers; with none left it behaves like
+// Cancel.
+type fakeDialog struct {
+	answers []string
+	msgs    []string
+}
+
+func (d *fakeDialog) run(msg string) ([]byte, error) {
+	d.msgs = append(d.msgs, msg)
+	if len(d.answers) == 0 {
+		return nil, errDialogCancelled
+	}
+	a := d.answers[0]
+	d.answers = d.answers[1:]
+	return []byte(a), nil
+}
+
 type fakeClip struct {
 	value     []byte
 	scheduled []time.Duration
@@ -158,6 +181,7 @@ type testEnv struct {
 	term     *fakeTerm
 	touch    *fakeTouch
 	clip     *fakeClip
+	dialog   *fakeDialog
 	environ  []string
 	path     string
 	exe      string
@@ -168,7 +192,23 @@ var curEnv *testEnv
 // newEnv builds an isolated user: own HOME, registry, agent and fakes.
 func newEnv(t *testing.T) *testEnv {
 	t.Helper()
+	skipWindows(t)
 	return newEnvAt(t, t.TempDir())
+}
+
+// newEnvNoAgent is newEnv for a system with no unlock agent (what Windows
+// is): dialing the agent reports ErrUnsupported. It runs on every OS, so
+// the Windows flow (a passphrase prompt per command) is tested everywhere.
+func newEnvNoAgent(t *testing.T) *testEnv {
+	t.Helper()
+	e := newEnvAt(t, t.TempDir())
+	prev := testHook
+	testHook = func(a *app) {
+		prev(a)
+		a.dialAgent = func(bool) (agent.Client, error) { return nil, agent.ErrUnsupported }
+	}
+	t.Cleanup(func() { testHook = prev })
+	return e
 }
 
 // newEnvAt is newEnv with a chosen HOME (the leak harness scans its own).
@@ -177,13 +217,18 @@ func newEnvAt(t *testing.T, home string) *testEnv {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ad, err := os.MkdirTemp("/tmp", "svt")
+	// /tmp keeps the agent's socket path short enough on macOS and Linux.
+	adBase := "/tmp"
+	if runtime.GOOS == "windows" {
+		adBase = ""
+	}
+	ad, err := os.MkdirTemp(adBase, "svt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	e := &testEnv{
 		t: t, home: home, cfg: filepath.Join(home, "config", "config.toml"), agentDir: ad,
-		term: &fakeTerm{}, touch: &fakeTouch{}, clip: &fakeClip{},
+		term: &fakeTerm{}, touch: &fakeTouch{}, clip: &fakeClip{}, dialog: &fakeDialog{},
 		environ: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "SV_UNRELATED=visible"},
 	}
 	e.exe = filepath.Join(home, "bin", "secrets-vault")
@@ -194,9 +239,13 @@ func newEnvAt(t *testing.T, home string) *testEnv {
 	prevHook := testHook
 	testHook = func(a *app) {
 		c := curEnv
+		a.dialog = nil // never the real macOS dialog; tests that need one inject a fake
 		a.term = c.term
 		a.touch = c.touch.backend()
 		a.clip = c.clip
+		a.dialog = c.dialog.run
+		a.goos = "darwin"
+		a.caller = func() (string, int) { return "testprog", 4242 }
 		a.environ = func() []string { return c.environ }
 		a.exePath = func() (string, error) { return c.exe, nil }
 		if c.path != "" {
@@ -225,6 +274,7 @@ func newEnvAt(t *testing.T, home string) *testEnv {
 func (e *testEnv) activate() {
 	curEnv = e
 	e.t.Setenv("HOME", e.home)
+	e.t.Setenv("USERPROFILE", e.home)
 	e.t.Setenv("XDG_CONFIG_HOME", filepath.Join(e.home, "xdg"))
 	e.t.Setenv(EnvConfig, e.cfg)
 	e.t.Setenv("SECRETS_VAULT_AGENT_DIR", e.agentDir)

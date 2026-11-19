@@ -51,6 +51,9 @@ type State struct {
 	Time          time.Time
 	By            string
 	Op            format.RecordOp
+	// Format is the vault format after this record: 2 until genesis or an
+	// upgrade-format record says 3. It never decreases.
+	Format int
 }
 
 // Member returns the member called name.
@@ -130,7 +133,7 @@ func (c *Chain) HasPassphrase() bool {
 // registered; a file for any other ID is refused (ErrOtherVault). It needs
 // no key: every record is signed by a member of the state before it.
 func Verify(vf *format.VaultFile, raw []byte, registeredID string) (*Chain, error) {
-	if vf.Version != format.VaultVersion {
+	if vf.Version != format.VaultVersion && vf.Version != format.LegacyVaultVersion {
 		return nil, ErrOldFormat
 	}
 	if registeredID != "" && vf.ID != registeredID {
@@ -173,6 +176,12 @@ func Verify(vf *format.VaultFile, raw []byte, registeredID string) (*Chain, erro
 		c.States = append(c.States, next)
 	}
 	head := c.Head()
+	// The format is part of the signed history: a vault.json whose version
+	// differs from what the chain says (a downgrade or an upgrade nobody
+	// signed) is refused.
+	if vf.Version != head.Format {
+		return nil, fmt.Errorf("%w (the file's format differs from the signed history)", ErrTampered)
+	}
 	if vf.KeyID != head.KeyID ||
 		format.MembersDigest(vf.Members) != head.MembersHash ||
 		format.UnlockersDigest(vf.Unlockers) != head.UnlockersHash {
@@ -193,6 +202,10 @@ func applyRecord(prev *State, rec *format.Record, by string) (State, error) {
 			return State{}, ErrNotAuthorised
 		}
 		next.Members = []format.Member{*rec.Member}
+		next.Format = format.LegacyVaultVersion
+		if rec.Format != 0 {
+			next.Format = rec.Format
+		}
 	} else {
 		signer, ok := prev.Member(by)
 		if !ok {
@@ -202,6 +215,10 @@ func applyRecord(prev *State, rec *format.Record, by string) (State, error) {
 			return State{}, err
 		}
 		next.Members = slices.Clone(prev.Members)
+		next.Format = prev.Format
+		if rec.Op == format.OpUpgradeFormat {
+			next.Format = rec.Format
+		}
 		switch rec.Op {
 		case format.OpAddMember:
 			next.Members = append(next.Members, *rec.Member)
@@ -245,6 +262,9 @@ func authorise(prev *State, rec *format.Record, signer format.Member) error {
 			return ErrNotAuthorised
 		}
 	}
+	if rec.Op == format.OpUpgradeFormat && (prev.Format != format.LegacyVaultVersion || rec.Format != format.VaultVersion) {
+		return ErrNotAuthorised
+	}
 	// The vault key changes exactly on rotations (removal always rotates).
 	rotates := rec.Op == format.OpRotate || rec.Op == format.OpRemoveMember
 	if rotates == (rec.KeyID == prev.KeyID) {
@@ -257,6 +277,7 @@ func authorise(prev *State, rec *format.Record, signer format.Member) error {
 type Change struct {
 	Op         format.RecordOp
 	Member     *format.Member
+	Format     int // only for OpUpgradeFormat
 	Passphrase string
 	// KeyID is the vault key ID after the change (new for a rotation).
 	KeyID string
@@ -282,7 +303,7 @@ func (c *Chain) Append(signer *Unlocked, ch Change) (*format.VaultFile, error) {
 	}
 	rec := &format.Record{
 		Seq: len(c.Records), Prev: head.Head, VaultID: c.File.ID, Time: ch.Time.UTC().Round(0),
-		Op: ch.Op, Member: ch.Member, Passphrase: ch.Passphrase, KeyID: ch.KeyID,
+		Op: ch.Op, Member: ch.Member, Passphrase: ch.Passphrase, Format: ch.Format, KeyID: ch.KeyID,
 		UnlockersHash: format.UnlockersDigest(ch.Unlockers),
 	}
 	members := slices.Clone(head.Members)
@@ -294,10 +315,12 @@ func (c *Chain) Append(signer *Unlocked, ch Change) (*format.VaultFile, error) {
 		members = slices.DeleteFunc(members, func(m format.Member) bool { return m.Name == ch.Member.Name })
 	}
 	rec.MembersHash = format.MembersDigest(members)
-	if _, err := applyRecord(head, rec, signer.Name); err != nil {
+	ns, err := applyRecord(head, rec, signer.Name)
+	if err != nil {
 		return nil, err
 	}
 	next := *c.File
+	next.Version = ns.Format
 	next.KeyID = ch.KeyID
 	next.Members = members
 	next.Unlockers = slices.Clone(ch.Unlockers)
@@ -328,12 +351,21 @@ func signRecord(signer *Unlocked, rec *format.Record) (format.LogEntry, error) {
 // unlockers must include owner's member unlocker) with the owner as the
 // only member and the genesis record, signed by the owner.
 func Genesis(vf *format.VaultFile, owner *Unlocked, now time.Time) error {
+	return GenesisFormat(vf, owner, now, format.VaultVersion)
+}
+
+// GenesisFormat is Genesis for a given vault format: 3 for every real vault.
+// Format 2 exists for tests and for building a legacy vault to upgrade.
+func GenesisFormat(vf *format.VaultFile, owner *Unlocked, now time.Time, formatVersion int) error {
 	m := owner.Member(format.RoleOwner)
-	vf.Version = format.VaultVersion
+	vf.Version = formatVersion
 	vf.Members = []format.Member{m}
 	rec := &format.Record{
 		Seq: 0, VaultID: vf.ID, Time: now.UTC().Round(0), Op: format.OpGenesis, Member: &m,
 		KeyID: vf.KeyID, MembersHash: format.MembersDigest(vf.Members), UnlockersHash: format.UnlockersDigest(vf.Unlockers),
+	}
+	if formatVersion == format.VaultVersion {
+		rec.Format = format.VaultVersion
 	}
 	entry, err := signRecord(owner, rec)
 	if err != nil {

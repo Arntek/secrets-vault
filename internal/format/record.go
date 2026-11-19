@@ -37,7 +37,12 @@ const (
 	OpRotate         RecordOp = "rotate"
 	OpSetUnlocker    RecordOp = "set-unlocker"
 	OpRemoveUnlocker RecordOp = "remove-unlocker"
+	// OpUpgradeFormat moves a vault from format 2 to 3 (index-auth design).
+	OpUpgradeFormat RecordOp = "upgrade-format"
 )
+
+// FormatAuthIndex is the vault format with the authenticated index.
+const FormatAuthIndex = 3
 
 // Passphrase policies recorded by remove-member and rotate records.
 const (
@@ -50,16 +55,19 @@ const (
 // previous state plus hashes of the state after it. Package members signs,
 // replays and verifies records; this package only parses them.
 type Record struct {
-	Seq           int       `json:"seq"`
-	Prev          string    `json:"prev"`
-	VaultID       string    `json:"vault_id"`
-	Time          time.Time `json:"time"`
-	Op            RecordOp  `json:"op"`
-	Member        *Member   `json:"member,omitempty"`
-	Passphrase    string    `json:"passphrase,omitempty"`
-	KeyID         string    `json:"key_id"`
-	MembersHash   string    `json:"members_hash"`
-	UnlockersHash string    `json:"unlockers_hash"`
+	Seq        int       `json:"seq"`
+	Prev       string    `json:"prev"`
+	VaultID    string    `json:"vault_id"`
+	Time       time.Time `json:"time"`
+	Op         RecordOp  `json:"op"`
+	Member     *Member   `json:"member,omitempty"`
+	Passphrase string    `json:"passphrase,omitempty"`
+	// Format is present on the genesis of a format-3 vault and on
+	// upgrade-format records: the vault format from this record on.
+	Format        int    `json:"format,omitempty"`
+	KeyID         string `json:"key_id"`
+	MembersHash   string `json:"members_hash"`
+	UnlockersHash string `json:"unlockers_hash"`
 }
 
 // ParseRecordBody strictly parses and validates a record body.
@@ -127,7 +135,7 @@ func (r *Record) Validate() error {
 		if r.Op == OpGenesis && r.Member.Role != RoleOwner {
 			return bad("genesis member must be the owner")
 		}
-	case OpRotate, OpSetUnlocker, OpRemoveUnlocker:
+	case OpRotate, OpSetUnlocker, OpRemoveUnlocker, OpUpgradeFormat:
 		if r.Member != nil {
 			return bad("must not name a member")
 		}
@@ -142,6 +150,20 @@ func (r *Record) Validate() error {
 	default:
 		if r.Passphrase != "" {
 			return bad("must not have a passphrase policy")
+		}
+	}
+	switch r.Op {
+	case OpGenesis:
+		if r.Format != 0 && r.Format != FormatAuthIndex {
+			return bad("has an unknown format")
+		}
+	case OpUpgradeFormat:
+		if r.Format != FormatAuthIndex {
+			return bad("has an unknown format")
+		}
+	default:
+		if r.Format != 0 {
+			return bad("must not set a format")
 		}
 	}
 	if err := ValidateKeyID(r.KeyID); err != nil {

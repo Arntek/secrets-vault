@@ -16,8 +16,9 @@
 // other internal package; none of them may import cli. Keep business rules
 // out of cli: it orchestrates, the packages below decide.
 //
-// The command set is owned by issue rn5. Out of scope until Phase 2: ui,
-// prime, setup, log, doctor, backup and the MCP server.
+// The command set is owned by issue rn5. ui (the terminal interface, package
+// tui), prime, setup, log and doctor are in; out of scope: backup and the
+// MCP server.
 package cli
 
 import (
@@ -55,12 +56,13 @@ type command struct {
 }
 
 var (
-	fJSON    = flagSpec{name: "json"}
-	fVault   = flagSpec{name: "vault", value: true}
-	fPassStd = flagSpec{name: "passphrase-stdin"}
-	fExpect  = flagSpec{name: "expect", value: true}
-	fSignFP  = flagSpec{name: "signer-fingerprint", value: true}
-	fYes     = flagSpec{name: "yes", short: "y"}
+	fJSON     = flagSpec{name: "json"}
+	fVault    = flagSpec{name: "vault", value: true}
+	fPassStd  = flagSpec{name: "passphrase-stdin"}
+	fExpect   = flagSpec{name: "expect", value: true}
+	fSignFP   = flagSpec{name: "signer-fingerprint", value: true}
+	fNoDialog = flagSpec{name: "no-dialog"}
+	fYes      = flagSpec{name: "yes", short: "y"}
 )
 
 // commands is the command table; help and dispatch both read it.
@@ -104,20 +106,28 @@ var commands = []command{
 		summary: "Delete, after confirmation. Kept in the trash for 30 days.",
 		flags:   []flagSpec{fVault, fYes}, run: cmdRm},
 
+	{name: "ui", group: "Terminal interface", usage: "ui",
+		summary: "Full-screen terminal interface: browse, search, add, edit and move keys. Values stay masked.",
+		run:     cmdUI},
+
 	{name: "unlock", group: "Locking", usage: "unlock [VAULT] [--for DURATION]",
 		summary: "Unlock ahead of time (default vault if none is named).",
-		flags:   []flagSpec{{name: "for", value: true}}, run: cmdUnlock},
+		flags:   []flagSpec{fExpect, fSignFP, {name: "for", value: true}}, run: cmdUnlock},
 	{name: "lock", group: "Locking", usage: "lock [VAULT | --all]",
 		summary: "Forget the key now.", flags: []flagSpec{{name: "all"}}, run: cmdLock},
 	{name: "status", group: "Locking", usage: "status",
 		summary: "Each vault, locked or unlocked, time left, state code, pending join requests.", run: cmdStatus},
+
+	{name: "log", group: "Read log", usage: "log [--vault V] [--since 24h] [--name K] [--json]",
+		summary: "Who read which key and when: program, command, time. Never values.",
+		flags:   []flagSpec{fVault, {name: "since", value: true}, {name: "name", value: true}}, run: cmdLog},
 
 	{name: "init", group: "Managing vaults", usage: "init NAME --path DIR [--desc TEXT] [--as NAME]",
 		summary: "Create a new vault in a folder you choose (and your identity, the first time).",
 		flags:   []flagSpec{{name: "path", value: true}, {name: "desc", value: true}, {name: "force"}, {name: "touchid"}, {name: "no-touchid"}, {name: "as", value: true}, {name: "no-passphrase"}}, run: cmdInit},
 	{name: "attach", group: "Managing vaults", usage: "attach NAME DIR",
 		summary: "Register a vault that already exists; files a join request if you are not a member.",
-		flags:   []flagSpec{{name: "as", value: true}, {name: "desc", value: true}, {name: "no-request"}}, run: cmdAttach},
+		flags:   []flagSpec{fExpect, fSignFP, {name: "as", value: true}, {name: "desc", value: true}, {name: "no-request"}}, run: cmdAttach},
 	{name: "detach", group: "Managing vaults", usage: "detach NAME",
 		summary: "Remove from this Mac's registry. Files are untouched.", run: cmdDetach},
 	{name: "vaults", group: "Managing vaults", usage: "vaults",
@@ -130,10 +140,13 @@ var commands = []command{
 		run:     cmdTouchID},
 	{name: "trust", group: "Managing vaults", usage: "trust VAULT [--expect CODE] [--accept-rollback]",
 		summary: "Check a vault's state against a code from another member, or repair a change that raced another.",
-		flags:   []flagSpec{{name: "accept-rollback"}}, run: cmdTrust},
-	{name: "doctor", group: "Managing vaults", usage: "doctor VAULT [--quarantine-staging]",
-		summary: "Check a vault for sync conflicts and leftover key-rotation folders; move a foreign one aside.",
-		flags:   []flagSpec{{name: "quarantine-staging"}}, run: cmdDoctor},
+		flags:   []flagSpec{fExpect, fSignFP, {name: "accept-rollback"}}, run: cmdTrust},
+	{name: "doctor", group: "Managing vaults", usage: "doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown]",
+		summary: "Check a vault for sync conflicts, leftover key-rotation folders and index problems; move a foreign folder aside; adopt a file with no signed entry; explain what makes the vault refuse changes; --set-aside-unknown clears it at a terminal, after you type the current state code that a member you know is current reads to you (never from someone being removed).",
+		flags:   []flagSpec{{name: "quarantine-staging"}, {name: "adopt", value: true}, {name: "set-aside-unknown"}, fYes}, run: cmdDoctor},
+	{name: "upgrade", group: "Managing vaults", usage: "upgrade VAULT [--yes]",
+		summary: "Move a vault made by an earlier version to the current format (signed index, versioned files).",
+		flags:   []flagSpec{fYes}, run: cmdUpgrade},
 	{name: "rebuild", group: "Managing vaults", usage: "rebuild VAULT [--yes]",
 		summary: "Recreate a vault under your identity (lost identity, or a full history); members join again.",
 		flags:   []flagSpec{fYes}, run: cmdRebuild},
@@ -144,6 +157,12 @@ var commands = []command{
 			{name: "new-passphrase"}, {name: "new-passphrase-stdin"}, {name: "folder-access-removed"}}, run: cmdMember},
 	{name: "identity", group: "Sharing", usage: "identity export|import FILE",
 		summary: "Move your identity to another Mac (passphrase-protected file).", run: cmdIdentity},
+
+	{name: "prime", group: "AI agents", usage: "prime [--json]",
+		summary: "Print the rules for AI agents and which vaults exist and are unlocked. Never prints a value.", run: cmdPrime},
+	{name: "setup", group: "AI agents", usage: "setup claude [--claude-md] | setup agents [--path DIR] [--remove] [--dry-run] [--force]",
+		summary: "Add agent instructions to your setup (additive only). --remove undoes exactly what was added.",
+		flags:   []flagSpec{{name: "claude-md"}, {name: "remove"}, {name: "dry-run"}, {name: "force"}, {name: "path", value: true}}, run: cmdSetup},
 
 	{name: "config", group: "Settings", usage: "config set KEY VALUE [--vault V] | config list",
 		summary: "Change settings: default-ttl, default-vault, touch-every-read, dialog.",
@@ -217,15 +236,19 @@ func (a *app) dispatch(c *command, args []string) int {
 			return ExitOK
 		}
 	}
-	specs := append([]flagSpec{fJSON, fPassStd, fExpect, fSignFP}, c.flags...)
+	specs := append([]flagSpec{fJSON, fPassStd, fExpect, fSignFP, fNoDialog}, c.flags...)
 	p, err := parseArgs(args, specs)
 	if err != nil {
 		return a.fail(err, c)
 	}
 	a.asJSON = p.has("json")
-	a.passStdin = p.has("passphrase-stdin")
+	// Either flag means scripted lines: every passphrase is read from stdin in
+	// a fixed order (identity first), and Touch ID is never tried.
+	a.passStdin = p.has("passphrase-stdin") || p.has("new-passphrase-stdin")
 	a.expectCode = p.str("expect")
 	a.signerFP = p.str("signer-fingerprint")
+	a.noDialog = p.has("no-dialog")
+	a.cmdName = c.name
 	if err := c.run(a, p); err != nil {
 		return a.fail(err, c)
 	}
@@ -236,7 +259,7 @@ func (a *app) fail(err error, c *command) int {
 	var ee *exitErr
 	if errors.As(err, &ee) {
 		if ee.msg != "" {
-			fmt.Fprintf(a.errOut, "%s: %s\n", a.prog, ee.msg)
+			fmt.Fprint(a.errOut, safeLines(fmt.Sprintf("%s: %s\n", a.prog, ee.msg)))
 			if ee.code == ExitUsage && c != nil && !strings.HasPrefix(ee.msg, "usage:") {
 				fmt.Fprintf(a.errOut, "Run '%s %s --help' for usage.\n", a.prog, c.name)
 			}
@@ -247,7 +270,7 @@ func (a *app) fail(err error, c *command) int {
 		fmt.Fprintf(a.errOut, "%s: the vault is locked\n", a.prog)
 		return ExitLocked
 	}
-	fmt.Fprintf(a.errOut, "%s: %v\n", a.prog, err)
+	fmt.Fprint(a.errOut, safeLines(fmt.Sprintf("%s: %v\n", a.prog, err)))
 	return ExitError
 }
 
@@ -268,7 +291,7 @@ func usage(w io.Writer, prog string) {
 func commandHelp(w io.Writer, prog string, c *command) {
 	fmt.Fprintf(w, "Usage: %s %s\n\n%s\n", prog, c.usage, c.summary)
 	var opts []string
-	for _, f := range append([]flagSpec{fJSON, fPassStd}, c.flags...) {
+	for _, f := range append([]flagSpec{fJSON, fPassStd, fNoDialog}, c.flags...) {
 		s := "--" + f.name
 		if f.short != "" {
 			s = "-" + f.short + ", " + s

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Arntek/secrets-vault/internal/agent"
 	"github.com/Arntek/secrets-vault/internal/format"
+	"github.com/Arntek/secrets-vault/internal/index"
 	"github.com/Arntek/secrets-vault/internal/members"
 )
 
@@ -30,18 +31,18 @@ type Config struct {
 	DefaultTTL     string                 `toml:"default_ttl,omitempty"`
 	DefaultVault   string                 `toml:"default_vault,omitempty"`
 	TouchEveryRead bool                   `toml:"touch_every_read,omitempty"`
-	Dialog         string                 `toml:"dialog,omitempty"`
+	Dialog         *dialogSetting         `toml:"dialog,omitempty"`
 	Aliases        []string               `toml:"aliases,omitempty"`
 	Vaults         map[string]*VaultEntry `toml:"vaults,omitempty"`
 }
 
 // VaultEntry is one [vaults.NAME] table.
 type VaultEntry struct {
-	Path           string `toml:"path"`
-	Description    string `toml:"description,omitempty"`
-	TTL            string `toml:"ttl,omitempty"`
-	TouchEveryRead *bool  `toml:"touch_every_read,omitempty"`
-	Dialog         string `toml:"dialog,omitempty"`
+	Path           string         `toml:"path"`
+	Description    string         `toml:"description,omitempty"`
+	TTL            string         `toml:"ttl,omitempty"`
+	TouchEveryRead *bool          `toml:"touch_every_read,omitempty"`
+	Dialog         *dialogSetting `toml:"dialog,omitempty"`
 	// ID is the vault ID recorded at init or attach. vault.json is only
 	// accepted if it holds this vault (design M1); the trust pin for it is
 	// kept under trust/<ID>.json. It is stored in registry.toml, never in
@@ -224,9 +225,12 @@ type vaultRef struct {
 	dir   string
 
 	chain *members.Chain
-	v1    *format.VaultFile
-	pin   *members.Pin
-	class members.Classification
+	// allowLegacy lets a write command run on a format-2 vault (upgrade only).
+	allowLegacy bool
+	legacyNoted bool
+	v1          *format.VaultFile
+	pin         *members.Pin
+	class       members.Classification
 }
 
 func (a *app) expandEntry(e *VaultEntry) (string, error) { return a.expandPath(e.Path) }
@@ -371,11 +375,46 @@ type keyRef struct {
 	v     *vaultRef
 	vf    *format.VaultFile
 	entry format.IndexEntry
+	// verified: the entry is what this machine verified with the vault key
+	// (locked listings can't check an entry that is new in the folder).
+	verified bool
 }
 
 // findKey locates a key by name. With vaultName empty every registered vault
 // is searched: not found is exit 4, and a name in several vaults needs
 // --vault. Names that fail validation are not echoed.
+// keyNotFoundWithFailures is the answer when no readable vault has the key
+// and at least one vault could not be used. Never "not found" (exit 4), and
+// never a plain error (exit 1): the key may be in the vault that could not
+// be used, so the answer is exit 5 and names each such vault and why. A
+// single vault that failed verification keeps its own message.
+func (a *app) keyNotFoundWithFailures(failed []error) error {
+	if len(failed) == 1 {
+		var ee *exitErr
+		if errors.As(failed[0], &ee) && ee.code == ExitUnverified {
+			return failed[0]
+		}
+	}
+	var reasons []string
+	unreadable := false
+	for _, e := range failed {
+		msg := e.Error()
+		var ee *exitErr
+		if errors.As(e, &ee) {
+			msg = ee.msg
+			if ee.code != ExitUnverified {
+				unreadable = true
+			}
+		}
+		reasons = append(reasons, msg)
+	}
+	msg := "key not found in the readable vaults, but " + plural(len(failed), "vault") + " could not be used, so it may be there: " + strings.Join(reasons, "; ")
+	if unreadable {
+		msg += ". If macOS blocked access to a cloud folder, see 'operation not permitted' in the README (Unlocking and Touch ID)"
+	}
+	return verifyErrf("%s", msg)
+}
+
 func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 	if err := format.ValidateKeyName(name); err != nil {
 		return nil, usageErrf("%v", err)
@@ -394,49 +433,82 @@ func (a *app) findKey(name, vaultName string) (*keyRef, error) {
 	}
 	var found []*keyRef
 	var failed []error
+	var damaged []string
+	var unlisted []string
 	for _, n := range names {
 		v, err := a.vault(n)
 		if err != nil {
 			return nil, err
 		}
-		// Verify (no prompts, no writes): a vault that fails must never look
-		// like "key not found" (ue1.10).
-		_, vf, err := a.loadVault(v)
+		// Verify and classify (no prompts, no writes): a vault that fails
+		// must never look like "key not found" (ue1.10), and a quarantined
+		// one must not answer (ue1.12).
+		c, vf, err := a.openQuiet(v)
 		if err != nil && !errors.Is(err, members.ErrOldFormat) {
 			failed = append(failed, err)
 			continue
 		}
-		idx, err := v.index()
+		lv, err := a.lockedView(v, c)
 		if err != nil {
-			a.warnf("%v", err)
+			failed = append(failed, err)
 			continue
 		}
-		if e, ok := idx.Get(name); ok {
-			found = append(found, &keyRef{v: v, vf: vf, entry: e})
+		a.noteIndexState(v, lv)
+		if lv.Damaged {
+			damaged = append(damaged, v.name)
+		}
+		matched := false
+		for _, r := range lv.Rows {
+			if r.Entry.Name == name {
+				matched = true
+				found = append(found, &keyRef{v: v, vf: vf, entry: r.Entry, verified: r.Verified || lv.State == index.StateLegacy})
+			}
+		}
+		// A file with no entry is not a key, but "not found" would tell an
+		// agent to create it: say that the index has no signed entry (ue1.13).
+		if !matched && lv.State != index.StateLegacy {
+			if ok, _ := format.SecretExists(v.dir, name); ok {
+				unlisted = append(unlisted, v.name)
+			}
 		}
 	}
-	switch {
-	case len(found) == 0 && len(failed) == 1:
-		return nil, failed[0]
-	case len(found) == 0 && len(failed) > 1:
-		for _, e := range failed {
-			a.warnf("%v", e)
-		}
-		return nil, verifyErrf("that key was not found, and %d vaults failed verification, so it may be in one of them", len(failed))
+	if len(found) == 0 && len(failed) > 0 {
+		return nil, a.keyNotFoundWithFailures(failed)
 	}
 	for _, e := range failed {
 		a.warnf("warning: %v", e)
 	}
 	switch len(found) {
 	case 0:
+		if len(damaged) > 0 {
+			// Not "not found": the index that would list it is gone or damaged (IM1).
+			return nil, &exitErr{code: ExitUnverified, indexDamaged: true,
+				msg: fmt.Sprintf("that key was not found, but the index of '%s' is missing or damaged, so it may be there. Nothing can be trusted from it until it is repaired: %s doctor %s", strings.Join(damaged, "', '"), a.prog, damaged[0])}
+		}
+		if len(unlisted) > 0 {
+			return nil, &exitErr{code: ExitUnverified, indexDamaged: true, msg: fmt.Sprintf("that key has a file in '%s' but no signed entry in its index, so it is not trusted (the index may have been changed or rolled back). Check it with: %s doctor %s", strings.Join(unlisted, "', '"), a.prog, unlisted[0])}
+		}
 		return nil, notFoundErr("key not found. Try: %s search WORDS", a.prog)
 	case 1:
 		return found[0], nil
+	}
+	// Verified entries beat ones the folder merely claims (a planted entry
+	// can't make another vault answer, ue1.7); ambiguity is declared only
+	// among candidates of the same class. Nothing here ever unlocks a vault
+	// the person didn't name.
+	if ver := slices.DeleteFunc(slices.Clone(found), func(k *keyRef) bool { return !k.verified }); len(ver) == 1 {
+		return ver[0], nil
+	} else if len(ver) > 1 {
+		found = ver
 	}
 	vs := make([]string, len(found))
 	for i, k := range found {
 		vs[i] = k.v.name
 	}
 	slices.Sort(vs)
-	return nil, usageErrf("that key exists in more than one vault (%s). Use --vault", strings.Join(vs, ", "))
+	hint := ""
+	if !found[0].verified {
+		hint = ". The entries are unverified (this machine has not checked them with the vault key yet)"
+	}
+	return nil, usageErrf("that key exists in more than one vault (%s)%s. Use --vault", strings.Join(vs, ", "), hint)
 }

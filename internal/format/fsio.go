@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -236,6 +237,15 @@ func ReadIndex(vaultDir string) (*Index, error) {
 	return ParseIndex(data)
 }
 
+// ReadIndexRaw returns the exact bytes of index.json, for WriteIndexCAS and
+// for parsing with ParseIndexTolerant. A missing file wraps fs.ErrNotExist.
+func ReadIndexRaw(vaultDir string) ([]byte, error) {
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return nil, err
+	}
+	return readRegular(IndexPath(vaultDir), MaxFileSize)
+}
+
 // WriteIndex validates idx and writes vaultDir/index.json atomically.
 func WriteIndex(vaultDir string, idx *Index) error {
 	data, err := MarshalIndex(idx)
@@ -244,6 +254,39 @@ func WriteIndex(vaultDir string, idx *Index) error {
 	}
 	if err := CheckVaultDirs(vaultDir); err != nil {
 		return err
+	}
+	return WriteFileAtomic(IndexPath(vaultDir), data, FileMode)
+}
+
+var indexCASMu sync.Mutex
+
+// ErrIndexChanged means index.json changed between reading and writing it.
+var ErrIndexChanged = errors.New("index.json changed while this command was running")
+
+// WriteIndexCAS validates idx and writes vaultDir/index.json atomically,
+// but only if the file still holds exactly expect (the bytes the caller
+// read and verified). Otherwise it returns ErrIndexChanged and writes
+// nothing. A nil expect means the file must not exist.
+func WriteIndexCAS(vaultDir string, idx *Index, expect []byte) error {
+	data, err := MarshalIndex(idx)
+	if err != nil {
+		return err
+	}
+	if err := CheckVaultDirs(vaultDir); err != nil {
+		return err
+	}
+	// The check and the write are one step among writers in this process;
+	// across machines (a sync service) the compare-and-swap is best effort,
+	// like vault.json's, and conflict copies are merged by package index.
+	indexCASMu.Lock()
+	defer indexCASMu.Unlock()
+	cur, err := readRegular(IndexPath(vaultDir), MaxFileSize)
+	switch {
+	case expect == nil && errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return err
+	case expect == nil || !bytes.Equal(cur, expect):
+		return ErrIndexChanged
 	}
 	return WriteFileAtomic(IndexPath(vaultDir), data, FileMode)
 }
@@ -267,8 +310,17 @@ func CreateVault(vaultDir string, vf *VaultFile) error {
 	if err := CheckVaultDirs(vaultDir); err != nil {
 		return err
 	}
-	if err := WriteIndex(vaultDir, NewIndex()); err != nil {
-		return err
+	if vf.Version == LegacyVaultVersion {
+		// Tests only: a format-2 vault starts with a version-1 index.
+		if err := WriteFileAtomic(IndexPath(vaultDir), []byte("{\n  \"version\": 1,\n  \"entries\": []\n}\n"), FileMode); err != nil {
+			return err
+		}
+	} else {
+		idx := NewIndex()
+		idx.VaultID = vf.ID
+		if err := WriteIndex(vaultDir, idx); err != nil {
+			return err
+		}
 	}
 	return WriteVaultFile(vaultDir, vf)
 }
@@ -407,4 +459,32 @@ func ReadVaultFileCopy(vaultDir, rel string) (*VaultFile, []byte, error) {
 		return nil, nil, err
 	}
 	return vf, data, nil
+}
+
+// ReadIndexCopy reads the raw bytes of a sync-conflict copy of index.json
+// (rel as reported by FindConflicts).
+func ReadIndexCopy(vaultDir, rel string) ([]byte, error) {
+	if strings.Contains(rel, "/") || strings.Contains(rel, `\`) || rel == "" || rel == "." || rel == ".." {
+		return nil, fmt.Errorf("%w: not a file in the vault root", ErrMalformed)
+	}
+	return readRegular(filepath.Join(vaultDir, rel), MaxFileSize)
+}
+
+// ReadRegularFile reads a regular file of at most max bytes, refusing
+// symlinks. For other packages' small local files (snapshots).
+func ReadRegularFile(path string, max int64) ([]byte, error) { return readRegular(path, max) }
+
+// DecodeStrict decodes exactly one JSON value with the strict rules of
+// this package (no duplicate or unknown keys, bounded depth, no trailing
+// data), for other packages' file formats.
+func DecodeStrict(data []byte, maxSize int, v any) error { return decodeStrictMax(data, maxSize, v) }
+
+// CheckStructuralDirs checks only the vault folder and secrets/: the two
+// that nothing can work around. The other sub-folders (trash, requests/,
+// staging folders) are set aside by key rotations when they are bad.
+func CheckStructuralDirs(vaultDir string) error {
+	if err := checkDir(vaultDir, false); err != nil {
+		return err
+	}
+	return checkDir(SecretsPath(vaultDir), true)
 }

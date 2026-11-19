@@ -10,7 +10,7 @@ How `internal/cli` turns the packages into commands. The command list and one-li
 default_ttl = "4h"
 default_vault = "personal"
 touch_every_read = false     # ask for Touch ID on every read
-dialog = "auto"              # Phase 2: native password dialog for agents
+dialog = true                # native password dialog for agents (macOS; default true)
 aliases = ["sv"]             # short names added by `alias add`
 
 [vaults.personal]
@@ -28,7 +28,18 @@ Before anything else the vault is verified (`app.open`, see Trust): nothing is r
 1. A key held by the agent (it must match the verified `key_id`, otherwise it is dropped).
 2. This person's member key: the identity, opened with Touch ID (when this Mac's Touch ID protects it) or the personal passphrase.
 3. The vault passphrase, on a terminal (or `--passphrase-stdin`).
-4. Otherwise exit 3: `Vault 'NAME' is locked. Run: <short name> unlock NAME`. The macOS password dialog for agents is Phase 2: `app.dialogPassphrase` is the hook.
+4. No terminal (stdin is not a TTY and no `--passphrase-stdin`), on macOS, and the dialog is on: a native password dialog (`dialog.go`) names the vault and the calling program (the parent process: name and pid) and asks for the vault passphrase. Wrong passphrase: asked again, up to 3 times. Never shown when stdin is a terminal or `--passphrase-stdin` is given, and never off macOS.
+5. Otherwise (cancelled, timed out after 120 s, no GUI session such as SSH, `--no-dialog`, or `dialog = false`) exit 3: `Vault 'NAME' is locked. Run: <short name> unlock NAME`.
+
+The dialog is `/usr/bin/osascript` with a constant AppleScript (`display dialog ... with hidden answer`). The message, which holds the vault and program names, is passed as an argument after `--`, never spliced into the script, so no name can inject AppleScript. The passphrase is read from osascript's stdout into memory, cleared after use, and never logged. `dialog` is set per vault (`--vault`) or globally; a vault's own setting wins; `true`/`false` (older `"auto"`/`"off"` are still read). The program name is informative, not proof: any program can pick its own name.
+
+## Read log (`vault log`)
+
+`internal/audit` writes one JSON line per event to `audit.log` in the config folder (`~/.config/vault/audit.log`; mode 0600, folder 0700), rotated at 5 MB to `audit.log.1` and `.2` (three files kept). Fields: `time`, `vault`, `key`, `action`, `program`, `pid`, `command`, plus `member` (member changes) and `via` (`dialog` when the dialog unlocked the vault). There is no field for a value or a passphrase.
+
+Recorded: every read of a value (`get`, each key of `run`, `copy`; the terminal UI's reveal uses the same `app.record`), `set`, `rename`, `mv`, `rm`, `unlock`, `lock`, `passwd`, and members added or removed (`member-add`, `member-remove`). A failure to write the log never blocks the command: it prints one warning (`could not write the read log`) and carries on.
+
+`vault log` flags: `--vault V`, `--since 90m|24h|7d`, `--name KEY`, `--json` (an array of events, oldest first). It reads the live file and the rotated ones; lines that don't parse are skipped.
 
 A successful unlock is handed to the agent with the vault's TTL. `init` does the same with the new key, so the first `set` needs no passphrase; if the agent can't be reached, `init` still creates the vault, prints `The vault is locked: the unlock agent could not be reached. Run: <short name> unlock NAME` and exits 0 (`--json` adds `"unlocked": true|false`).
 
@@ -38,15 +49,51 @@ Before a write, the CLI also re-applies a change of this machine's that lost a r
 
 The socket path must fit in 100 bytes (macOS limit is 104). When `~/Library/Caches/secrets-vault` would be too long, `DefaultDir` falls back to `<temp dir>/secrets-vault-<uid>` (0700, owner-checked). An explicit `SECRETS_VAULT_AGENT_DIR` is never replaced: if it is too long or not private, `unlock` shows the real reason (`the unlock agent cannot start: agent: socket path too long (N bytes, max M). Set SECRETS_VAULT_AGENT_DIR to a short folder that only you can use`). "the unlock agent is not available on this system" is only for platforms with no agent (Windows).
 
+## AI agent setup
+
+- `prime [--json]` prints the six agent rules (with exit code 5 as "stop and tell the human"), the exit codes, and each registered vault with its lock state and time left. It uses the command name it was run as. It reads no secret, never prompts and never starts the unlock agent, so it works with every vault locked. `--json` gives `{command, intro, rules[], exit_codes{}, vaults[{name, description, state, seconds_left, time_left}], note}`; `state` is `locked`, `unlocked` or `unavailable`.
+- `setup claude` writes `<claude dir>/skills/vault/SKILL.md` (frontmatter `name`, `description`; the body says to run `<name> prime` and follow it). `<claude dir>` is `$CLAUDE_CONFIG_DIR`, else `~/.claude`. `--claude-md` also appends a block to `<claude dir>/CLAUDE.md`. `setup agents [--path DIR]` does the block in `DIR/AGENTS.md` (default: the current folder). The skill and block name the command as run (`sv`, `vault` or `secrets-vault`).
+- Additive only (D8): the skill file is recognised as ours by a `<!-- secrets-vault:sha256 ... -->` line at its end (a checksum of what precedes it), and the block by `<!-- secrets-vault:start -->` / `<!-- secrets-vault:end -->` plus a checksum line inside. Nothing else is read for meaning, changed or deleted. Re-running updates in place (`unchanged` if identical). A skill file or block that is not ours, or was edited by hand, is refused (exit 1, with the reason) unless `--force`. A file with unbalanced or repeated markers is refused. Symlinked targets (or a symlinked `skills/vault` folder) are refused. Writes go to a temporary file in the same folder, then rename, keeping the original permissions; new files are 0644.
+- `--remove` deletes the skill file (and its folder if then empty) only if it is ours and unedited (any version); with `--claude-md` it also removes the CLAUDE.md block. For `setup agents`, it removes the block. The block comes out with the blank line added before it, so the file is byte-identical to before; a file that is then empty is deleted (we may have created it). `--dry-run` prints the diff and writes nothing (`--json` adds `dry_run` and `results[{path, action, diff}]`).
+- These are rules an agent follows, not enforcement.
+
 ## Non-interactive use
 
-- `--passphrase-stdin` (any command): each passphrase prompt reads one line of stdin instead of the terminal, without a repeat prompt. Used by scripts and tests. A value piped to `set` comes after any passphrase lines.
+- `--passphrase-stdin` (any command): each passphrase prompt reads one line of stdin instead of the terminal, without a repeat prompt. Used by scripts and tests. It also skips Touch ID for your identity, so the lines are always read in the same order (identity passphrase first, then any new passphrase), whether or not Touch ID is on. `member rm --new-passphrase-stdin` counts as the same thing: it never tries Touch ID either. `set` refuses `--passphrase-stdin` (exit 2, nothing saved): a passphrase and a value never come from the same stream, because when the vault is already unlocked no prompt would read the passphrase line and it would be saved inside the value. Unlock first (`vault unlock VAULT --passphrase-stdin`), then pipe only the value.
 - `set` reads the value from the hidden prompt or from stdin, never from arguments.
 - `rm` needs `--yes` without a terminal; `member rm` needs `--yes` and `--folder-access-removed`, plus `--keep-passphrase`, `--new-passphrase` or `--new-passphrase-stdin` to choose what happens to the vault passphrase (default: dropped).
 - `member approve` needs a terminal (the approver types the requester's fingerprint), or `--fingerprint FP`. A member's first use of a vault someone else added them to needs a terminal or `--signer-fingerprint FP`. `--expect CODE` (any command) checks the vault against a state code.
 - `get` prints the plain value when stdout is not a terminal and a masked placeholder on a terminal unless `--reveal`.
-- Exit code 5 means the vault failed verification (tampered, substituted, rolled back, behind a state code, or this machine lost its record of it). `get`, `info`, `rm` and the rest never report such a vault as "key not found" (4); `list --json` and `search --json` add it as `{"vault": "...", "error": "..."}`.
+- Exit code 5 means the vault failed verification (tampered, substituted, rolled back, behind a state code, a `vault.json` that is damaged or doesn't parse, or this machine lost its record of it), or a key failed its check against the authenticated index (rolled back, missing file, index damaged). `get`, `info`, `rm` and the rest never report such a vault as "key not found" (4), and the index-only commands (`info`, `list`, `search`) honour an unmet `--expect` too; `list --json` and `search --json` add it as `{"vault": "...", "error": "..."}`.
 - A command that pins a vault for the first time adds `"state_code_checked": true|false` and `"first_pin": {vault, state, signed_by, members}` to its `--json` output (and says so on stderr).
+
+## Terminal UI (`vault ui`)
+
+A full-screen interface that runs inside the vault process: no web server, no open port, nothing a browser extension or another program could reach (design decision D9). It needs a terminal on stdin and stdout (otherwise exit 1) and has no `--json`.
+
+```
+ vault ─ 2 vaults · 5 keys                       personal 🔓 3h41m   ebcfo 🔒
+ ┌─ Vaults ───────┐ ┌─ Keys ──────────────────────────────────────────────┐
+ │ ▸ All          │ │ / search                                            │
+ │   personal  🔓 │ │ ▸ XERO_CLIENT_ID      ebcfo   Xero app "EBCFO ..."  │
+ │   ebcfo     🔒 │ │   XERO_CLIENT_SECRET  ebcfo   Xero app "EBCFO ..."  │
+ └────────────────┘ └─────────────────────────────────────────────────────┘
+ ┌─ XERO_CLIENT_ID ────────────────────────────────────────────────────────┐
+ │ Value     ••••••••••••••••   (space: reveal 10s · c: copy, clears in 30s)│
+ └─────────────────────────────────────────────────────────────────────────┘
+```
+
+Keys: `↑/↓` or `j/k` move, `g`/`G` first/last, `Tab` or `←/→` switch between the Vaults and Keys panes, `/` search (names, descriptions, tags, vault; Enter keeps the filter, Esc clears it), `a` add, `e` edit value, `d` describe, `t` tag (edit the comma list), `m` move, `r` rename, `x` delete (asks `y`), `u` unlock, `l` lock (`L` locks every vault), `c` copy (clears after 30 seconds), space reveal, `R` re-read the vaults, `q` or Ctrl-C quit. Hints are always shown at the bottom.
+
+- **Same operations as the commands.** Every action calls the function the matching command calls (`setKey`, `describeKey`, `tagKey`, `moveKey`, `renameKey`, `deleteKey`, `unlockVault`, `lockVault`, `copyValue`, `revealValue` in `internal/cli`), so the index, audit hook, membership verification, trust pins, write guard and exit-code rules are identical. The audit hook for a value read is `revealValue` (one call site for `get`, `copy` and the UI).
+- **Masked by default.** A value shows only after space, hides after 10 seconds, on any selection, focus, search or vault change, on lock, and on exit. It is never written to scrollback: the UI uses the alternate screen and blanks it on exit, including Ctrl-C and a crash. Text from a vault (names, descriptions, values) is shown with control characters and bidirectional overrides replaced, so an entry cannot send escape sequences to the terminal. Typed values and passphrases are shown as bullets.
+- **Locked vaults list their keys** from the index. Opening a value (or `u`, or any write) runs the normal unlock flow: Touch ID, then the personal passphrase, then the vault passphrase, asked inside the UI. Esc cancels the whole operation.
+- **Index state is shown, not hidden.** A locked vault's keys come from the local verified snapshot (see "The authenticated index and the local snapshot"). A locked vault the Mac has not verified shows `unverified` in the header, and `changed` when the folder has changed since; an entry only the folder vouches for is marked `? ` (never verified here) or `~ ` (the folder changed it), and the detail pane has an Index line saying so. Unlocking clears the marks. Describe and tag change a sealed index entry, so on a locked vault they ask to unlock first, like every other write.
+- **Unverified rows are name-only everywhere**, in the UI as in `list`, `search` and `info` (text and `--json`): no description, tags, date or author, shown as `[unverified]`/null with `"verified": false`, because a folder writer wrote them. Descriptions that are shown are cleaned of control, bidi and zero-width characters.
+- **Typed text.** Hidden prompts show a fixed mask (not one dot per character), use a fixed-size buffer that is cleared, and a description that contains the value you just typed is refused (it would be stored in clear). A crash inside the UI wipes the value, blanks the alternate screen and exits with one fixed message; no stack trace or value reaches scrollback. The normal screen is never cleared.
+- **Reads are logged.** Reveal and copy go through the same `revealValue`/`copyValue` as `get` and `copy`, so each is a `vault log` read event.
+- **A vault that fails verification** (exit code 5: changed outside secrets-vault, replaced, rolled back, behind a state code, a missing or damaged index) shows its error in the Keys list and detail pane instead of keys.
+- Works at 80x24 and resizes; below about 48 columns the Vaults pane is hidden. `NO_COLOR` turns colour off (the selected row, focus and errors are marked with glyphs and text, not colour alone).
 
 ## Trust
 
@@ -58,7 +105,17 @@ Design: [design/membership-auth.md](design/membership-auth.md). In short:
 - `pending/` holds the new keys of this machine's unconfirmed rotations, encrypted to its own identity, so a lost race can be repaired. They are deleted when confirmed, on `detach` and on `--accept-rollback`.
 - `unlock --accept-key-change` no longer exists: key changes are signed, so they are verified or refused.
 - A state code (`--expect`) the folder doesn't meet is saved in the pin: every command refuses the vault (exit 5, "behind the state code you were given") until the folder reaches it, or the person runs `vault trust VAULT --accept-rollback` (ue1.9).
-- `vault doctor VAULT` reports sync-conflict copies and key-rotation staging folders. With `--quarantine-staging` it finishes a verified interrupted rotation if every staged file opens under the key, and moves any other staging folder to `quarantine/` in the vault folder (never deletes). Writes blocked by such a folder say so.
+- `vault doctor VAULT [--quarantine-staging] [--adopt NAME] [--set-aside-unknown]` reports sync-conflict copies, key-rotation staging folders and, if the vault is unlocked, index problems (below). A staging folder under the current key whose files don't open is reported as one that **cannot be finished**, with the way out. With `--quarantine-staging` it finishes a verified interrupted rotation if every staged file opens under the key, and moves any other staging folder to `quarantine/` in the vault folder (never deletes). Writes blocked by such a folder say so. A conflict copy of `index.json` whose entries are all in the index already is called "safe to delete". It also explains what makes the write guard refuse changes (secrets sealed under a key this vault never had, rotation folders for one, a newer verified vault.json copy) and why; `--set-aside-unknown` moves the first two into `quarantine/` only at a terminal: it shows the vault's head and members, warns that an unknown-key file is what an unseen removal looks like, and asks the person to type the current state code that a member known to be current (never someone being removed, never this Mac) reads out. The folder must equal or extend it; a folder behind the code, such as a restored old copy, is refused, as is a newer verified vault.json copy. There is no flag or script path: it is a human step, backed by the rule that an agent stops and tells the person on exit code 5, not a barrier against software running as you. It records a `set-aside` event in the read log. `--quarantine-staging` moves aside only rotation folders this vault's history accounts for (a finished or unfinishable rotation of its own, retired keys); a folder for a key the history never had is what the write guard counts as a newer state, so it goes through the `--set-aside-unknown` step, which requires a deliberate human step.
+
+## The authenticated index and the local snapshot
+
+Design: [design/index-auth.md](design/index-auth.md). Format 3 vaults carry a MAC on every index entry and a version in every secret file.
+
+- **Locked** (`list`, `search`, `info`, name resolution): nothing can be verified without the vault key, and these commands never prompt. They show what this machine **last verified** (the snapshot in `index/<vault id>.json` next to `trust/`) and flag the rest: `--json` rows have `verified` (false for a name only the folder claims), `pending_change` (the folder holds a different entry than the verified one shown, whose values are shown), and `index_state` (`verified`, `pending-changes`, `unverified`, `private`, `legacy`). A note on stderr says so once per vault. Every command that holds the key (`unlock`, `get`, `set`, `run`, ...) verifies the index and refreshes the snapshot, so `unlock` is how a vault becomes verified on this Mac.
+- **Name resolution** (a name in several vaults): verified entries beat unverified ones; ambiguity is declared (exit 2) only among entries of the same class, and never causes an unlock prompt for a vault you didn't name.
+- **Reading a key** checks its file against the verified entry. Exit 5 (never "not found") when the file is older than the entry or the snapshot (rolled back, or not synced yet), when a listed key's file is missing, when the entry is older than what this Mac verified, or when the index is missing or damaged and the snapshot doesn't vouch for the key. A file newer than its entry is readable (the index lags) with a warning. Names the index doesn't list are not keys; `doctor` reports their files and `doctor VAULT --adopt NAME` gives one a signed entry after you confirm.
+- **Writing** (`set`, `describe`, `tag`, `rm`, `rename`, `mv`) unlocks the vault (entries are sealed with the vault key, so `describe` and `tag` no longer work locked), then merges your change entry by entry with a compare-and-swap, so changes from other machines are kept. If someone changed the same key at the same moment you are told. `rm` leaves a signed tombstone until the next key rotation.
+- **`vault upgrade VAULT [--yes]`** moves a vault made by an earlier version (format 2) to format 3: files are stamped with versions, the index is sealed (its labels taken as they are, once), and a signed record makes the format part of the vault's history. Any member can run it; a personal vault needs only your identity unlock. Until then reads work (with a notice) and every write exits 1 with `Run: vault upgrade NAME`. Every member must upgrade their secrets-vault first: older builds refuse the upgraded vault. `trust --accept-rollback` and `detach` forget the snapshot.
 
 ## Testing
 

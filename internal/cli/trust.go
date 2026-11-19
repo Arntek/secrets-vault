@@ -47,7 +47,16 @@ func (a *app) loadVault(v *vaultRef) (*members.Chain, *format.VaultFile, error) 
 	case errors.Is(err, format.ErrUnsupportedVersion):
 		return nil, nil, failf("vault '%s' was saved by a newer secrets-vault. Upgrade to open it: brew upgrade secrets-vault (Homebrew) or npm update -g secrets-vault (npm)", v.name)
 	case errors.Is(err, format.ErrUnsafeDir):
-		return nil, nil, verifyErrf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it", v.name)
+		if format.CheckStructuralDirs(v.dir) == nil {
+			// The trash, requests/ or a staging folder: a key change sets it aside.
+			return nil, nil, verifyErrf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it. Nothing was read or written. A key change (%s passwd %s, or %s member rm) renames it aside; or replace it with a real folder", v.name, a.prog, v.name, a.prog)
+		}
+		return nil, nil, verifyErrf("vault '%s': a folder inside it is a symlink or is not owned by you; refusing to use it. Nothing is read or written (not even by key changes) until it is fixed: replace the link with the real folder, or restore it from the provider's version history", v.name)
+	case errors.Is(err, format.ErrMalformed), errors.Is(err, format.ErrTooLarge):
+		// A vault.json that exists but doesn't parse is as much "the folder
+		// was tampered with" as a bad signature (ue1.12): exit 5, with the
+		// innocent explanation (a half-synced file) named too.
+		return nil, nil, verifyErrf("vault '%s': vault.json is damaged or was altered (%v). If a sync is still running, wait and try again; otherwise restore it from the provider's version history. Nothing was read or written", v.name, pathless(err))
 	}
 	return nil, nil, failf("cannot open vault '%s': %v", v.name, vaultErr(err))
 }
@@ -99,10 +108,21 @@ func (a *app) open(v *vaultRef) (*format.VaultFile, error) {
 	// refuse until it has (ue1.9).
 	expectMet := false
 	if pin != nil && pin.Expect != nil {
-		if !pin.Expect.Met(c) {
-			return nil, verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, pin.Expect, members.ErrBehindCode)
+		switch {
+		case pin.Expect.Met(c):
+			expectMet = true
+		case a.expectCode != "" && a.codeMet(v, c, a.expectCode):
+			// A new, correct code replaces one that was mistyped or that the
+			// folder had not reached: the person just gave it, out of band.
+			cleared := *pin
+			cleared.Expect = nil
+			if err := ts.Save(&cleared); err != nil {
+				return nil, err
+			}
+			pin = &cleared
+		default:
+			return nil, a.expectRefusal(v, c, pin.Expect)
 		}
-		expectMet = true
 	}
 	cl := members.Classify(c, pin)
 	v.chain, v.pin, v.class = c, pin, cl
@@ -155,12 +175,9 @@ func (a *app) open(v *vaultRef) (*format.VaultFile, error) {
 // command refuses the vault until the folder reaches it (ue1.9).
 func (a *app) applyExpect(v *vaultRef, code string) (bool, error) {
 	c := v.chain
-	if !strings.Contains(code, "@") {
-		code = c.File.Name + "@" + code
-	}
-	exp, err := members.ParseStateCode(code)
+	exp, err := a.parseCodeFor(v, c, code)
 	if err != nil {
-		return false, usageErrf("%v", err)
+		return false, err
 	}
 	if exp.Met(c) {
 		return true, nil
@@ -175,7 +192,44 @@ func (a *app) applyExpect(v *vaultRef, code string) (bool, error) {
 		}
 		v.pin = &pending
 	}
-	return false, verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, exp, members.ErrBehindCode)
+	return false, a.expectRefusal(v, c, exp)
+}
+
+// expectRefusal is the refusal for a state code the folder does not meet.
+// A code whose entry exists in this folder with a different hash does not
+// match this vault's history (a typo, or a folder whose history differs from
+// the code's author's): "behind" would mislead. A code beyond the folder's
+// last entry is a folder that is behind.
+func (a *app) expectRefusal(v *vaultRef, c *members.Chain, exp *members.Expectation) error {
+	if exp.Seq < len(c.File.Log) {
+		return verifyErrf("vault '%s' (expected %s%s): that code doesn't match this vault's history at entry %d. It may have been mistyped, or this folder's history differs from the one the code came from. Nothing was read or written. "+
+			"Run '%s trust %s --expect CODE' again with the exact code from the member (it replaces this one), or check with the member who gave you the code",
+			v.name, c.File.Name, exp, exp.Seq, a.prog, v.name)
+	}
+	return verifyErrf("vault '%s' (expected %s%s): %v", v.name, c.File.Name, exp, members.ErrBehindCode)
+}
+
+// parseCodeFor parses a state code for v: the vault name in it (or none) must
+// be this vault's, so a code meant for another vault never gets pinned.
+func (a *app) parseCodeFor(v *vaultRef, c *members.Chain, code string) (*members.Expectation, error) {
+	if i := strings.IndexByte(code, '@'); i < 0 {
+		code = c.File.Name + "@" + code
+	} else if name := strings.TrimSpace(code[:i]); name != c.File.Name && name != v.name {
+		return nil, usageErrf("that state code is for a different vault than '%s'", v.name)
+	} else {
+		code = c.File.Name + code[i:]
+	}
+	exp, err := members.ParseStateCode(code)
+	if err != nil {
+		return nil, usageErrf("%v", err)
+	}
+	return exp, nil
+}
+
+// codeMet reports whether code is valid for v and the folder meets it.
+func (a *app) codeMet(v *vaultRef, c *members.Chain, code string) bool {
+	exp, err := a.parseCodeFor(v, c, code)
+	return err == nil && exp.Met(c)
 }
 
 // firstPinInfo is the --json record of a first-use pin.
@@ -263,7 +317,11 @@ func (a *app) afterWrite(v *vaultRef, c *members.Chain, written ...format.LogEnt
 // signed by alice".
 func headLine(c *members.Chain) string {
 	h := c.Head()
-	return fmt.Sprintf("%s@%d, %s, signed by %s", c.File.Name, h.Seq, h.Time.Local().Format("2006-01-02 15:04"), h.By)
+	s := fmt.Sprintf("%s@%d, %s, signed by %s", c.File.Name, h.Seq, h.Time.Local().Format("2006-01-02 15:04"), h.By)
+	if h.Format == format.LegacyVaultVersion {
+		s += ", format 2 (not upgraded)" // so a state-code comparison catches a cut-off chain
+	}
+	return s
 }
 
 // printMembers lists the head's members with fingerprints on stderr.
@@ -399,7 +457,10 @@ func (a *app) repairLostRace(v *vaultRef, key *crypto.VaultKey) (*crypto.VaultKe
 		defer clear(p)
 		return a.passphraseWrapper(p)
 	}
-	res, err := members.Rebase(v.dir, v.chain, key, un, v.class.Lost, pending, ask, ps, a.now())
+	if err := a.setAsideConflicts(v, key); err != nil {
+		return nil, err
+	}
+	res, err := members.Rebase(v.dir, v.chain, key, un, v.class.Lost, pending, a.trustedEntries(v), ask, ps, a.now())
 	if res != nil && len(res.Written) > 0 {
 		if serr := a.afterWrite(v, res.Chain, res.Written...); serr != nil && err == nil {
 			err = serr
@@ -430,6 +491,9 @@ func (a *app) repairLostRace(v *vaultRef, key *crypto.VaultKey) (*crypto.VaultKe
 // finish a verified interrupted rotation, then the write guard.
 func (a *app) prepareWrite(v *vaultRef, key *crypto.VaultKey) error {
 	c := v.chain
+	if legacyChain(c) && !v.allowLegacy {
+		return failf("vault '%s' uses the older format and must be upgraded before it can be changed. Run: %s upgrade %s (%s)", v.name, a.prog, v.name, upgradeHint)
+	}
 	if _, rotation, ok := c.KeyIntroducedAt(c.Head().KeyID); ok && rotation {
 		if _, err := crypto.RecoverRotation(v.dir, key); err != nil {
 			return failf("vault '%s' has an unfinished key rotation that could not be completed: %v. "+
@@ -447,9 +511,9 @@ func (a *app) prepareWrite(v *vaultRef, key *crypto.VaultKey) error {
 	}
 	if rep.Blocking() {
 		if len(rep.Unknown) == 0 && !rep.NewerCopy {
-			return verifyErrf("vault '%s': %v. If no member is changing the vault key right now, move the leftover folder aside with: %s doctor %s --quarantine-staging", v.name, members.ErrNewerState, a.prog, v.name)
+			return verifyErrf("vault '%s': %v. See why and how to clear it: %s doctor %s", v.name, members.ErrNewerState, a.prog, v.name)
 		}
-		return verifyErrf("vault '%s': %v", v.name, members.ErrNewerState)
+		return verifyErrf("vault '%s': %v. See why and how to clear it: %s doctor %s", v.name, members.ErrNewerState, a.prog, v.name)
 	}
 	a.warnExposed(v, rep)
 	return nil

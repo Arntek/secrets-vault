@@ -135,6 +135,13 @@ type KeyWrapper interface {
 // Sealer encrypts and decrypts secret values with a vault key. Get one
 // with NewSealer, which binds it to a key name.
 type Sealer interface {
+	// Seal writes the unversioned (stanza v2) form: identity files use it.
 	Seal(key *VaultKey, plaintext []byte) ([]byte, error)
+	// SealVersion writes a secret file that carries version (1 to
+	// format.MaxCounter) in its header (stanza v3, docs/design/index-auth.md).
+	SealVersion(key *VaultKey, plaintext []byte, version uint32) ([]byte, error)
 	Open(key *VaultKey, ciphertext []byte) ([]byte, error)
+	// OpenVersion is Open that also returns the file's version (0 for a
+	// file in the unversioned form).
+	OpenVersion(key *VaultKey, ciphertext []byte) ([]byte, uint32, error)
 }

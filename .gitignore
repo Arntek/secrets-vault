@@ -31,3 +31,9 @@ docs/private/
 # Go
 /coverage.out
 *.test
+
+# npm package: the downloaded program and local installs
+/packaging/npm/vendor/
+/packaging/npm/LICENSE
+node_modules/
+__pycache__/
