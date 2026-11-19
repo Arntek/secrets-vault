@@ -508,7 +508,7 @@ func (a *app) identityUnlockWrapper() (crypto.KeyWrapper, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if tw := a.touchWrapper(""); tw != nil {
+	if tw := a.touchWrapper(""); tw != nil && !a.passStdin {
 		if un, err := store.Unlock(tw); err == nil {
 			un.Destroy()
 			return tw, func() {}, nil

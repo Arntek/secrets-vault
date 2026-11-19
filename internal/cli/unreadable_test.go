@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -214,4 +215,22 @@ func TestNewPassphraseStdinSkipsTouchID(t *testing.T) {
 	if owner.touch.unwraps != before {
 		t.Fatalf("Touch ID was used with --new-passphrase-stdin (%d unwraps)", owner.touch.unwraps-before)
 	}
+}
+
+// identity export with --passphrase-stdin reads "identity passphrase, export
+// passphrase" in that order even where Touch ID could open the identity.
+func TestIdentityExportStdinSkipsTouchID(t *testing.T) {
+	skipWindows(t)
+	e, other := newEnv(t), newEnv(t)
+	e.touch.avail = true
+	e.initVault("main")
+	e.mustRunIn(testPass+"\n", "touchid", "on", "--passphrase-stdin")
+	file := filepath.Join(e.home, "id.export")
+	before := e.touch.unwraps
+	e.mustRunIn(testPass+"\ntransfer passphrase 9\n", "identity", "export", file, "--passphrase-stdin")
+	if e.touch.unwraps != before {
+		t.Fatalf("Touch ID was used with --passphrase-stdin (%d unwraps)", e.touch.unwraps-before)
+	}
+	// The export passphrase is the second line: the file imports with it.
+	other.mustRunIn("transfer passphrase 9\nsecond mac pass\n", "identity", "import", file, "--passphrase-stdin")
 }
