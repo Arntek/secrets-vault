@@ -197,3 +197,21 @@ func TestPassphraseStdinSkipsTouchID(t *testing.T) {
 	// The identity line was read as the identity passphrase (the command
 	// succeeded), so the next line is the new vault passphrase.
 }
+
+// member rm with only --new-passphrase-stdin is scripted too: Touch ID is not
+// tried, the identity passphrase is the first line and the new vault
+// passphrase the second.
+func TestNewPassphraseStdinSkipsTouchID(t *testing.T) {
+	skipWindows(t)
+	owner, dan := newEnv(t), newEnv(t)
+	owner.touch.avail = true
+	vdir := owner.initVault("team")
+	owner.mustRunIn(testPass+"\n", "touchid", "on", "--passphrase-stdin")
+	join(t, owner, dan, "team", vdir, "dan")
+	owner.mustRun("lock", "--all")
+	before := owner.touch.unwraps
+	owner.mustRunIn(testPass+"\nbrand new vault passphrase\n", "member", "rm", "team", "dan", "--yes", "--folder-access-removed", "--new-passphrase-stdin")
+	if owner.touch.unwraps != before {
+		t.Fatalf("Touch ID was used with --new-passphrase-stdin (%d unwraps)", owner.touch.unwraps-before)
+	}
+}

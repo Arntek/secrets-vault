@@ -242,7 +242,9 @@ func (a *app) dispatch(c *command, args []string) int {
 		return a.fail(err, c)
 	}
 	a.asJSON = p.has("json")
-	a.passStdin = p.has("passphrase-stdin")
+	// Either flag means scripted lines: every passphrase is read from stdin in
+	// a fixed order (identity first), and Touch ID is never tried.
+	a.passStdin = p.has("passphrase-stdin") || p.has("new-passphrase-stdin")
 	a.expectCode = p.str("expect")
 	a.signerFP = p.str("signer-fingerprint")
 	a.noDialog = p.has("no-dialog")
